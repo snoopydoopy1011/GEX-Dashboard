@@ -3131,8 +3131,9 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     div next to the TradingView candle chart with a shared visible price range.
 
     Calls contribute positive net GEX (dealers long gamma, green), puts
-    contribute negative (dealers short gamma, red). Bars are aggregated per
-    strike interval and limited to the configured strike_range around spot.
+    contribute negative (dealers short gamma, red). Each row in calls/puts is
+    summed at its native strike — SPY's native grid is $1, SPX's is $5, so the
+    resulting bar resolution naturally matches the underlying.
     """
     empty = go.Figure()
     empty.update_layout(
@@ -3145,43 +3146,56 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
        (puts is None or getattr(puts, 'empty', True)):
         return empty.to_json()
 
-    if selected_expiries and 'expiration_date' in (calls.columns if calls is not None else []):
+    if calls is not None and not calls.empty and selected_expiries and 'expiration_date' in calls.columns:
         calls = calls[calls['expiration_date'].isin(selected_expiries)]
-    if selected_expiries and 'expiration_date' in (puts.columns if puts is not None else []):
+    if puts is not None and not puts.empty and selected_expiries and 'expiration_date' in puts.columns:
         puts = puts[puts['expiration_date'].isin(selected_expiries)]
 
     min_strike = S * (1 - strike_range)
     max_strike = S * (1 + strike_range)
 
-    def filter_range(df):
+    def strike_sum(df):
         if df is None or df.empty or 'GEX' not in df.columns:
-            return df.iloc[0:0] if df is not None else df
-        return df[(df['strike'] >= min_strike) & (df['strike'] <= max_strike)]
+            return {}
+        f = df[(df['strike'] >= min_strike) & (df['strike'] <= max_strike)]
+        if f.empty:
+            return {}
+        return f.groupby('strike')['GEX'].sum().to_dict()
 
-    calls_f = filter_range(calls)
-    puts_f = filter_range(puts)
-
-    all_strikes = list(calls_f['strike']) + list(puts_f['strike']) if (calls_f is not None and puts_f is not None) else []
-    if not all_strikes:
+    call_map = strike_sum(calls)
+    put_map = strike_sum(puts)
+    strikes = sorted(set(call_map) | set(put_map))
+    if not strikes:
         return empty.to_json()
 
-    interval = get_strike_interval(all_strikes)
-    calls_agg = aggregate_by_strike(calls_f[['strike', 'GEX']].copy(), ['GEX'], interval) if calls_f is not None and not calls_f.empty else None
-    puts_agg = aggregate_by_strike(puts_f[['strike', 'GEX']].copy(), ['GEX'], interval) if puts_f is not None and not puts_f.empty else None
-
-    call_map = dict(zip(calls_agg['strike'], calls_agg['GEX'])) if calls_agg is not None and not calls_agg.empty else {}
-    put_map = dict(zip(puts_agg['strike'], puts_agg['GEX'])) if puts_agg is not None and not puts_agg.empty else {}
-
-    strikes = sorted(set(call_map) | set(put_map))
-    net = [call_map.get(s, 0) - put_map.get(s, 0) for s in strikes]
+    call_vals = [call_map.get(s, 0) for s in strikes]
+    put_vals = [put_map.get(s, 0) for s in strikes]
+    net = [c - p for c, p in zip(call_vals, put_vals)]
     colors = [call_color if v >= 0 else put_color for v in net]
+    customdata = list(zip(call_vals, put_vals))
+
+    native_interval = 1.0
+    if len(strikes) >= 2:
+        diffs = [round(strikes[i] - strikes[i - 1], 4) for i in range(1, len(strikes))]
+        diffs = [d for d in diffs if d > 0]
+        if diffs:
+            from collections import Counter
+            native_interval = Counter(diffs).most_common(1)[0][0]
+    bar_width = max(native_interval * 0.85, 0.1)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=net, y=strikes,
         orientation='h',
+        width=bar_width,
         marker=dict(color=colors, line=dict(width=0)),
-        hovertemplate='Strike %{y}<br>Net GEX %{x:,.0f}<extra></extra>',
+        customdata=customdata,
+        hovertemplate=(
+            'Strike %{y}<br>'
+            'Net GEX %{x:,.0f}<br>'
+            'Call GEX %{customdata[0]:,.0f}<br>'
+            'Put GEX %{customdata[1]:,.0f}<extra></extra>'
+        ),
         showlegend=False,
     ))
     fig.add_vline(x=0, line_color='#555', line_width=1)
@@ -3191,7 +3205,6 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
         paper_bgcolor='#1E1E1E',
         plot_bgcolor='#1E1E1E',
         margin=dict(l=4, r=4, t=4, b=24),
-        bargap=0.15,
         height=680,
         xaxis=dict(
             zeroline=False,
@@ -3207,7 +3220,6 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
             tickfont=dict(size=9),
             side='right',
             range=[min_strike, max_strike],
-            fixedrange=True,
         ),
     )
     return fig.to_json()
@@ -8115,12 +8127,15 @@ def index():
                 // Toolbar + title (only built once)
                 buildTVToolbar(container, candles, upColor, downColor);
                 ensureTVHistoricalOverlay();
-                tvPriceChart.timeScale().subscribeVisibleLogicalRangeChange(() => scheduleTVHistoricalOverlayDraw());
+                tvPriceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+                    scheduleTVHistoricalOverlayDraw();
+                    scheduleGexPanelSync();
+                });
                 if (!tvHistoricalOverlayDomEventsBound) {
                     tvHistoricalOverlayDomEventsBound = true;
-                    container.addEventListener('wheel', () => scheduleTVHistoricalOverlayDraw(), { passive: true });
-                    container.addEventListener('mouseup', () => scheduleTVHistoricalOverlayDraw());
-                    container.addEventListener('touchend', () => scheduleTVHistoricalOverlayDraw(), { passive: true });
+                    container.addEventListener('wheel',    () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
+                    container.addEventListener('mouseup',  () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); });
+                    container.addEventListener('touchend', () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
                     container.addEventListener('mousemove', (event) => updateTVHistoricalTooltip(event));
                     container.addEventListener('mouseleave', () => {
                         const tooltip = ensureTVHistoricalTooltip();
@@ -8208,6 +8223,8 @@ def index():
 
             tvApplyAutoscale();
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
+            // Re-sync GEX side panel after candles + autoscale settle
+            scheduleGexPanelSync();
 
             // fitContent on first render, when auto-range is ON, or when explicitly forced (ticker change)
             if (tvAutoRange || isFirstRender || tvForceFit) {
@@ -8274,10 +8291,41 @@ def index():
             try {
                 const parsed = typeof panelJson === 'string' ? JSON.parse(panelJson) : panelJson;
                 const config = { displayModeBar: false, responsive: true };
-                Plotly.react(target, parsed.data || [], parsed.layout || {}, config);
+                Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
+                    .then(() => syncGexPanelYAxisToTV());
             } catch (e) {
                 console.warn('gex side panel render failed', e);
             }
+        }
+
+        // Mirror the TradingView chart's visible price range onto the Plotly
+        // side panel so bars line up with candles at the same strike.
+        let _gexSyncScheduled = false;
+        function syncGexPanelYAxisToTV() {
+            const panel = document.getElementById('gex-side-panel');
+            const tvEl  = document.getElementById('price-chart');
+            if (!panel || !tvEl || !tvPriceChart || !tvCandleSeries) return;
+            try {
+                const h = tvEl.clientHeight;
+                if (!h) return;
+                const top = tvCandleSeries.coordinateToPrice(0);
+                const bot = tvCandleSeries.coordinateToPrice(h);
+                if (top == null || bot == null) return;
+                const lo = Math.min(top, bot);
+                const hi = Math.max(top, bot);
+                if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return;
+                Plotly.relayout(panel, { 'yaxis.range': [lo, hi] });
+            } catch (e) {
+                // TV chart may not be ready yet; skip silently
+            }
+        }
+        function scheduleGexPanelSync() {
+            if (_gexSyncScheduled) return;
+            _gexSyncScheduled = true;
+            requestAnimationFrame(() => {
+                _gexSyncScheduled = false;
+                syncGexPanelYAxisToTV();
+            });
         }
 
         // ── Throttled price history fetcher ───────────────────────────────────
@@ -8826,8 +8874,9 @@ def index():
                 }
             });
             scheduleTVHistoricalOverlayDraw();
+            scheduleGexPanelSync();
         });
-        
+
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
             clearInterval(updateInterval);
