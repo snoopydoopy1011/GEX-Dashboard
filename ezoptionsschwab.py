@@ -3124,6 +3124,95 @@ def build_historical_levels_overlay(ticker, display_date, chart_times, latest_pr
     return historical_points, historical_expected_moves
 
 
+def create_gex_side_panel(calls, puts, S, strike_range=0.02,
+                          call_color='#00FF00', put_color='#FF0000',
+                          selected_expiries=None):
+    """Horizontal-bar GEX panel keyed to strike, intended to render in a sibling
+    div next to the TradingView candle chart with a shared visible price range.
+
+    Calls contribute positive net GEX (dealers long gamma, green), puts
+    contribute negative (dealers short gamma, red). Bars are aggregated per
+    strike interval and limited to the configured strike_range around spot.
+    """
+    empty = go.Figure()
+    empty.update_layout(
+        paper_bgcolor='#1E1E1E', plot_bgcolor='#1E1E1E',
+        margin=dict(l=4, r=4, t=4, b=24),
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+    )
+
+    if (calls is None or getattr(calls, 'empty', True)) and \
+       (puts is None or getattr(puts, 'empty', True)):
+        return empty.to_json()
+
+    if selected_expiries and 'expiration_date' in (calls.columns if calls is not None else []):
+        calls = calls[calls['expiration_date'].isin(selected_expiries)]
+    if selected_expiries and 'expiration_date' in (puts.columns if puts is not None else []):
+        puts = puts[puts['expiration_date'].isin(selected_expiries)]
+
+    min_strike = S * (1 - strike_range)
+    max_strike = S * (1 + strike_range)
+
+    def filter_range(df):
+        if df is None or df.empty or 'GEX' not in df.columns:
+            return df.iloc[0:0] if df is not None else df
+        return df[(df['strike'] >= min_strike) & (df['strike'] <= max_strike)]
+
+    calls_f = filter_range(calls)
+    puts_f = filter_range(puts)
+
+    all_strikes = list(calls_f['strike']) + list(puts_f['strike']) if (calls_f is not None and puts_f is not None) else []
+    if not all_strikes:
+        return empty.to_json()
+
+    interval = get_strike_interval(all_strikes)
+    calls_agg = aggregate_by_strike(calls_f[['strike', 'GEX']].copy(), ['GEX'], interval) if calls_f is not None and not calls_f.empty else None
+    puts_agg = aggregate_by_strike(puts_f[['strike', 'GEX']].copy(), ['GEX'], interval) if puts_f is not None and not puts_f.empty else None
+
+    call_map = dict(zip(calls_agg['strike'], calls_agg['GEX'])) if calls_agg is not None and not calls_agg.empty else {}
+    put_map = dict(zip(puts_agg['strike'], puts_agg['GEX'])) if puts_agg is not None and not puts_agg.empty else {}
+
+    strikes = sorted(set(call_map) | set(put_map))
+    net = [call_map.get(s, 0) - put_map.get(s, 0) for s in strikes]
+    colors = [call_color if v >= 0 else put_color for v in net]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=net, y=strikes,
+        orientation='h',
+        marker=dict(color=colors, line=dict(width=0)),
+        hovertemplate='Strike %{y}<br>Net GEX %{x:,.0f}<extra></extra>',
+        showlegend=False,
+    ))
+    fig.add_vline(x=0, line_color='#555', line_width=1)
+    fig.add_hline(y=S, line_color='#888', line_dash='dot', line_width=1)
+
+    fig.update_layout(
+        paper_bgcolor='#1E1E1E',
+        plot_bgcolor='#1E1E1E',
+        margin=dict(l=4, r=4, t=4, b=24),
+        bargap=0.15,
+        height=680,
+        xaxis=dict(
+            zeroline=False,
+            gridcolor='#2A2A2A',
+            color='#888',
+            tickfont=dict(size=9),
+            title=dict(text='Net GEX', font=dict(size=10, color='#888')),
+        ),
+        yaxis=dict(
+            zeroline=False,
+            gridcolor='#2A2A2A',
+            color='#aaa',
+            tickfont=dict(size=9),
+            side='right',
+            range=[min_strike, max_strike],
+            fixedrange=True,
+        ),
+    )
+    return fig.to_json()
+
+
 def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_types=[],
                               exposure_levels_count=3, call_color='#00FF00', put_color='#FF0000',
                               strike_range=0.1, use_heikin_ashi=False,
@@ -4962,6 +5051,30 @@ def index():
             margin-bottom: 5px;
             grid-column: 1 / -1;
         }
+        .price-chart-row {
+            display: flex;
+            flex-direction: row;
+            gap: 4px;
+            align-items: stretch;
+        }
+        .price-chart-row > #price-chart { flex: 1 1 78%; min-width: 0; }
+        .price-chart-row > .gex-side-panel-wrap { flex: 0 0 22%; min-width: 180px; max-width: 320px; }
+        .gex-side-panel-wrap {
+            background: #1E1E1E;
+            border-radius: 0;
+            height: 680px;
+            display: flex;
+            flex-direction: column;
+        }
+        .gex-side-panel-header {
+            padding: 6px 8px;
+            font-size: 11px;
+            color: #888;
+            border-bottom: 1px solid #2A2A2A;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        #gex-side-panel { flex: 1; min-height: 0; }
         #price-chart {
             padding: 0 !important;
             background-color: #1E1E1E !important;
@@ -5801,7 +5914,13 @@ def index():
         <div class="chart-grid" id="chart-grid">
             <div class="price-chart-container">
                 <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
-                <div class="chart-container" id="price-chart"></div>
+                <div class="price-chart-row">
+                    <div class="chart-container" id="price-chart"></div>
+                    <div class="gex-side-panel-wrap">
+                        <div class="gex-side-panel-header">Net GEX by Strike</div>
+                        <div id="gex-side-panel"></div>
+                    </div>
+                </div>
                 <div class="tv-sub-pane" id="rsi-pane" style="display:none">
                     <div class="tv-sub-pane-header">RSI 14</div>
                     <div id="rsi-chart" style="height:110px"></div>
@@ -8119,9 +8238,16 @@ def index():
                 const toolbarContainer = document.createElement('div');
                 toolbarContainer.className = 'tv-toolbar-container';
                 toolbarContainer.id = 'tv-toolbar-container';
+                const row = document.createElement('div');
+                row.className = 'price-chart-row';
                 const chartDiv = document.createElement('div');
                 chartDiv.className = 'chart-container';
                 chartDiv.id = 'price-chart';
+                const panelWrap = document.createElement('div');
+                panelWrap.className = 'gex-side-panel-wrap';
+                panelWrap.innerHTML = '<div class="gex-side-panel-header">Net GEX by Strike</div><div id="gex-side-panel"></div>';
+                row.appendChild(chartDiv);
+                row.appendChild(panelWrap);
                 const rsiPane = document.createElement('div');
                 rsiPane.className = 'tv-sub-pane'; rsiPane.id = 'rsi-pane'; rsiPane.style.display = 'none';
                 rsiPane.innerHTML = '<div class="tv-sub-pane-header">RSI 14</div><div id="rsi-chart" style="height:110px"></div>';
@@ -8129,7 +8255,7 @@ def index():
                 macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
                 macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
                 priceContainer.appendChild(toolbarContainer);
-                priceContainer.appendChild(chartDiv);
+                priceContainer.appendChild(row);
                 priceContainer.appendChild(rsiPane);
                 priceContainer.appendChild(macdPane);
                 document.getElementById('chart-grid').insertBefore(priceContainer, document.getElementById('chart-grid').firstChild);
@@ -8138,6 +8264,19 @@ def index():
             const parsed = typeof priceJson === 'string' ? JSON.parse(priceJson) : priceJson;
             if (!parsed.error) {
                 renderTVPriceChart(parsed);
+            }
+        }
+
+        function renderGexSidePanel(panelJson) {
+            if (!panelJson) return;
+            const target = document.getElementById('gex-side-panel');
+            if (!target) return;
+            try {
+                const parsed = typeof panelJson === 'string' ? JSON.parse(panelJson) : panelJson;
+                const config = { displayModeBar: false, responsive: true };
+                Plotly.react(target, parsed.data || [], parsed.layout || {}, config);
+            } catch (e) {
+                console.warn('gex side panel render failed', e);
             }
         }
 
@@ -8186,6 +8325,9 @@ def index():
             .then(priceResp => {
                 if (!priceResp.error && priceResp.price) {
                     applyPriceData(priceResp.price);
+                }
+                if (priceResp && priceResp.gex_panel) {
+                    renderGexSidePanel(priceResp.gex_panel);
                 }
             })
             .catch(err => console.error('Error fetching price chart:', err))
@@ -9352,7 +9494,20 @@ def update_price():
             price_chart = _json.dumps(pc_dict)
         except Exception:
             pass
-        return jsonify({'price': price_chart})
+
+        gex_panel = None
+        S_for_panel = cached.get('S')
+        if calls is not None and puts is not None and S_for_panel is not None:
+            try:
+                gex_panel = create_gex_side_panel(
+                    calls, puts, S_for_panel, strike_range=strike_range,
+                    call_color=call_color, put_color=put_color,
+                )
+            except Exception as e:
+                print(f"[gex_panel] build failed: {e}")
+                gex_panel = None
+
+        return jsonify({'price': price_chart, 'gex_panel': gex_panel})
     except Exception as e:
         import traceback
         traceback.print_exc()
