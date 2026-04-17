@@ -4,5 +4,6 @@ plotly
 python-dotenv
 pytz
 scipy
-schwabdev 
+schwabdev
 kaleido
+certifi

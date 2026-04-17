@@ -6,8 +6,21 @@ from bisect import bisect_left
 from datetime import datetime, timedelta
 import math
 import time
-import schwabdev
 import os
+
+# python.org Python on macOS ships without a default CA bundle unless
+# "Install Certificates.command" has been run, so ssl.create_default_context()
+# returns an empty trust store and the Schwab streaming websocket fails with
+# "[SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain".
+# Pointing SSL_CERT_FILE at certifi's bundle makes the app self-healing.
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+except ImportError:
+    pass
+
+import schwabdev
 from dotenv import load_dotenv
 import pytz
 import sqlite3
