@@ -3181,7 +3181,7 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
         if diffs:
             from collections import Counter
             native_interval = Counter(diffs).most_common(1)[0][0]
-    bar_width = max(native_interval * 0.85, 0.1)
+    bar_width = max(native_interval * 0.3, 0.05)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
