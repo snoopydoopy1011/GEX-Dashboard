@@ -3294,6 +3294,75 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     return out
 
 
+def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None):
+    """High-level trader KPIs + a short alerts list, for the header strip.
+
+    Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
+    between the chart lines and the KPI strip.
+    """
+    out = {
+        'net_gex': None,              # dollar-notional net GEX in the window
+        'hedge_per_1pct': None,       # dollar-notional dealer hedge for ±1% move
+        'regime': None,               # 'Long Gamma' | 'Short Gamma'
+        'em_move': None, 'em_upper': None, 'em_lower': None, 'em_pct': None,
+        'call_wall': None, 'put_wall': None, 'gamma_flip': None,
+        'spot': float(S) if S is not None else None,
+        'alerts': [],
+    }
+    if S is None:
+        return out
+
+    levels = compute_key_levels(calls, puts, S, selected_expiries=selected_expiries)
+    if levels.get('call_wall'):  out['call_wall']  = levels['call_wall']['price']
+    if levels.get('put_wall'):   out['put_wall']   = levels['put_wall']['price']
+    if levels.get('gamma_flip'): out['gamma_flip'] = levels['gamma_flip']['price']
+    if levels.get('em_upper'):
+        out['em_upper'] = levels['em_upper']['price']
+        out['em_move']  = levels['em_upper']['move']
+    if levels.get('em_lower'):   out['em_lower']   = levels['em_lower']['price']
+    if out['em_move'] is not None and S:
+        out['em_pct'] = round(out['em_move'] / S * 100, 2)
+
+    def _window_sum(df):
+        if df is None or df.empty or 'GEX' not in df.columns:
+            return 0.0
+        if selected_expiries and 'expiration_date' in df.columns:
+            df = df[df['expiration_date'].isin(selected_expiries)]
+        lo = S * (1 - strike_range); hi = S * (1 + strike_range)
+        f = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
+        return float(f['GEX'].sum()) if not f.empty else 0.0
+
+    call_gex = _window_sum(calls)
+    put_gex  = _window_sum(puts)
+    net_gex  = call_gex - put_gex
+    out['net_gex'] = net_gex
+    # A 1% spot move requires dealers to re-hedge ~1% of the gross gamma
+    # notional; this is the standard back-of-envelope number UW and gammalab
+    # display as "Hedging Impact per 1%".
+    out['hedge_per_1pct'] = 0.01 * net_gex
+
+    if out['gamma_flip'] is not None:
+        out['regime'] = 'Long Gamma' if S >= out['gamma_flip'] else 'Short Gamma'
+    else:
+        out['regime'] = 'Long Gamma' if net_gex >= 0 else 'Short Gamma'
+
+    alerts = []
+    def _near(a, b, pct):
+        return a is not None and b is not None and b > 0 and abs(a - b) / b <= pct
+    if _near(S, out['call_wall'], 0.003):
+        alerts.append({'level': 'warn', 'text': f"Near Call Wall @ {out['call_wall']:.2f}"})
+    if _near(S, out['put_wall'], 0.003):
+        alerts.append({'level': 'warn', 'text': f"Near Put Wall @ {out['put_wall']:.2f}"})
+    if _near(S, out['gamma_flip'], 0.005):
+        alerts.append({'level': 'info', 'text': f"Approaching Gamma Flip @ {out['gamma_flip']:.2f}"})
+    if out['regime'] == 'Short Gamma':
+        alerts.append({'level': 'warn', 'text': 'Short-gamma regime — moves may accelerate'})
+    elif out['regime'] == 'Long Gamma':
+        alerts.append({'level': 'info', 'text': 'Long-gamma regime — dealer hedging dampens moves'})
+    out['alerts'] = alerts
+    return out
+
+
 def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_types=[],
                               exposure_levels_count=3, call_color='#00FF00', put_color='#FF0000',
                               strike_range=0.1, use_heikin_ashi=False,
@@ -5156,6 +5225,84 @@ def index():
             text-transform: uppercase;
         }
         #gex-side-panel { flex: 1; min-height: 0; }
+
+        /* ── Trader stats KPI strip ────────────────────────────────── */
+        .trader-stats-strip {
+            display: flex;
+            gap: 8px;
+            margin: 0 0 8px 0;
+            flex-wrap: wrap;
+        }
+        .kpi-card {
+            flex: 1 1 0;
+            min-width: 170px;
+            background: #1E1E1E;
+            border: 1px solid #2A2A2A;
+            border-radius: 4px;
+            padding: 8px 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .kpi-label {
+            font-size: 10px;
+            color: #888;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .kpi-value { font-size: 18px; font-weight: 600; color: #e5e5e5; }
+        .kpi-sub   { font-size: 11px; color: #aaa; }
+        .kpi-pos   { color: #00D084; }
+        .kpi-neg   { color: #FF4D4D; }
+
+        /* ── Alerts strip ─────────────────────────────────────────── */
+        .trader-alerts-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin: 0 0 10px 0;
+        }
+        .alert-chip {
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            background: #1E1E1E;
+            border: 1px solid #2A2A2A;
+            color: #ccc;
+        }
+        .alert-chip.warn { border-color: #FFC400; color: #FFC400; }
+        .alert-chip.info { border-color: #3E82F1; color: #88B4FF; }
+
+        /* ── Secondary chart tab bar ──────────────────────────────── */
+        .secondary-tabs {
+            display: flex;
+            gap: 2px;
+            margin: 8px 0 6px 0;
+            flex-wrap: wrap;
+            border-bottom: 1px solid #2A2A2A;
+            padding-bottom: 0;
+        }
+        .secondary-tab {
+            background: transparent;
+            color: #888;
+            border: none;
+            border-bottom: 2px solid transparent;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            letter-spacing: 0.02em;
+        }
+        .secondary-tab:hover { color: #ddd; }
+        .secondary-tab.active {
+            color: #e5e5e5;
+            border-bottom-color: #3E82F1;
+        }
+        /* When tabs are active we stack the grid as a single column and
+           show only the active chart via .tab-hidden. */
+        .charts-grid.tabbed {
+            display: block !important;
+        }
+        .charts-grid .chart-container.tab-hidden { display: none !important; }
         #price-chart {
             padding: 0 !important;
             background-color: #1E1E1E !important;
@@ -5931,7 +6078,10 @@ def index():
         </div>
         
         <div class="price-info" id="price-info"></div>
-        
+
+        <div id="trader-stats-strip" class="trader-stats-strip" style="display:none"></div>
+        <div id="trader-alerts-strip" class="trader-alerts-strip" style="display:none"></div>
+
         <div class="chart-selector">
             <div class="chart-checkbox">
                 <input type="checkbox" id="price" checked>
@@ -8408,6 +8558,131 @@ def index():
             });
         }
 
+        // ── Trader stats KPI strip + alerts ─────────────────────────────────
+        function fmtMoneyCompact(n) {
+            if (n == null || !isFinite(n)) return '—';
+            const abs = Math.abs(n);
+            const sign = n < 0 ? '-' : '';
+            if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(2) + 'B';
+            if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+            if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
+            return sign + '$' + abs.toFixed(0);
+        }
+        function renderTraderStats(stats) {
+            const strip  = document.getElementById('trader-stats-strip');
+            const alerts = document.getElementById('trader-alerts-strip');
+            if (!strip || !alerts) return;
+            if (!stats) { strip.style.display = 'none'; alerts.style.display = 'none'; return; }
+
+            const netGex    = stats.net_gex;
+            const hedge     = stats.hedge_per_1pct;
+            const regime    = stats.regime || '—';
+            const regimeCls = regime === 'Long Gamma' ? 'kpi-pos' : regime === 'Short Gamma' ? 'kpi-neg' : '';
+            const netCls    = netGex == null ? '' : (netGex >= 0 ? 'kpi-pos' : 'kpi-neg');
+
+            const spot = stats.spot;
+            const emMove = stats.em_move, emLo = stats.em_lower, emHi = stats.em_upper, emPct = stats.em_pct;
+            const emValue = (emMove != null)
+                ? '±$' + emMove.toFixed(2) + (emPct != null ? ' (' + emPct.toFixed(2) + '%)' : '')
+                : '—';
+            const emSub = (emLo != null && emHi != null)
+                ? emLo.toFixed(2) + ' — ' + emHi.toFixed(2) : '';
+
+            const cw = stats.call_wall, pw = stats.put_wall, gf = stats.gamma_flip;
+            const walls = (cw != null || pw != null)
+                ? (cw != null ? cw.toFixed(2) : '—') + ' / ' + (pw != null ? pw.toFixed(2) : '—')
+                : '—';
+            const flipTxt = gf != null ? gf.toFixed(2) : '—';
+
+            strip.innerHTML = `
+                <div class="kpi-card">
+                    <div class="kpi-label">Net GEX (window)</div>
+                    <div class="kpi-value ${netCls}">${fmtMoneyCompact(netGex)}</div>
+                    <div class="kpi-sub">per 1% move: ${fmtMoneyCompact(hedge)}</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Regime</div>
+                    <div class="kpi-value ${regimeCls}">${regime}</div>
+                    <div class="kpi-sub">gamma flip: ${flipTxt}</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Expected Move (±1σ)</div>
+                    <div class="kpi-value">${emValue}</div>
+                    <div class="kpi-sub">${emSub}</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Call / Put Wall</div>
+                    <div class="kpi-value">${walls}</div>
+                    <div class="kpi-sub">spot: ${spot != null ? spot.toFixed(2) : '—'}</div>
+                </div>
+            `;
+            strip.style.display = 'flex';
+
+            const list = Array.isArray(stats.alerts) ? stats.alerts : [];
+            if (!list.length) {
+                alerts.innerHTML = '';
+                alerts.style.display = 'none';
+            } else {
+                alerts.innerHTML = list.map(a => {
+                    const cls = a.level === 'warn' ? 'warn' : 'info';
+                    const txt = (a.text || '').replace(/</g, '&lt;');
+                    return `<div class="alert-chip ${cls}">${txt}</div>`;
+                }).join('');
+                alerts.style.display = 'flex';
+            }
+        }
+
+        // ── Secondary chart tabs ───────────────────────────────────────────
+        let secondaryActiveTab = null;
+        const secondaryTabLabels = {
+            gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
+            speed: 'Speed', vomma: 'Vomma', color: 'Color',
+            options_volume: 'Options Vol', open_interest: 'Open Interest',
+            volume: 'Volume', volume_ratio: 'Vol Ratio', options_chain: 'Chain',
+            premium: 'Premium', large_trades: 'Large Trades', centroid: 'Centroid',
+        };
+        function updateSecondaryTabs(chartIds) {
+            const grid = document.querySelector('.charts-grid');
+            if (!grid) return;
+            let bar = document.getElementById('secondary-tabs');
+            if (!chartIds.length) {
+                if (bar) bar.remove();
+                return;
+            }
+            if (!bar) {
+                bar = document.createElement('div');
+                bar.id = 'secondary-tabs';
+                bar.className = 'secondary-tabs';
+                grid.parentNode.insertBefore(bar, grid);
+            }
+            if (!chartIds.includes(secondaryActiveTab)) secondaryActiveTab = chartIds[0];
+            bar.innerHTML = chartIds.map(id =>
+                `<button class="secondary-tab${id === secondaryActiveTab ? ' active' : ''}" data-tab="${id}">${secondaryTabLabels[id] || id}</button>`
+            ).join('');
+            bar.querySelectorAll('.secondary-tab').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    secondaryActiveTab = btn.dataset.tab;
+                    bar.querySelectorAll('.secondary-tab').forEach(b =>
+                        b.classList.toggle('active', b.dataset.tab === secondaryActiveTab));
+                    applySecondaryTabVisibility();
+                });
+            });
+            grid.classList.add('tabbed');
+            applySecondaryTabVisibility();
+        }
+        function applySecondaryTabVisibility() {
+            const grid = document.querySelector('.charts-grid');
+            if (!grid) return;
+            grid.querySelectorAll('.chart-container').forEach(el => {
+                const id = el.id.replace('-chart', '');
+                const hide = id !== secondaryActiveTab;
+                el.classList.toggle('tab-hidden', hide);
+                if (!hide) {
+                    try { Plotly.Plots.resize(el); } catch (e) {}
+                }
+            });
+        }
+
         // ── Key levels (Call Wall / Put Wall / Gamma Flip / ±1σ EM) ──────────
         function clearKeyLevels() {
             if (!tvCandleSeries) { tvKeyLevelLines = []; return; }
@@ -8498,6 +8773,9 @@ def index():
                 }
                 if (priceResp && priceResp.key_levels) {
                     renderKeyLevels(priceResp.key_levels);
+                }
+                if (priceResp && priceResp.trader_stats) {
+                    renderTraderStats(priceResp.trader_stats);
                 }
             })
             .catch(err => console.error('Error fetching price chart:', err))
@@ -8605,27 +8883,14 @@ def index():
             if (regularCharts.length === 0) {
                 chartsGrid.style.display = 'none';
                 chartsGrid.innerHTML = '';
+                updateSecondaryTabs([]);
             } else {
-                chartsGrid.style.display = 'grid';
-                
+                chartsGrid.style.display = 'block';
+
                 // Only rebuild if chart selection changed
                 if (needsGridRebuild) {
                     chartsGrid.innerHTML = '';
-                    chartsGrid.className = 'charts-grid';
-                    
-                    // Add appropriate class based on number of enabled charts
-                    if (regularCharts.length === 1) {
-                        chartsGrid.classList.add('one-chart');
-                    } else if (regularCharts.length === 2) {
-                        chartsGrid.classList.add('two-charts');
-                    } else if (regularCharts.length === 3) {
-                        chartsGrid.classList.add('three-charts');
-                    } else if (regularCharts.length === 4) {
-                        chartsGrid.classList.add('four-charts');
-                    } else {
-                        chartsGrid.classList.add('many-charts');
-                    }
-                    
+                    chartsGrid.className = 'charts-grid tabbed';
                     regularCharts.forEach(([key, selected]) => {
                         const newContainer = document.createElement('div');
                         newContainer.className = 'chart-container';
@@ -8634,6 +8899,7 @@ def index():
                         chartContainerCache[key] = newContainer;
                     });
                 }
+                updateSecondaryTabs(regularChartIds);
                 
                 // Update chart data
                 regularCharts.forEach(([key, selected]) => {
@@ -9685,7 +9951,22 @@ def update_price():
                 print(f"[key_levels] build failed: {e}")
                 key_levels = None
 
-        return jsonify({'price': price_chart, 'gex_panel': gex_panel, 'key_levels': key_levels})
+        trader_stats = None
+        if calls is not None and puts is not None and S_for_panel is not None:
+            try:
+                trader_stats = compute_trader_stats(
+                    calls, puts, S_for_panel, strike_range=strike_range,
+                )
+            except Exception as e:
+                print(f"[trader_stats] build failed: {e}")
+                trader_stats = None
+
+        return jsonify({
+            'price': price_chart,
+            'gex_panel': gex_panel,
+            'key_levels': key_levels,
+            'trader_stats': trader_stats,
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
