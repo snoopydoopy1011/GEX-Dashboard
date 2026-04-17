@@ -1,0 +1,8 @@
+flask
+pandas
+plotly
+python-dotenv
+pytz
+scipy
+schwabdev 
+kaleido

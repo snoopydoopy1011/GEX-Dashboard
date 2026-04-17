@@ -1,0 +1,4 @@
+options_data.db
+*.env
+tokens.json
+settings.json
