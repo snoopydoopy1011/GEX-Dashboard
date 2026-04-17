@@ -5929,7 +5929,6 @@ def index():
                 <div class="price-chart-row">
                     <div class="chart-container" id="price-chart"></div>
                     <div class="gex-side-panel-wrap">
-                        <div class="gex-side-panel-header">Net GEX by Strike</div>
                         <div id="gex-side-panel"></div>
                     </div>
                 </div>
@@ -8262,7 +8261,7 @@ def index():
                 chartDiv.id = 'price-chart';
                 const panelWrap = document.createElement('div');
                 panelWrap.className = 'gex-side-panel-wrap';
-                panelWrap.innerHTML = '<div class="gex-side-panel-header">Net GEX by Strike</div><div id="gex-side-panel"></div>';
+                panelWrap.innerHTML = '<div id="gex-side-panel"></div>';
                 row.appendChild(chartDiv);
                 row.appendChild(panelWrap);
                 const rsiPane = document.createElement('div');
@@ -8308,13 +8307,24 @@ def index():
             try {
                 const h = tvEl.clientHeight;
                 if (!h) return;
+                // TV plot area = full container minus the time axis at bottom
+                const tsH = (tvPriceChart.timeScale && tvPriceChart.timeScale().height)
+                    ? tvPriceChart.timeScale().height() : 0;
+                const plotBottomPx = Math.max(0, h - tsH);
                 const top = tvCandleSeries.coordinateToPrice(0);
-                const bot = tvCandleSeries.coordinateToPrice(h);
+                const bot = tvCandleSeries.coordinateToPrice(plotBottomPx);
                 if (top == null || bot == null) return;
                 const lo = Math.min(top, bot);
                 const hi = Math.max(top, bot);
                 if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return;
-                Plotly.relayout(panel, { 'yaxis.range': [lo, hi] });
+                // Mirror TV's plot-area pixel bounds by zeroing Plotly top margin
+                // and matching bottom margin to TV's time-axis height. That way
+                // the Plotly y-axis range maps to the same screen pixels as TV's.
+                Plotly.relayout(panel, {
+                    'yaxis.range': [lo, hi],
+                    'margin.t': 0,
+                    'margin.b': tsH,
+                });
             } catch (e) {
                 // TV chart may not be ready yet; skip silently
             }
