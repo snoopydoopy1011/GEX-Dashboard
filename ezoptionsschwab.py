@@ -3225,6 +3225,75 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     return fig.to_json()
 
 
+def compute_key_levels(calls, puts, S, selected_expiries=None):
+    """Return the key dealer-flow levels to draw on the price chart.
+
+    Call Wall: strike with the highest net (positive) GEX — resistance.
+    Put Wall:  strike with the most-negative net GEX — support.
+    Gamma Flip: strike where cumulative net GEX (summed from the lowest
+                strike upward) first crosses zero — the regime boundary
+                between long-gamma and short-gamma dealer positioning.
+    EM Upper/Lower: ATM straddle-based ±1σ expected move bracket.
+
+    All values can be None independently if the inputs don't support them
+    (e.g. EM only when bid/ask are present).
+    """
+    out = {
+        'call_wall': None, 'put_wall': None, 'gamma_flip': None,
+        'em_upper': None, 'em_lower': None,
+    }
+    if S is None:
+        return out
+
+    def _filter(df):
+        if df is None or df.empty or 'GEX' not in df.columns:
+            return None
+        if selected_expiries and 'expiration_date' in df.columns:
+            df = df[df['expiration_date'].isin(selected_expiries)]
+        return df if not df.empty else None
+
+    c = _filter(calls)
+    p = _filter(puts)
+
+    call_map = c.groupby('strike')['GEX'].sum().to_dict() if c is not None else {}
+    put_map  = p.groupby('strike')['GEX'].sum().to_dict() if p is not None else {}
+    strikes = sorted(set(call_map) | set(put_map))
+    if strikes:
+        net = {s: call_map.get(s, 0) - put_map.get(s, 0) for s in strikes}
+
+        pos_strikes = [(s, v) for s, v in net.items() if v > 0]
+        neg_strikes = [(s, v) for s, v in net.items() if v < 0]
+        if pos_strikes:
+            cw_strike, cw_val = max(pos_strikes, key=lambda kv: kv[1])
+            out['call_wall'] = {'price': float(cw_strike), 'gex': float(cw_val)}
+        if neg_strikes:
+            pw_strike, pw_val = min(neg_strikes, key=lambda kv: kv[1])
+            out['put_wall'] = {'price': float(pw_strike), 'gex': float(pw_val)}
+
+        # Gamma flip: cumulative net GEX from lowest strike up; find first
+        # sign change. Interpolate between the bracketing strikes for a
+        # smoother flip price.
+        cum = 0.0
+        prev_s, prev_cum = None, 0.0
+        flip_price = None
+        for s in strikes:
+            cum += net[s]
+            if prev_s is not None and (prev_cum <= 0) != (cum <= 0) and (cum - prev_cum) != 0:
+                t = (0 - prev_cum) / (cum - prev_cum)
+                flip_price = prev_s + t * (s - prev_s)
+                break
+            prev_s, prev_cum = s, cum
+        if flip_price is not None:
+            out['gamma_flip'] = {'price': float(flip_price)}
+
+    em = calculate_expected_move_snapshot(calls, puts, S)
+    if em:
+        out['em_upper'] = {'price': float(em['upper']), 'move': float(em['move'])}
+        out['em_lower'] = {'price': float(em['lower']), 'move': float(em['move'])}
+
+    return out
+
+
 def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_types=[],
                               exposure_levels_count=3, call_color='#00FF00', put_color='#FF0000',
                               strike_range=0.1, use_heikin_ashi=False,
@@ -5989,6 +6058,7 @@ def index():
         // kept so they can be removed without a full chart rebuild
         let tvExposurePriceLines = [];
         let tvExpectedMovePriceLines = [];
+        let tvKeyLevelLines = [];
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
         let tvHistoricalOverlayPending = false;
@@ -8338,6 +8408,45 @@ def index():
             });
         }
 
+        // ── Key levels (Call Wall / Put Wall / Gamma Flip / ±1σ EM) ──────────
+        function clearKeyLevels() {
+            if (!tvCandleSeries) { tvKeyLevelLines = []; return; }
+            tvKeyLevelLines.forEach(l => {
+                try { tvCandleSeries.removePriceLine(l); } catch (e) {}
+            });
+            tvKeyLevelLines = [];
+        }
+
+        function renderKeyLevels(levels) {
+            if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
+            clearKeyLevels();
+            const LS = LightweightCharts.LineStyle;
+            const defs = [
+                { key: 'call_wall',  title: 'Call Wall',  color: '#00D084', style: LS.Solid,  width: 2 },
+                { key: 'put_wall',   title: 'Put Wall',   color: '#FF4D4D', style: LS.Solid,  width: 2 },
+                { key: 'gamma_flip', title: 'Gamma Flip', color: '#FFC400', style: LS.Dashed, width: 2 },
+                { key: 'em_upper',   title: '+1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
+                { key: 'em_lower',   title: '-1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
+            ];
+            defs.forEach(def => {
+                const entry = levels[def.key];
+                if (!entry || entry.price == null || !isFinite(entry.price)) return;
+                try {
+                    const line = tvCandleSeries.createPriceLine({
+                        price: entry.price,
+                        color: def.color,
+                        lineWidth: def.width,
+                        lineStyle: def.style,
+                        axisLabelVisible: true,
+                        title: def.title,
+                    });
+                    tvKeyLevelLines.push(line);
+                } catch (e) {
+                    console.warn('createPriceLine failed for', def.title, e);
+                }
+            });
+        }
+
         // ── Throttled price history fetcher ───────────────────────────────────
         // Fetches candle history + exposure levels from /update_price.
         // Real-time ticks come from SSE; this only handles the historical snapshot
@@ -8386,6 +8495,9 @@ def index():
                 }
                 if (priceResp && priceResp.gex_panel) {
                     renderGexSidePanel(priceResp.gex_panel);
+                }
+                if (priceResp && priceResp.key_levels) {
+                    renderKeyLevels(priceResp.key_levels);
                 }
             })
             .catch(err => console.error('Error fetching price chart:', err))
@@ -8461,6 +8573,7 @@ def index():
                     tvIndicatorSeries = {};
                     tvHistoricalPoints = [];
                     tvHistoricalExpectedMoveSeries = [];
+                    tvKeyLevelLines = [];
                 }
                 if (tvResizeObserver) {
                     tvResizeObserver.disconnect();
@@ -9555,6 +9668,7 @@ def update_price():
             pass
 
         gex_panel = None
+        key_levels = None
         S_for_panel = cached.get('S')
         if calls is not None and puts is not None and S_for_panel is not None:
             try:
@@ -9565,8 +9679,13 @@ def update_price():
             except Exception as e:
                 print(f"[gex_panel] build failed: {e}")
                 gex_panel = None
+            try:
+                key_levels = compute_key_levels(calls, puts, S_for_panel)
+            except Exception as e:
+                print(f"[key_levels] build failed: {e}")
+                key_levels = None
 
-        return jsonify({'price': price_chart, 'gex_panel': gex_panel})
+        return jsonify({'price': price_chart, 'gex_panel': gex_panel, 'key_levels': key_levels})
     except Exception as e:
         import traceback
         traceback.print_exc()
