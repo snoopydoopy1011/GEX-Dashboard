@@ -1,4 +1,14 @@
 options_data.db
 *.env
+.env
 tokens.json
 settings.json
+
+# Local-only review artifacts
+Screenshots/
+terminal_while_running.txt
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
