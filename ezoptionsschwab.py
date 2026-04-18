@@ -5453,7 +5453,7 @@ def index():
         .gex-side-panel-wrap {
             background: var(--bg-0);
             border-radius: 0;
-            flex: 1 1 auto;   /* shares rail panel height with .dealer-impact sibling */
+            height: 100%;
             display: flex;
             flex-direction: column;
             min-height: 0;
@@ -6479,6 +6479,11 @@ def index():
             </div>
             <div class="right-rail-panels" id="right-rail-panels">
                 <div class="right-rail-panel active" data-rail-panel="gex">
+                    <div class="gex-side-panel-wrap">
+                        <div id="gex-side-panel"></div>
+                    </div>
+                </div>
+                <div class="right-rail-panel" data-rail-panel="alerts">
                     <div class="dealer-impact" id="dealer-impact">
                         <div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>
                         <div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>
@@ -6486,11 +6491,6 @@ def index():
                         <div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>
                         <div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>
                     </div>
-                    <div class="gex-side-panel-wrap">
-                        <div id="gex-side-panel"></div>
-                    </div>
-                </div>
-                <div class="right-rail-panel" data-rail-panel="alerts">
                     <div class="rail-alerts-list" id="right-rail-alerts">
                         <div class="rail-alerts-empty">No active alerts.</div>
                     </div>
@@ -8960,6 +8960,9 @@ def index():
                 railPanels.id = 'right-rail-panels';
                 railPanels.innerHTML =
                     '<div class="right-rail-panel active" data-rail-panel="gex">' +
+                        '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
+                    '</div>' +
+                    '<div class="right-rail-panel" data-rail-panel="alerts">' +
                         '<div class="dealer-impact" id="dealer-impact">' +
                             '<div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>' +
                             '<div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>' +
@@ -8967,9 +8970,6 @@ def index():
                             '<div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>' +
                             '<div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>' +
                         '</div>' +
-                        '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
-                    '</div>' +
-                    '<div class="right-rail-panel" data-rail-panel="alerts">' +
                         '<div class="rail-alerts-list" id="right-rail-alerts">' +
                             '<div class="rail-alerts-empty">No active alerts.</div>' +
                         '</div>' +
