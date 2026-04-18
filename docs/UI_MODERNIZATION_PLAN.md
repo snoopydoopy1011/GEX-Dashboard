@@ -1,6 +1,6 @@
 # GEX Dashboard — UI Modernization Plan
 
-**Status:** Proposed
+**Status:** In progress — 2 of 7 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/ui-modernization`
@@ -9,6 +9,8 @@
 ---
 
 ## 0. Where are we? (read this first)
+
+**Current state (as of 2026-04-18):** Stages 1 and 2 have landed on `feat/ui-modernization` (commits `cc31ad2`, `ee20f4d`). Next stage: **3** — delete the chart-selector row and make the secondary-tab bar the only switcher. See §10 for per-stage progress notes and deviations from spec.
 
 Line numbers throughout this doc are a snapshot as of commit `3d26533` (the commit that introduced the doc). **They drift as soon as Stage 1 lands.** Grep by anchor name — CSS class names (`.header`, `.secondary-tabs`, `.kpi-card`, `.gex-side-panel-wrap`), function names (`renderGexSidePanel`, `renderTraderStats`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `create_exposure_chart`), or element IDs (`#chart-grid`, `#trader-stats-strip`, `#gex-side-panel`) — rather than trusting the numbers.
 
@@ -232,8 +234,10 @@ Each stage is one commit on `feat/ui-modernization`. Every stage leaves the app 
 
 1. **Tokens + palette swap** (CSS-only). Add `:root`, find/replace hex values, soften neon.
    Commit: `style(ui): add :root design tokens, swap palette to muted terminal`
+   **Status:** ✅ Landed as `cc31ad2` — see §10.1 for notes.
 2. **Plotly theme consolidation.** Introduce `PLOT_THEME` / `CALL_COLOR` / `PUT_COLOR`; wire into all eight chart functions.
    Commit: `refactor(plotly): centralize PLOT_THEME and CALL/PUT color constants`
+   **Status:** ✅ Landed as `ee20f4d` — see §10.2 for notes (deviated from `**PLOT_THEME` unpack to value-dereference; reasoning captured there).
 3. **Delete chart-selector row, extend tab bar.** Remove lines 6085–6143. Make `updateSecondaryTabs()` authoritative. Persist per-chart visibility to `localStorage` (defaults match today's checked/unchecked state).
    Commit: `feat(ui): replace chart-checkbox row with always-on secondary tabs`
 4. **Slim top bar + drawer.** Restructure `.header` → `.top-bar` + `.drawer`. Group the ~30 controls into `<details>` sections. Hamburger toggles `.drawer.open`. Color pickers / coloring mode move to `<dialog>` opened by the gear icon.
@@ -269,3 +273,50 @@ After each stage (and again before opening the merge PR):
 - Changing the SQLite schema or the historical-bubble-levels data model.
 - Introducing a JS framework (React / Vue / Alpine). This effort stays in vanilla JS + CSS tokens.
 - Breaking the single-file `ezoptionsschwab.py` structure. If that becomes painful, it's a separate refactor proposal.
+
+---
+
+## 10. Progress log & deviations
+
+Running notes from executing the stages. Future-Claude should skim this before picking up work — it captures decisions that aren't derivable from the diff.
+
+### 10.1 Stage 1 — `cc31ad2` · `style(ui): add :root design tokens, swap palette to muted terminal`
+
+**Landed:** 2026-04-18.
+
+Executed as specified: `:root` block inserted at top of the main `<style>`; every literal in §3's mapping table swapped to a token reference *inside that style block only*. Post-swap grep over the main style block returns zero hits for `#1E1E1E` / `#2D2D2D` / `#00FF00` / `#FF0000` / `#00D084` / `#FF4D4D` / `#333` / `#444`. AST parses clean.
+
+Deviations and things deliberately left for later:
+
+- **`.tv-ohlc-tooltip .tt-dn { color: #FF4444; }`** stayed untouched. `#FF4444` isn't in §3's mapping table nor in §8's forbidden-literals list. A follow-up pass may want `var(--put)` for consistency with `.tt-up` which is already tokenized.
+- **`#00D084` and `#FF4D4D` also appear in inline JS** at ~line 8700–8701 (`renderKeyLevels` Call-Wall / Put-Wall series colors). Only the style-block occurrences were swapped here — the JS strings belong to Stage 6 (Key Levels tab rewrite) and were left alone on purpose.
+- **Two other `<style>` blocks** exist in the file (popout-chart error pages at ~line 6562, ~6955). They carry the old palette but sit outside the "main inline `<style>` block (lines 4853–5895)" scope given in §4. Not touched.
+
+Gotcha worth remembering: the file has a pre-existing UTF-8 BOM. Raw `python3 -c "ast.parse(open(path).read())"` errors with `invalid non-printable character U+FEFF`. Use `encoding='utf-8-sig'` for AST checks. The Python interpreter handles the BOM natively when running the script.
+
+### 10.2 Stage 2 — `ee20f4d` · `refactor(plotly): centralize PLOT_THEME and CALL/PUT color constants`
+
+**Landed:** 2026-04-18.
+
+Introduced `PLOT_THEME` (paper_bgcolor / plot_bgcolor / font / xaxis / yaxis / margin), `CALL_COLOR = '#10B981'`, `PUT_COLOR = '#EF4444'` immediately above `create_exposure_chart`. Every Plotly `plot_bgcolor=` / `paper_bgcolor=` / nested `bgcolor=` kwarg now dereferences `PLOT_THEME`. Every chart-builder default `call_color='#00FF00'` / `put_color='#FF0000'` now references `CALL_COLOR` / `PUT_COLOR`. `create_exposure_chart`'s local `grid_color` / `text_color` / `background_color` initialize from `PLOT_THEME`.
+
+**Deviation from §4 spec — value-dereference instead of `**PLOT_THEME` unpack.** §4 prescribes `fig.update_layout(**PLOT_THEME)` across every builder. We didn't do that. Reason:
+
+- `PLOT_THEME` as specified includes `xaxis=…`, `yaxis=…`, `margin=…`. Every chart builder already passes its own detailed `xaxis=xaxis_config`, `yaxis=yaxis_config`, `margin=…` in the same `update_layout` call.
+- Put both in one call and Python raises `TypeError: got multiple values for keyword argument 'xaxis'`.
+- Split into two `update_layout` calls and Plotly replaces nested dicts wholesale — the chart's subsequent `update_layout(xaxis=xaxis_config)` would wipe out `PLOT_THEME`'s axis grid colors anyway. Net result is the same centralization benefit as the value-dereference we already have, plus an extra call per builder, plus fragile ordering.
+
+Value-dereference (e.g., `plot_bgcolor=PLOT_THEME['plot_bgcolor']`) keeps all kwargs in a single per-builder call while still giving one source of truth — change `PLOT_THEME` and every chart follows.
+
+A future cleanup pass can fold into `**PLOT_THEME` cleanly by either:
+1. Narrowing `PLOT_THEME` to non-colliding global kwargs (`paper_bgcolor`, `plot_bgcolor`, `font`) + a separate `PLOT_AXIS_THEME` dict that chart configs merge into their own xaxis/yaxis (`xaxis=dict(**PLOT_AXIS_THEME, **chart_specific_xaxis_kwargs)`).
+2. Or literal dict-merge at each call site: `fig.update_layout(**{**PLOT_THEME, 'xaxis': xaxis_config, ...})`.
+
+Other notes:
+
+- §4 counts **"eight chart builders"**. Actually 9 `update_layout` locations were touched (`create_exposure_chart`, `create_volume_chart`, `create_options_volume_chart`, `create_price_chart`, `create_gex_side_panel` — two calls (empty-fallback + main), `create_historical_bubble_levels_chart`, `create_open_interest_chart`, `create_premium_chart`, `create_centroid_chart` — two calls). Plus `create_large_trades_table`'s default-arg swap (it's a table, no layout to theme).
+- **`create_historical_bubble_levels_chart` keeps its distinct `'#00FFA3'` / `'#FF3B3B'` defaults on purpose** — those are intentional differentiators for the historical-bubble view and aren't on §3's swap list.
+- **TradingView Lightweight-Charts inline JS strings still carry `'#1E1E1E'`** at ~line 6688, 6810, 7625, 8311, 8964–8965. That's the candle-chart JS theme, not Plotly — it's out of Stage 2 scope per §4 ("`refactor(plotly): …`"). A future task can bring the TV-chart theme into line with `--bg-0`.
+- **Many `'#CCCCCC'` / `'#333333'` Plotly literals remain** inside chart-specific `xaxis`/`yaxis` configs (`title_font`, `tickfont`, `tickcolor`, `spikecolor`) — not on §3's mapping table, left alone to keep Stage 2 tight.
+
+Verification status: AST parse clean; full §8 browser verification (stream on, KPI values, chart tabs render) deferred — palette change is visible but functionally transparent, and every subsequent stage will exercise the same chart-builder code paths.
