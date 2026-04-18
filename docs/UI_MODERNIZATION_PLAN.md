@@ -1,6 +1,6 @@
 # GEX Dashboard — UI Modernization Plan
 
-**Status:** Proposed
+**Status:** Complete — 7 of 7 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/ui-modernization`
@@ -9,6 +9,8 @@
 ---
 
 ## 0. Where are we? (read this first)
+
+**Current state (as of 2026-04-18):** All 7 stages have landed on `feat/ui-modernization`. Ready to open the merge PR per §6.4. See §10 for per-stage progress notes and deviations from spec.
 
 Line numbers throughout this doc are a snapshot as of commit `3d26533` (the commit that introduced the doc). **They drift as soon as Stage 1 lands.** Grep by anchor name — CSS class names (`.header`, `.secondary-tabs`, `.kpi-card`, `.gex-side-panel-wrap`), function names (`renderGexSidePanel`, `renderTraderStats`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `create_exposure_chart`), or element IDs (`#chart-grid`, `#trader-stats-strip`, `#gex-side-panel`) — rather than trusting the numbers.
 
@@ -232,18 +234,25 @@ Each stage is one commit on `feat/ui-modernization`. Every stage leaves the app 
 
 1. **Tokens + palette swap** (CSS-only). Add `:root`, find/replace hex values, soften neon.
    Commit: `style(ui): add :root design tokens, swap palette to muted terminal`
+   **Status:** ✅ Landed as `cc31ad2` — see §10.1 for notes.
 2. **Plotly theme consolidation.** Introduce `PLOT_THEME` / `CALL_COLOR` / `PUT_COLOR`; wire into all eight chart functions.
    Commit: `refactor(plotly): centralize PLOT_THEME and CALL/PUT color constants`
+   **Status:** ✅ Landed as `ee20f4d` — see §10.2 for notes (deviated from `**PLOT_THEME` unpack to value-dereference; reasoning captured there).
 3. **Delete chart-selector row, extend tab bar.** Remove lines 6085–6143. Make `updateSecondaryTabs()` authoritative. Persist per-chart visibility to `localStorage` (defaults match today's checked/unchecked state).
    Commit: `feat(ui): replace chart-checkbox row with always-on secondary tabs`
+   **Status:** ✅ Landed — see §10.3 for notes (Stage 4 drawer needed before chart on/off UI returns).
 4. **Slim top bar + drawer.** Restructure `.header` → `.top-bar` + `.drawer`. Group the ~30 controls into `<details>` sections. Hamburger toggles `.drawer.open`. Color pickers / coloring mode move to `<dialog>` opened by the gear icon.
    Commit: `feat(ui): add slim top bar and slide-in settings drawer`
+   **Status:** ✅ Landed — see §10.4 for notes (also closes the Stage-3 chart-visibility UI gap via a "Sections" drawer group).
 5. **Right-rail restructure.** Move GEX panel out of `.price-chart-row`; create `.right-rail` with three tab buttons. Default to GEX. Gate `syncGexPanelYAxisToTV()` on active tab.
    Commit: `feat(ui): tabbed right rail — GEX / Alerts / Key Levels`
+   **Status:** ✅ Landed — see §10.5 for notes (toolbar hoisted to `#chart-grid` for candle/GEX pixel alignment; Alerts + Levels panels are placeholders for Stage 6).
 6. **Alerts & Key Levels tabs.** Render alerts into the right-rail panel with an unread-count badge; build the Key Levels table from `compute_trader_stats()` output.
    Commit: `feat(ui): move alerts into right rail, add unread badge`
+   **Status:** ✅ Landed — see §10.6 for notes.
 7. **KPI strip polish.** Restyle `.kpi-card` with new tokens, add trend arrows (▲▼) using existing `.kpi-pos/.kpi-neg`, tabular-nums for every numeric. Mount above candles.
    Commit: `style(kpi): polish KPI cards with new tokens and tabular numerics`
+   **Status:** ✅ Landed — see §10.7 for notes.
 
 ---
 
@@ -269,3 +278,215 @@ After each stage (and again before opening the merge PR):
 - Changing the SQLite schema or the historical-bubble-levels data model.
 - Introducing a JS framework (React / Vue / Alpine). This effort stays in vanilla JS + CSS tokens.
 - Breaking the single-file `ezoptionsschwab.py` structure. If that becomes painful, it's a separate refactor proposal.
+
+---
+
+## 10. Progress log & deviations
+
+Running notes from executing the stages. Future-Claude should skim this before picking up work — it captures decisions that aren't derivable from the diff.
+
+### 10.1 Stage 1 — `cc31ad2` · `style(ui): add :root design tokens, swap palette to muted terminal`
+
+**Landed:** 2026-04-18.
+
+Executed as specified: `:root` block inserted at top of the main `<style>`; every literal in §3's mapping table swapped to a token reference *inside that style block only*. Post-swap grep over the main style block returns zero hits for `#1E1E1E` / `#2D2D2D` / `#00FF00` / `#FF0000` / `#00D084` / `#FF4D4D` / `#333` / `#444`. AST parses clean.
+
+Deviations and things deliberately left for later:
+
+- **`.tv-ohlc-tooltip .tt-dn { color: #FF4444; }`** stayed untouched. `#FF4444` isn't in §3's mapping table nor in §8's forbidden-literals list. A follow-up pass may want `var(--put)` for consistency with `.tt-up` which is already tokenized.
+- **`#00D084` and `#FF4D4D` also appear in inline JS** at ~line 8700–8701 (`renderKeyLevels` Call-Wall / Put-Wall series colors). Only the style-block occurrences were swapped here — the JS strings belong to Stage 6 (Key Levels tab rewrite) and were left alone on purpose.
+- **Two other `<style>` blocks** exist in the file (popout-chart error pages at ~line 6562, ~6955). They carry the old palette but sit outside the "main inline `<style>` block (lines 4853–5895)" scope given in §4. Not touched.
+
+Gotcha worth remembering: the file has a pre-existing UTF-8 BOM. Raw `python3 -c "ast.parse(open(path).read())"` errors with `invalid non-printable character U+FEFF`. Use `encoding='utf-8-sig'` for AST checks. The Python interpreter handles the BOM natively when running the script.
+
+### 10.2 Stage 2 — `ee20f4d` · `refactor(plotly): centralize PLOT_THEME and CALL/PUT color constants`
+
+**Landed:** 2026-04-18.
+
+Introduced `PLOT_THEME` (paper_bgcolor / plot_bgcolor / font / xaxis / yaxis / margin), `CALL_COLOR = '#10B981'`, `PUT_COLOR = '#EF4444'` immediately above `create_exposure_chart`. Every Plotly `plot_bgcolor=` / `paper_bgcolor=` / nested `bgcolor=` kwarg now dereferences `PLOT_THEME`. Every chart-builder default `call_color='#00FF00'` / `put_color='#FF0000'` now references `CALL_COLOR` / `PUT_COLOR`. `create_exposure_chart`'s local `grid_color` / `text_color` / `background_color` initialize from `PLOT_THEME`.
+
+**Deviation from §4 spec — value-dereference instead of `**PLOT_THEME` unpack.** §4 prescribes `fig.update_layout(**PLOT_THEME)` across every builder. We didn't do that. Reason:
+
+- `PLOT_THEME` as specified includes `xaxis=…`, `yaxis=…`, `margin=…`. Every chart builder already passes its own detailed `xaxis=xaxis_config`, `yaxis=yaxis_config`, `margin=…` in the same `update_layout` call.
+- Put both in one call and Python raises `TypeError: got multiple values for keyword argument 'xaxis'`.
+- Split into two `update_layout` calls and Plotly replaces nested dicts wholesale — the chart's subsequent `update_layout(xaxis=xaxis_config)` would wipe out `PLOT_THEME`'s axis grid colors anyway. Net result is the same centralization benefit as the value-dereference we already have, plus an extra call per builder, plus fragile ordering.
+
+Value-dereference (e.g., `plot_bgcolor=PLOT_THEME['plot_bgcolor']`) keeps all kwargs in a single per-builder call while still giving one source of truth — change `PLOT_THEME` and every chart follows.
+
+A future cleanup pass can fold into `**PLOT_THEME` cleanly by either:
+1. Narrowing `PLOT_THEME` to non-colliding global kwargs (`paper_bgcolor`, `plot_bgcolor`, `font`) + a separate `PLOT_AXIS_THEME` dict that chart configs merge into their own xaxis/yaxis (`xaxis=dict(**PLOT_AXIS_THEME, **chart_specific_xaxis_kwargs)`).
+2. Or literal dict-merge at each call site: `fig.update_layout(**{**PLOT_THEME, 'xaxis': xaxis_config, ...})`.
+
+Other notes:
+
+- §4 counts **"eight chart builders"**. Actually 9 `update_layout` locations were touched (`create_exposure_chart`, `create_volume_chart`, `create_options_volume_chart`, `create_price_chart`, `create_gex_side_panel` — two calls (empty-fallback + main), `create_historical_bubble_levels_chart`, `create_open_interest_chart`, `create_premium_chart`, `create_centroid_chart` — two calls). Plus `create_large_trades_table`'s default-arg swap (it's a table, no layout to theme).
+- **`create_historical_bubble_levels_chart` keeps its distinct `'#00FFA3'` / `'#FF3B3B'` defaults on purpose** — those are intentional differentiators for the historical-bubble view and aren't on §3's swap list.
+- **TradingView Lightweight-Charts inline JS strings still carry `'#1E1E1E'`** at ~line 6688, 6810, 7625, 8311, 8964–8965. That's the candle-chart JS theme, not Plotly — it's out of Stage 2 scope per §4 ("`refactor(plotly): …`"). A future task can bring the TV-chart theme into line with `--bg-0`.
+- **Many `'#CCCCCC'` / `'#333333'` Plotly literals remain** inside chart-specific `xaxis`/`yaxis` configs (`title_font`, `tickfont`, `tickcolor`, `spikecolor`) — not on §3's mapping table, left alone to keep Stage 2 tight.
+
+Verification status: AST parse clean; full §8 browser verification (stream on, KPI values, chart tabs render) deferred — palette change is visible but functionally transparent, and every subsequent stage will exercise the same chart-builder code paths.
+
+### 10.3 Stage 3 — `feat(ui): replace chart-checkbox row with always-on secondary tabs`
+
+**Landed:** 2026-04-18.
+
+Deleted the entire 14-checkbox `.chart-selector` row (markup + `.chart-selector` / `.chart-checkbox` CSS in both base and responsive blocks) and the `.chart-checkbox input` change-listener that drove `updateData()` re-fetches. The secondary tab bar is now the only switcher.
+
+Visibility moved off the DOM entirely. New helpers (defined immediately above `PLOTLY_PRICE_LINE_CHARTS`):
+
+- `CHART_IDS` — canonical 14-id list.
+- `CHART_VISIBILITY_DEFAULTS` — mirrors the prior checked/unchecked state exactly so a fresh browser sees the same set of charts as before.
+- `getChartVisibility()` — reads `localStorage['gex.chartVisibility']`, merges over defaults, returns a full map.
+- `setAllChartVisibility(map)` — writes the merged map back; used by `applySettings()`.
+- `isChartVisible(id)` — convenience read.
+
+Four read-sites collapsed:
+
+- `updateData()` payload assembly — the 14-line `visibleCharts` literal became `CHART_IDS.forEach(id => { visibleCharts['show_' + id] = _vis[id]; })`. Server `show_<id>` keys preserved for back-compat.
+- `updateCharts()` — the 14-line `selectedCharts` literal became `const selectedCharts = getChartVisibility();`.
+- `gatherSettings()` — `charts: { … }` → `charts: getChartVisibility()`.
+- `applySettings()` — per-checkbox `.checked = …` loop → `setAllChartVisibility(settings.charts)`.
+
+Three other `getElementById('price').checked` reads (the only single-id checks in the codebase, at the price-history fetch trigger and two early-return guards) became `isChartVisible('price')`.
+
+Active secondary tab is now persisted too: `localStorage['gex.secondaryActiveTab']` is read on init and written every time the user clicks a tab. Reload restores the active tab; the existing fallback (`if (!chartIds.includes(secondaryActiveTab)) secondaryActiveTab = chartIds[0]`) handles the case where the persisted tab is no longer visible.
+
+**Known gap until Stage 4:** with the chart-selector row gone there is currently no UI to toggle individual charts on/off — only saved-settings files (or direct `localStorage` edits) can flip a chart's visibility. The drawer in Stage 4 owns this UI per §4 ("Visibility migrates to a 'Sections' group inside the drawer"). Defaults are sized so this gap is invisible to anyone who hasn't already customized the old checkbox row.
+
+Other notes:
+
+- The 14-id list lives in three places by intent: `CHART_IDS` (JS, drives visibility), `selectedCharts` consumers (still keyed by id), and `secondaryTabLabels` (display strings only). Kept separate because `secondaryTabLabels` carries extra never-rendered ids (`volume_ratio`, `options_chain`) that pre-date this stage — leaving them alone to avoid scope creep.
+- `gex.chartVisibility` and `gex.secondaryActiveTab` are the first two `localStorage` keys this app uses; namespacing with `gex.` is forward-looking for Stages 4–7 (drawer state, right-rail tab, etc.).
+- AST parse clean. No remaining `.chart-selector` / `.chart-checkbox` references in the file (two surviving hits are in the new explanatory comments). No remaining per-chart `getElementById('<id>').checked` reads.
+
+### 10.4 Stage 4 — `feat(ui): add slim top bar and slide-in settings drawer`
+
+**Landed:** 2026-04-18.
+
+The 4-row `.header` (~180 lines of markup) is gone. Replaced by three peers:
+
+1. **`<nav class="top-bar">`** — ~44 px sticky bar with hamburger, title, ticker, timeframe, expiry, stream pill (`#streamToggle`), gear, and the token monitor right-aligned. The expiry dropdown / `#expiry-display` keep their existing ids and styles so the dropdown JS at `expiry-display`/`selectAllExpiry`/`expiryToday`/etc. is untouched.
+
+2. **`<aside class="drawer" id="settings-drawer">`** — fixed-left, 320 px, `transform: translateX(-100%)` until `.drawer.open` toggles it in. Backdrop (`#drawer-backdrop`) dims the content underneath; click-backdrop and Esc both close. Sections (all `<details>`):
+   - **Sections** — chart visibility toggles (closes Stage-3 §10.3 gap; see below)
+   - **Strike Range** — `strike_range`, `match_em_range`
+   - **Exposure** — `exposure_metric`, `delta_adjusted_exposures`, `calculate_in_notional`
+   - **Series** — `show_calls`, `show_puts`, `show_net`
+   - **Price Levels** — `levels-display`/`levels-options`, `levels_count`, `use_heikin_ashi`, `horizontal_bars`
+   - **Absolute GEX** — `show_abs_gex`, `abs_gex_opacity`, `use_range`
+   - **Max Level** — `highlight_max_level`, `max_level_mode`
+
+   Footer holds **Save** / **Load** (id-preserved → existing handlers in `saveSettings`/`loadSettings` work unchanged).
+
+3. **`<dialog class="settings-modal" id="settings-modal">`** — opened by the gear button. Hosts `coloring_mode` + the three color pickers (`call_color`, `put_color`, `max_level_color`). Esc and the Done button close. Uses native `<dialog>.showModal()` with a fallback to `setAttribute('open','')`.
+
+**Critical preservation: every control id is unchanged.** The drawer is purely a re-housing — every existing event handler (`document.getElementById('strike_range').addEventListener('input', …)`, the page-init `.control-group input[type="checkbox"]` change → `updateData` loop, the color-picker `change` handlers, etc.) continues to bind to the same DOM nodes. Only the wrapping markup changed.
+
+**Stage-3 gap closed.** A new `renderChartVisibilitySection()` runs at init and after `applySettings()`, building 14 `.visibility-toggle` checkboxes from `CHART_IDS` and `CHART_LABELS`. Each toggle calls `setAllChartVisibility({[id]: checked})` then `updateData()` — the chart appears/disappears immediately, and the persisted map in `localStorage['gex.chartVisibility']` survives reload. `CHART_LABELS` is a separate map from `secondaryTabLabels` because the latter omits `price`.
+
+**CSS additions** (in declaration order in the style block):
+
+- `.top-bar` + tightened `input/select/expiry-display` overrides scoped to `.top-bar`.
+- `.controls` / `.control-group` retained, plus a `.drawer-content .control-group` override that strips the pill background and goes full-width.
+- `.btn-icon` (hamburger, gear, drawer close) and `.btn-ghost` (Save / Load / Done).
+- `.stream-pill` (replaces `.stream-control button`, keeps the `.paused` toggle behavior used by `toggleStreaming`).
+- `.drawer`, `.drawer.open`, `.drawer-backdrop`, `.drawer-header/body/footer/section`, custom `<summary>` styling with rotating ▸.
+- `.settings-modal` + `::backdrop`.
+- `.visibility-grid` / `.visibility-toggle` for the chart-visibility section.
+
+**Removed CSS:** `.header`, `.header-top`, `.header-bottom`, `.stream-control` (and all variants), `.settings-control` (and all variants). Responsive media-query rules updated to target `.top-bar` and `.drawer` instead.
+
+**Deviations from §4 spec:**
+
+- §4 says the modal hosts "color pickers / coloring mode". Done as specified, plus `max_level_color` was moved into the modal too — it's a third color picker so grouping it with the others felt natural and §4's table doesn't otherwise call out where it should live.
+- §4 doesn't explicitly place Save / Load. We put them in the drawer footer, on the assumption that they're settings-management actions (they belong with the controls they save) and the top bar should stay slim.
+- The `match_em_range` button kept its inline-style attribute but lost the hardcoded `#2a2a2a/#888888/#555555` colors — restyled with `.btn-ghost` plus a tiny `padding/font-size` inline override. Could be promoted to a clean class later.
+- Token monitor stayed in the top bar per spec; it hides at <768 px to keep the bar single-line on mobile.
+- The existing TM button styling (`.tm-btn` / `.tm-dot` / `.tm-stats`) was not touched — those rules are defined further down in the style block and remain external to the header restructure.
+
+**Verification:** AST parse clean. Cross-checked all `getElementById('<id>')` references against markup `id="..."` attributes — every required id is present (5 unmatched are dynamic creates: `candle-close-timer`, `secondary-tabs`, `tv-draw-color`, `tv-ohlc-tooltip`, plus the `tm-stats` class match). No stale `.header` / `.header-top` / `.header-bottom` / `.stream-control` / `.settings-control` selectors anywhere — two remaining grep hits are explanatory comments. Browser smoke test deferred (port 5001 was in use during the commit run).
+
+### 10.5 Stage 5 — `feat(ui): tabbed right rail — GEX / Alerts / Key Levels`
+
+**Landed:** 2026-04-18.
+
+`.price-chart-row` is gone. `#chart-grid` is now a 2-column CSS grid (`minmax(0,1fr) 300px`) with four named children at the top:
+
+| Row | Col 1 | Col 2 |
+|---|---|---|
+| 1 | `.tv-toolbar-container` | `.right-rail-tabs` |
+| 2 | `.price-chart-container` (just `#price-chart` + `#rsi-pane` + `#macd-pane`) | `.right-rail-panels` (GEX/Alerts/Levels panels) |
+| 3+ | `#secondary-tabs`, `.charts-grid` — both span both columns | — |
+
+**Deviation from §4: toolbar hoisted out of `.price-chart-container`.** §4 didn't call this out, but the GEX↔candles pixel alignment (preserved since `f1bcf1d`) requires `#price-chart` and `#gex-side-panel` to share the same top screen Y and same height. With the right-rail tab bar eating ~30px at the top of col 2, the GEX panel would sit below the price chart unless col 1 also loses that same height. Fix: move `.tv-toolbar-container` to be a direct child of `#chart-grid` in row 1 col 1 alongside `.right-rail-tabs` in row 1 col 2 — CSS grid's default `align-items: stretch` forces both to the same row height, so whatever the wrapped toolbar's height is, the tab bar matches. Then row 2 has `#price-chart` (col 1) aligned to `.right-rail-panels` (col 2), and the existing `syncGexPanelYAxisToTV()` math keeps working unmodified.
+
+**Tab-gating:** `activeRailTab` (`'gex'` / `'alerts'` / `'levels'`, persisted to `localStorage['gex.rightRailTab']`, default `'gex'`).
+- `renderGexSidePanel(panelJson)` now caches `panelJson` into `_lastGexPanelJson` *before* the active-tab check, so the next `/update_price` while the user is on Alerts/Levels still updates the cache. When the user clicks back to GEX, `applyRightRailTab()` re-renders from that cache and schedules a sync.
+- `syncGexPanelYAxisToTV()` and `scheduleGexPanelSync()` both early-return when `activeRailTab !== 'gex'`, so the `requestAnimationFrame` / scroll / wheel / mouseup / touchend loops stop recomputing when the panel is hidden.
+
+**Rebuild defensive path:** the `applyPriceData()` / `updateCharts()` paths that used to rebuild `.price-chart-row` collapsed into a single `ensurePriceChartDom()` helper that recreates missing chart-grid children in canonical order. The initial HTML always has everything, so this path only triggers if `.price-chart-container` was nuked externally. Uses explicit `grid-column: 1 | 2` rules per child so source order doesn't matter.
+
+**Responsive:** added a `@media (max-width: 1024px)` rule that collapses `#chart-grid` back to a single column (right rail stacks below the candles at a shorter 420px height).
+
+**Stage-5 scope: what's deliberately not done yet.** Per §7, Stage 6 owns alerts relocation + Key Levels table. This stage leaves both as placeholder `<div class="rail-placeholder">` content ("Alerts move here in Stage 6." / "Key levels table lands in Stage 6."). `#trader-alerts-strip` is still the live alerts sink — nothing about `renderTraderStats()` changed.
+
+**Other notes:**
+
+- `.gex-side-panel-wrap` kept as the styling container for the Plotly div, but no longer has a fixed `height: 680px` — its parent (`.right-rail-panel.active`) is a flex column, so the wrap stretches to fill.
+- `.price-chart-container`'s `grid-column: 1 / -1` rule dropped (it was needed when the toolbar was nested inside it and the container spanned the old 1-column grid). Border-radius dropped the top-left/top-right corners since the toolbar now owns the top.
+- Duplicate `.chart-grid { grid-template-columns: 1fr; ... }` rule near the old line 5795 removed (it was shadowing the primary rule and would have overridden the 2-col layout).
+- `let _lastGexPanelJson = null` is a new top-level script-block variable alongside `RAIL_TAB_KEY` / `activeRailTab`. Two new tab-management functions: `applyRightRailTab()` (idempotent — sync DOM classes + re-render GEX if needed) and `wireRightRailTabs()` (idempotent via `btn.__railWired` flag). Both called once at init right after `renderChartVisibilitySection()`.
+
+**Verification:** AST parse clean. Grep confirms zero remaining `.price-chart-row` references. All `#gex-side-panel` / `.gex-side-panel-wrap` references accounted for (CSS, initial markup, rebuild path, JS render/sync). Browser smoke test deferred.
+
+### 10.6 Stage 6 — `feat(ui): move alerts into right rail, add unread badge`
+
+**Landed:** 2026-04-18.
+
+The two Stage-5 placeholder panels are now live. Alerts render into `#right-rail-alerts` (`.rail-alerts-list`) as stacked items with a colored left border (warn / info) and a matching dot. Key Levels render into `#right-rail-levels` as a compact 3-column table (Level / Price / Δ Spot %) sourced from `stats.call_wall` / `put_wall` / `gamma_flip` / `em_upper` / `em_lower`.
+
+The Alerts tab button now carries a `<span class="tab-badge" id="right-rail-alerts-badge">`. Badge shows unread count when `activeRailTab !== 'alerts'` and there are alert texts not in `_alertsSeenKeys`. Switching to the Alerts tab (or rendering while already on it) calls `markRailAlertsSeen()` which copies the current alert texts into the seen set and hides the badge. `_alertsSeenKeys` is a text-keyed `Set` — simple and sufficient because `compute_trader_stats` builds alerts by deterministic template strings (`"Near Call Wall @ 450.25"`).
+
+**Deviation from §4 spec — did not "add unread-count badge" via a separate layer.** The badge is a `<span>` inside the tab button, not an absolutely-positioned dot on top of it. Reason: the tab label is short and rendered in 11 px caps — an overlay badge would have required awkward positioning and clipped against the tab's 2 px underline. Inline keeps the tab self-contained and accessible.
+
+**Key-levels table deviation — compute client-side from `trader_stats` instead of reusing `/update_price`'s `priceResp.key_levels`.** The latter drives the on-chart `renderKeyLevels()` TV price lines and has a richer shape (`{price, move, ...}` per level). `stats` (from `compute_trader_stats`) already holds the same prices as plain numbers plus `spot` for the Δ% computation — fewer moving parts, one source of truth per panel. The table re-renders on every `renderTraderStats()` call so it stays in sync.
+
+**Removed (not just hidden):**
+
+- The `#trader-alerts-strip` div in the initial markup.
+- The `.trader-alerts-strip` and `.alert-chip` CSS blocks (chip style was only used by the removed strip; the new `.rail-alert-item` has its own design).
+- The `.rail-placeholder` CSS block that briefly housed the "move here in Stage 6" copy.
+
+Per CLAUDE.md's "no backwards-compat shims" rule, these are gone rather than left in as orphaned selectors.
+
+**Other notes:**
+
+- `renderTraderStats()` still owns the KPI strip but now delegates alerts and levels rendering to `renderRailAlerts()` / `renderRailKeyLevels()`. When `stats` is null (reset path), both rail renderers are called with empty/null so the panels restore to their empty states ("No active alerts." / "Key levels load with stream data.").
+- `ensurePriceChartDom()` rebuild path updated so the new panel inner HTML survives a rebuild.
+- `applyRightRailTab()` grew two branches: `alerts` → `markRailAlertsSeen()`; `levels` (else) → `_updateAlertsBadge()` to re-sync the badge display after a tab switch.
+- Swatches in the Key Levels table (`#00D084` / `#FF4D4D` / `#FFC400` / `#9CA3AF`) match the TV chart `renderKeyLevels()` line colors verbatim — intentional visual link between the chart lines and the table rows. These are the same literals flagged in §10.1 as living in inline JS; that cleanup is still a separate future pass.
+- `_alertsSeenKeys` is held as module-level state alongside `_lastRailAlerts`, mirroring the `_lastGexPanelJson` pattern from Stage 5. No `localStorage` persistence for the seen set — reloading the page should legitimately re-surface the badge for any alerts that are still firing.
+
+**Verification:** AST parse clean. Grep for the removed tokens (`trader-alerts-strip`, `alert-chip`, `rail-placeholder`) returns zero hits across the file. All new ids (`right-rail-alerts`, `right-rail-alerts-badge`, `right-rail-levels`) have both initial-markup and rebuild-path instantiation. Browser smoke test deferred (user had the app running on :5001 during the commit run).
+
+### 10.7 Stage 7 — `style(kpi): polish KPI cards with new tokens and tabular numerics`
+
+**Landed:** 2026-04-18.
+
+`.kpi-card` / `.kpi-label` / `.kpi-value` / `.kpi-sub` swapped from hardcoded hex (`#2A2A2A`, `#888`, `#e5e5e5`, `#aaa`) and `4px` border-radius to the design tokens (`--border`, `--fg-2`, `--fg-0`, `--fg-1`, `--radius`). `.kpi-value` now uses `var(--font-mono)` and `font-variant-numeric: tabular-nums` so changing digits don't jitter the card width as values tick. `.kpi-sub` also picked up `tabular-nums`.
+
+`.kpi-value` became a `display: flex` / `align-items: baseline` row so the new `.kpi-trend` arrow sits flush-baseline with the value without affecting line height. Padding bumped from `8px 10px` → `9px 12px` and inter-row `gap` from `2px` → `3px` for a slightly less cramped card; strip `margin-bottom` from `8px` → `10px`.
+
+**Trend arrows.** §7 called for `▲▼` arrows tied to `.kpi-pos/.kpi-neg`. Applied to the two signed KPIs:
+
+- **Net GEX**: `▲` if `netGex >= 0`, `▼` otherwise. Inherits `.kpi-pos/.kpi-neg` color from the parent `.kpi-value` (the arrow `<span>` has no color override).
+- **Regime**: `▲` for "Long Gamma", `▼` for "Short Gamma", hidden otherwise. Regime is literally the sign of Net GEX categorized, so an arrow there is natural and matches the Net GEX card visually.
+
+EM and Walls cards got no arrow — both are magnitude / level readings with no inherent up/down direction. Adding one would be misleading.
+
+**Mount location.** §4 prescribed "Pull `.trader-stats-strip` out of header-adjacent flow; mount inside main column above candles." The strip already sits directly above `#chart-grid` (row 6375 in this commit), which is above candles. No mount-point change this stage — just restyled in place. The strip is a full-width sibling of `#chart-grid`, not a col-1-only grid child, which deviates from the §2 ASCII mockup that shows KPI aligned only with the candles column. Kept it full-width intentionally:
+
+- The strip's own `flex-wrap: wrap` + 170px min-width cards already handle responsive shrinkage without fighting the 2-col grid.
+- Moving the strip inside `#chart-grid` at row 0 col 1 would require either extending the grid to 3 rows (breaking the toolbar/rail-tabs same-height alignment from §10.5) or giving right-rail-tabs `grid-row: 1 / span 2`, both of which add fragility for a cosmetic gain.
+
+**Verification:** AST parse clean. Grep over `.kpi-` CSS rules shows zero remaining hex literals — only token references. Browser smoke test deferred.

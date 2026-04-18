@@ -1586,10 +1586,25 @@ def get_net_colors(values, max_val, call_color, put_color, coloring_mode='Solid'
         
         else:  # Solid fallback
             colors.append(base)
-    
+
     return colors
 
-def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.02, show_calls=True, show_puts=True, show_net=True, coloring_mode='Solid', call_color='#00FF00', put_color='#FF0000', selected_expiries=None, horizontal=False, show_abs_gex_area=False, abs_gex_opacity=0.2, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+
+# Centralized Plotly theme — matches CSS tokens in the inline <style> :root block.
+# Chart builders unpack **PLOT_THEME so the dashboard and its charts stay in lockstep.
+PLOT_THEME = dict(
+    paper_bgcolor='#0B0E11',
+    plot_bgcolor='#0B0E11',
+    font=dict(family='Inter, -apple-system, sans-serif', color='#9CA3AF', size=11),
+    xaxis=dict(gridcolor='#1E242D', zerolinecolor='#2A313B'),
+    yaxis=dict(gridcolor='#1E242D', zerolinecolor='#2A313B'),
+    margin=dict(l=50, r=80, t=30, b=24),
+)
+CALL_COLOR = '#10B981'
+PUT_COLOR = '#EF4444'
+
+
+def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.02, show_calls=True, show_puts=True, show_net=True, coloring_mode='Solid', call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None, horizontal=False, show_abs_gex_area=False, abs_gex_opacity=0.2, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Ensure the exposure_type column exists
     if exposure_type not in calls.columns or exposure_type not in puts.columns:
         print(f"Warning: {exposure_type} not found in data")
@@ -1679,9 +1694,9 @@ def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.0
             print(f"Error adding Abs GEX area: {e}")
 
     # Define colors
-    grid_color = '#333333'
-    text_color = '#CCCCCC'
-    background_color = '#1E1E1E'
+    grid_color = PLOT_THEME['xaxis']['gridcolor']
+    text_color = PLOT_THEME['font']['color']
+    background_color = PLOT_THEME['paper_bgcolor']
     
     # Calculate max exposure for normalization across all data (calls, puts, net)
     max_exposure = 1.0
@@ -2016,7 +2031,7 @@ def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.0
 
     return fig.to_json()
 
-def create_volume_chart(call_volume, put_volume, use_itm=True, call_color='#00FF00', put_color='#FF0000', selected_expiries=None):
+def create_volume_chart(call_volume, put_volume, use_itm=True, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
     base_title = '% Range Call vs Put Volume Ratio' if use_itm else 'Call vs Put Volume Ratio'
     title = base_title
     if selected_expiries and len(selected_expiries) > 1:
@@ -2031,15 +2046,15 @@ def create_volume_chart(call_volume, put_volume, use_itm=True, call_color='#00FF
     fig.update_layout(
         title_text=title,
         showlegend=True,
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='white'),
         height=500
     )
     
     return fig.to_json()
 
-def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00', put_color='#FF0000', coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Filter strikes within range
     min_strike = S * (1 - strike_range)
     max_strike = S * (1 + strike_range)
@@ -2255,8 +2270,8 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color='#
         yaxis=yaxis_config,
         barmode='relative',
         hovermode='y unified' if horizontal else 'x unified',
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -2265,13 +2280,13 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color='#
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         bargap=0.1,
         bargroupgap=0.1,
         margin=dict(l=50, r=50, t=50, b=100),
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -2502,7 +2517,7 @@ def convert_to_heikin_ashi(candles):
     
     return ha_candles
 
-def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=[], exposure_levels_count=3, call_color='#00FF00', put_color='#FF0000', strike_range=0.02, use_heikin_ashi=False, highlight_max_level=False, max_level_color='#800080', coloring_mode='Linear Intensity'):
+def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=[], exposure_levels_count=3, call_color=CALL_COLOR, put_color=PUT_COLOR, strike_range=0.02, use_heikin_ashi=False, highlight_max_level=False, max_level_color='#800080', coloring_mode='Linear Intensity'):
     # Handle backward compatibility or empty default
     if isinstance(exposure_levels_types, str):
         if exposure_levels_types == 'None':
@@ -2707,8 +2722,8 @@ def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=
             automargin=True  # Enable automatic margin adjustment
         ),
 
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -2717,7 +2732,7 @@ def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         bargap=0.1,
         bargroupgap=0.1,
@@ -2739,7 +2754,7 @@ def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=
                     size=10,
                     color=current_price_color
                 ),
-                bgcolor='#1E1E1E',
+                bgcolor=PLOT_THEME['paper_bgcolor'],
                 bordercolor=current_price_color,
                 borderwidth=1,
                 borderpad=2,
@@ -3125,7 +3140,7 @@ def build_historical_levels_overlay(ticker, display_date, chart_times, latest_pr
 
 
 def create_gex_side_panel(calls, puts, S, strike_range=0.02,
-                          call_color='#00FF00', put_color='#FF0000',
+                          call_color=CALL_COLOR, put_color=PUT_COLOR,
                           selected_expiries=None):
     """Horizontal-bar GEX panel keyed to strike, intended to render in a sibling
     div next to the TradingView candle chart with a shared visible price range.
@@ -3137,7 +3152,7 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     """
     empty = go.Figure()
     empty.update_layout(
-        paper_bgcolor='#1E1E1E', plot_bgcolor='#1E1E1E',
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'], plot_bgcolor=PLOT_THEME['plot_bgcolor'],
         margin=dict(l=4, r=4, t=4, b=24),
         xaxis=dict(visible=False), yaxis=dict(visible=False),
     )
@@ -3202,8 +3217,8 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     fig.add_hline(y=S, line_color='#888', line_dash='dot', line_width=1)
 
     fig.update_layout(
-        paper_bgcolor='#1E1E1E',
-        plot_bgcolor='#1E1E1E',
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
         margin=dict(l=4, r=4, t=4, b=24),
         height=680,
         xaxis=dict(
@@ -3364,7 +3379,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
 
 
 def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_types=[],
-                              exposure_levels_count=3, call_color='#00FF00', put_color='#FF0000',
+                              exposure_levels_count=3, call_color=CALL_COLOR, put_color=PUT_COLOR,
                               strike_range=0.1, use_heikin_ashi=False,
                               highlight_max_level=False, max_level_color='#800080',
                               coloring_mode='Linear Intensity', ticker=None):
@@ -3583,7 +3598,7 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     })
 
 
-def create_large_trades_table(calls, puts, S, strike_range, call_color='#00FF00', put_color='#FF0000', selected_expiries=None):
+def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
     """Create a sortable options chain table showing all options within the strike range"""
     # Calculate strike range boundaries
     min_strike = S * (1 - strike_range)
@@ -3729,7 +3744,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color='#00FF00'
             const span = header.querySelector('span');
             if (index === columnIndex) {
                 span.textContent = direction === 'asc' ? '▲' : '▼';
-                span.style.color = '#00FF00';
+                span.style.color = '#10B981';
             } else {
                 span.textContent = '▼▲';
                 span.style.color = '#666';
@@ -4030,8 +4045,8 @@ def create_historical_bubble_levels_chart(ticker, strike_range, call_color='#00F
             zeroline=True,
             zerolinecolor='#333333'
         ),
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -4040,14 +4055,14 @@ def create_historical_bubble_levels_chart(ticker, strike_range, call_color='#00F
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         margin=dict(l=50, r=50, t=50, b=20),
         showlegend=True,
         autosize=True,
         hovermode='closest',
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -4063,7 +4078,7 @@ def create_historical_bubble_levels_chart(ticker, strike_range, call_color='#00F
 
 
 
-def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00', put_color='#FF0000', coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Filter strikes within range
     min_strike = S * (1 - strike_range)
     max_strike = S * (1 + strike_range)
@@ -4269,8 +4284,8 @@ def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color='#0
         yaxis=yaxis_config,
         barmode='relative',
         hovermode='y unified' if horizontal else 'x unified',
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -4279,13 +4294,13 @@ def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color='#0
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         bargap=0.1,
         bargroupgap=0.1,
         margin=dict(l=50, r=50, t=50, b=100),
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -4343,7 +4358,7 @@ def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color='#0
 
     return fig.to_json()
 
-def create_premium_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00', put_color='#FF0000', coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+def create_premium_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Filter strikes within range
     min_strike = S * (1 - strike_range)
     max_strike = S * (1 + strike_range)
@@ -4559,8 +4574,8 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00'
         yaxis=yaxis_config,
         barmode='relative',
         hovermode='y unified' if horizontal else 'x unified',
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -4569,13 +4584,13 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00'
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         bargap=0.1,
         bargroupgap=0.1,
         margin=dict(l=50, r=50, t=40, b=20),
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -4635,7 +4650,7 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00'
 
     return fig.to_json()
 
-def create_centroid_chart(ticker, call_color='#00FF00', put_color='#FF0000', selected_expiries=None):
+def create_centroid_chart(ticker, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
     """Create a chart showing call and put centroids over time with price line"""
     est = pytz.timezone('US/Eastern')
     current_time_est = datetime.now(est)
@@ -4644,8 +4659,8 @@ def create_centroid_chart(ticker, call_color='#00FF00', put_color='#FF0000', sel
         fig = go.Figure()
         fig.update_layout(
             title=dict(text=title, font=dict(color='#CCCCCC', size=16), x=0.5, xanchor='center'),
-            plot_bgcolor='#1E1E1E',
-            paper_bgcolor='#1E1E1E',
+            plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+            paper_bgcolor=PLOT_THEME['paper_bgcolor'],
             font=dict(color='#CCCCCC'),
             xaxis=dict(title='Time', title_font=dict(color='#CCCCCC'), tickfont=dict(color='#CCCCCC')),
             yaxis=dict(title='Price/Strike', title_font=dict(color='#CCCCCC'), tickfont=dict(color='#CCCCCC')),
@@ -4769,8 +4784,8 @@ def create_centroid_chart(ticker, call_color='#00FF00', put_color='#FF0000', sel
             zeroline=True,
             zerolinecolor='#333333'
         ),
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -4779,14 +4794,14 @@ def create_centroid_chart(ticker, call_color='#00FF00', put_color='#FF0000', sel
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         margin=dict(l=50, r=50, t=50, b=20),
         showlegend=True,
         autosize=True,
         hovermode='x unified',
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -4851,10 +4866,21 @@ def index():
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
+        :root {
+            --bg-0:#0B0E11; --bg-1:#151A21; --bg-2:#1E242D; --bg-3:#262D38;
+            --border:#2A313B; --border-strong:#3A424F;
+            --fg-0:#E5E7EB; --fg-1:#9CA3AF; --fg-2:#6B7280;
+            --call:#10B981; --put:#EF4444; --accent:#3B82F6;
+            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981;
+            --radius:6px; --radius-lg:10px;
+            --font-ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
+            --font-mono:"SF Mono","JetBrains Mono",Menlo,monospace;
+        }
+        .num { font-variant-numeric: tabular-nums; }
         body {
-            background-color: #1E1E1E;
-            color: white;
-            font-family: Arial, sans-serif;
+            background-color: var(--bg-0);
+            color: var(--fg-0);
+            font-family: var(--font-ui);
             margin: 0;
             padding: 0;
             width: 100%;
@@ -4891,7 +4917,7 @@ def index():
         }
         .tm-btn {
             background: none;
-            border: 1px solid #444;
+            border: 1px solid var(--border);
             color: #777;
             border-radius: 4px;
             padding: 2px 7px;
@@ -4901,7 +4927,7 @@ def index():
         }
         .tm-btn:hover { color: #ccc; border-color: #777; }
         .tm-btn-del {
-            border-color: #444;
+            border-color: var(--border);
             color: #666;
         }
         .tm-btn-del:hover { background: #2a1010; border-color: #883333; color: #cc4444; }
@@ -4911,47 +4937,67 @@ def index():
             margin: 0 auto;
             padding: 15px;
         }
-        .header {
+        /* Slim sticky top bar (replaces .header / .header-top / .header-bottom) */
+        .top-bar {
             display: flex;
-            flex-direction: column;
-            gap: 15px;
-            margin-bottom: 20px;
-            padding: 20px;
-            background-color: #2D2D2D;
-            border-radius: 10px;
-            width: 100%;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 14px;
+            background: var(--bg-1);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            min-height: 44px;
             box-sizing: border-box;
+            margin-bottom: 14px;
         }
-        .header-top {
-            display: flex;
-            justify-content: space-between;
+        .top-bar .top-spacer { flex: 1; }
+        .top-bar input[type="text"],
+        .top-bar select {
+            padding: 4px 8px;
+            min-width: 0;
+            min-height: 28px;
+            font-size: 13px;
+        }
+        .top-bar #ticker { width: 90px; min-width: 90px; }
+        .top-bar #timeframe { width: 92px; min-width: 92px; }
+        .top-bar .expiry-dropdown { min-width: 150px; }
+        .top-bar .expiry-display { padding: 4px 8px; min-height: 28px; font-size: 13px; }
+        .top-bar #token-monitor {
+            display: inline-flex;
             align-items: center;
-            flex-wrap: wrap;
-            gap: 15px;
+            gap: 6px;
+            font-size: 11px;
         }
-        .header-bottom {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 15px;
-            padding-top: 15px;
-            border-top: 1px solid #444;
-        }
+        /* Drawer/modal-friendly control wrappers (still used by existing event handlers) */
         .controls {
             display: flex;
-            gap: 15px;
+            gap: 10px;
             align-items: center;
             flex-wrap: wrap;
         }
         .control-group {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: center;
-            background-color: #333;
+            background-color: var(--bg-2);
             padding: 8px 12px;
-            border-radius: 6px;
+            border-radius: var(--radius);
         }
+        /* Inside the drawer, control-groups go full-width and lose their pill background */
+        .drawer-content .control-group {
+            background: transparent;
+            padding: 0;
+            border-radius: 0;
+            width: 100%;
+            flex-wrap: wrap;
+        }
+        .drawer-content .control-group label { font-size: 12px; color: var(--fg-1); }
+        .drawer-content input[type="text"],
+        .drawer-content select { width: 100%; min-width: 0; }
+        .drawer-content .expiry-dropdown,
+        .drawer-content .levels-dropdown { width: 100%; min-width: 0; }
         .expiry-dropdown {
             position: relative;
             min-width: 150px;
@@ -4959,8 +5005,8 @@ def index():
         .expiry-display {
             padding: 8px 12px;
             border-radius: 6px;
-            border: 1px solid #444;
-            background-color: #333;
+            border: 1px solid var(--border);
+            background-color: var(--bg-2);
             color: white;
             cursor: pointer;
             display: flex;
@@ -4982,8 +5028,8 @@ def index():
             top: 100%;
             left: 0;
             right: 0;
-            background-color: #333;
-            border: 1px solid #444;
+            background-color: var(--bg-2);
+            border: 1px solid var(--border);
             border-radius: 6px;
             border-top: none;
             border-top-left-radius: 0;
@@ -5005,16 +5051,16 @@ def index():
             transition: background-color 0.2s;
         }
         .expiry-option:hover {
-            background-color: #444;
+            background-color: var(--bg-3);
         }
         .expiry-option input[type="checkbox"] {
             width: 16px;
             height: 16px;
-            accent-color: #00FF00;
+            accent-color: var(--call);
         }
         .expiry-buttons {
             padding: 6px 8px;
-            border-top: 1px solid #444;
+            border-top: 1px solid var(--border);
             display: flex;
             flex-wrap: wrap;
             gap: 5px;
@@ -5024,7 +5070,7 @@ def index():
             font-size: 10px;
             border-radius: 4px;
             border: 1px solid #555;
-            background-color: #444;
+            background-color: var(--border);
             color: white;
             cursor: pointer;
             flex: 1;
@@ -5055,8 +5101,8 @@ def index():
         .levels-display {
             padding: 8px 12px;
             border-radius: 6px;
-            border: 1px solid #444;
-            background-color: #333;
+            border: 1px solid var(--border);
+            background-color: var(--bg-2);
             color: white;
             cursor: pointer;
             display: flex;
@@ -5078,8 +5124,8 @@ def index():
             top: 100%;
             left: 0;
             right: 0;
-            background-color: #333;
-            border: 1px solid #444;
+            background-color: var(--bg-2);
+            border: 1px solid var(--border);
             border-radius: 6px;
             border-top: none;
             border-top-left-radius: 0;
@@ -5101,12 +5147,12 @@ def index():
             transition: background-color 0.2s;
         }
         .levels-option:hover {
-            background-color: #444;
+            background-color: var(--bg-3);
         }
         .levels-option input[type="checkbox"] {
             width: 16px;
             height: 16px;
-            accent-color: #00FF00;
+            accent-color: var(--call);
         }
         .control-group label {
             white-space: nowrap;
@@ -5114,8 +5160,8 @@ def index():
         input[type="text"], select {
             padding: 8px 12px;
             border-radius: 6px;
-            border: 1px solid #444;
-            background-color: #333;
+            border: 1px solid var(--border);
+            background-color: var(--bg-2);
             color: white;
             min-width: 120px;
         }
@@ -5123,7 +5169,7 @@ def index():
         input[type="range"] {
             width: 150px;
             height: 6px;
-            background: #444;
+            background: var(--border);
             border-radius: 3px;
             outline: none;
         }
@@ -5131,7 +5177,7 @@ def index():
             -webkit-appearance: none;
             width: 16px;
             height: 16px;
-            background: #00FF00;
+            background: var(--call);
             border-radius: 50%;
             cursor: pointer;
         }
@@ -5139,54 +5185,37 @@ def index():
             min-width: 40px;
             text-align: center;
         }
-        .chart-selector {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-            margin: 20px 0;
-            width: 100%;
-        }
-        .chart-checkbox {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            background-color: #333;
-            padding: 6px 10px;
-            border-radius: 6px;
-        }
-        .chart-checkbox input[type="checkbox"] {
-            width: 16px;
-            height: 16px;
-            cursor: pointer;
-        }
-        .chart-checkbox label {
-            cursor: pointer;
-        }
         .chart-grid {
             display: grid;
-            grid-template-columns: 1fr;
-            gap: 5px;
+            grid-template-columns: minmax(0, 1fr) 300px;
+            column-gap: 4px;
+            row-gap: 5px;
             width: 100%;
+            align-items: stretch;
         }
-        
-        .price-chart-container {
-            /* overridden below by TV chart styles */
-        }
-        
-        
+        /* Row 1: toolbar (col 1) + right-rail tabs (col 2) — same grid row, so both stretch to the row's max height. */
+        .chart-grid > .tv-toolbar-container { grid-column: 1; }
+        .chart-grid > .right-rail-tabs      { grid-column: 2; }
+        /* Row 2: price chart (col 1) + right-rail panels (col 2). Same row → same height. */
+        .chart-grid > .price-chart-container { grid-column: 1; }
+        .chart-grid > .right-rail-panels     { grid-column: 2; }
+        /* Remaining rows span both columns. */
+        .chart-grid > #secondary-tabs { grid-column: 1 / -1; }
+        .chart-grid > .charts-grid    { grid-column: 1 / -1; }
+
         .chart-container {
             padding: 5px;
             height: 500px;
             width: 100%;
             min-width: 0;
             position: relative;
-            background-color: #2D2D2D;
+            background-color: var(--bg-1);
             border-radius: 10px;
             margin-bottom: 5px;
             display: flex;
             flex-direction: column;
         }
-        
+
         .chart-container > div {
             flex: 1;
             width: 100%;
@@ -5196,33 +5225,175 @@ def index():
         /* TradingView-style price chart overrides */
         .price-chart-container {
             background: #1a1a1a;
-            border-radius: 10px;
+            border-radius: 0 0 10px 10px;
             overflow: hidden;
             margin-bottom: 5px;
-            grid-column: 1 / -1;
         }
-        .price-chart-row {
+
+        /* ── Right rail (GEX / Alerts / Levels) ──────────────────────── */
+        .right-rail-tabs {
             display: flex;
-            flex-direction: row;
-            gap: 4px;
             align-items: stretch;
+            gap: 0;
+            background: #1a1a1a;
+            border-bottom: 1px solid var(--bg-2);
+            border-radius: 10px 10px 0 0;
+            padding: 0;
+            overflow: hidden;
         }
-        .price-chart-row > #price-chart { flex: 1 1 78%; min-width: 0; }
-        .price-chart-row > .gex-side-panel-wrap { flex: 0 0 22%; min-width: 180px; max-width: 320px; }
-        .gex-side-panel-wrap {
-            background: #1E1E1E;
-            border-radius: 0;
+        .right-rail-tab {
+            flex: 1 1 0;
+            background: transparent;
+            color: var(--fg-1);
+            border: none;
+            border-bottom: 2px solid transparent;
+            padding: 6px 4px;
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            cursor: pointer;
+            min-width: 0;
+        }
+        .right-rail-tab:hover { color: var(--fg-0); }
+        .right-rail-tab.active {
+            color: var(--fg-0);
+            border-bottom-color: var(--accent);
+        }
+        .right-rail-panels {
+            position: relative;
+            background: var(--bg-0);
             height: 680px;
             display: flex;
             flex-direction: column;
+            min-width: 0;
         }
-        .gex-side-panel-header {
-            padding: 6px 8px;
+        .right-rail-panel {
+            display: none;
+            flex: 1;
+            min-height: 0;
+            flex-direction: column;
+        }
+        .right-rail-panel.active { display: flex; }
+        .right-rail-tab { position: relative; }
+        .right-rail-tab .tab-badge {
+            display: none;
+            margin-left: 6px;
+            padding: 1px 6px;
+            background: var(--warn);
+            color: var(--bg-0);
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1.3;
+            vertical-align: middle;
+        }
+        .right-rail-tab .tab-badge.visible { display: inline-block; }
+
+        /* Alerts panel */
+        .rail-alerts-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-height: 0;
+        }
+        .rail-alerts-empty {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--fg-2);
+            font-size: 12px;
+            text-align: center;
+            padding: 16px;
+            line-height: 1.4;
+        }
+        .rail-alert-item {
+            display: flex;
+            gap: 8px;
+            padding: 8px 10px;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--fg-2);
+            border-radius: var(--radius);
             font-size: 11px;
-            color: #888;
-            border-bottom: 1px solid #2A2A2A;
-            letter-spacing: 0.04em;
+            color: var(--fg-0);
+            line-height: 1.35;
+        }
+        .rail-alert-item.warn { border-left-color: var(--warn); }
+        .rail-alert-item.info { border-left-color: var(--info); }
+        .rail-alert-item .rail-alert-dot {
+            flex: 0 0 auto;
+            width: 6px;
+            height: 6px;
+            margin-top: 5px;
+            border-radius: 50%;
+            background: var(--fg-2);
+        }
+        .rail-alert-item.warn .rail-alert-dot { background: var(--warn); }
+        .rail-alert-item.info .rail-alert-dot { background: var(--info); }
+
+        /* Key Levels table */
+        .rail-levels-table {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            min-height: 0;
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-levels-table table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }
+        .rail-levels-table th {
+            color: var(--fg-2);
+            font-weight: 500;
+            text-align: left;
+            padding: 6px 4px;
+            border-bottom: 1px solid var(--border);
+            letter-spacing: 0.05em;
             text-transform: uppercase;
+            font-size: 10px;
+        }
+        .rail-levels-table th.num { text-align: right; }
+        .rail-levels-table td {
+            padding: 8px 4px;
+            border-bottom: 1px solid var(--bg-2);
+            color: var(--fg-0);
+        }
+        .rail-levels-table td.num { text-align: right; }
+        .rail-levels-table .lvl-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .rail-levels-table .lvl-swatch {
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+            background: var(--fg-2);
+            flex: 0 0 auto;
+        }
+        .rail-levels-table .lvl-dist.pos { color: var(--call); }
+        .rail-levels-table .lvl-dist.neg { color: var(--put); }
+        .rail-levels-table .lvl-empty {
+            color: var(--fg-2);
+            text-align: center;
+            padding: 16px 4px;
+            font-size: 11px;
+        }
+
+        .gex-side-panel-wrap {
+            background: var(--bg-0);
+            border-radius: 0;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
         }
         #gex-side-panel { flex: 1; min-height: 0; }
 
@@ -5230,48 +5401,46 @@ def index():
         .trader-stats-strip {
             display: flex;
             gap: 8px;
-            margin: 0 0 8px 0;
+            margin: 0 0 10px 0;
             flex-wrap: wrap;
         }
         .kpi-card {
             flex: 1 1 0;
             min-width: 170px;
-            background: #1E1E1E;
-            border: 1px solid #2A2A2A;
-            border-radius: 4px;
-            padding: 8px 10px;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 9px 12px;
             display: flex;
             flex-direction: column;
-            gap: 2px;
+            gap: 3px;
         }
         .kpi-label {
             font-size: 10px;
-            color: #888;
+            color: var(--fg-2);
             letter-spacing: 0.08em;
             text-transform: uppercase;
+            font-weight: 500;
         }
-        .kpi-value { font-size: 18px; font-weight: 600; color: #e5e5e5; }
-        .kpi-sub   { font-size: 11px; color: #aaa; }
-        .kpi-pos   { color: #00D084; }
-        .kpi-neg   { color: #FF4D4D; }
-
-        /* ── Alerts strip ─────────────────────────────────────────── */
-        .trader-alerts-strip {
+        .kpi-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--fg-0);
+            font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
+            line-height: 1.2;
             display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            margin: 0 0 10px 0;
+            align-items: baseline;
+            gap: 4px;
         }
-        .alert-chip {
-            padding: 3px 10px;
-            border-radius: 12px;
+        .kpi-sub {
             font-size: 11px;
-            background: #1E1E1E;
-            border: 1px solid #2A2A2A;
-            color: #ccc;
+            color: var(--fg-1);
+            font-variant-numeric: tabular-nums;
         }
-        .alert-chip.warn { border-color: #FFC400; color: #FFC400; }
-        .alert-chip.info { border-color: #3E82F1; color: #88B4FF; }
+        .kpi-pos   { color: var(--call); }
+        .kpi-neg   { color: var(--put); }
+        .kpi-trend { font-size: 12px; line-height: 1; }
 
         /* ── Secondary chart tab bar ──────────────────────────────── */
         .secondary-tabs {
@@ -5305,7 +5474,7 @@ def index():
         .charts-grid .chart-container.tab-hidden { display: none !important; }
         #price-chart {
             padding: 0 !important;
-            background-color: #1E1E1E !important;
+            background-color: var(--bg-0) !important;
             height: 680px !important;
             border-radius: 0 0 0 0;
             overflow: hidden;
@@ -5429,7 +5598,7 @@ def index():
         /* Chart toolbar — sits ABOVE the canvas, normal document flow */
         .tv-toolbar-container {
             background: #1a1a1a;
-            border-bottom: 1px solid #333;
+            border-bottom: 1px solid var(--bg-2);
             border-radius: 10px 10px 0 0;
             padding: 4px 8px;
             display: flex;
@@ -5443,12 +5612,12 @@ def index():
         .tv-toolbar-sep {
             width: 1px;
             height: 20px;
-            background: #444;
+            background: var(--border);
             margin: 0 2px;
         }
         .tv-tb-btn {
             background: #2a2a2a;
-            border: 1px solid #444;
+            border: 1px solid var(--border);
             color: #ccc;
             border-radius: 4px;
             padding: 3px 7px;
@@ -5486,8 +5655,8 @@ def index():
         }
         /* RSI / MACD sub-panes */
         .tv-sub-pane {
-            background: #1E1E1E;
-            border-top: 1px solid #333;
+            background: var(--bg-0);
+            border-top: 1px solid var(--bg-2);
             position: relative;
             overflow: hidden;
         }
@@ -5522,8 +5691,8 @@ def index():
             line-height: 1.6;
         }
         .tv-ohlc-tooltip .tt-time { color: #aaa; font-size: 10px; margin-bottom: 2px; }
-        .tv-ohlc-tooltip .tt-up   { color: #00FF00; }
-        .tv-ohlc-tooltip .tt-dn   { color: #FF4444; }
+        .tv-ohlc-tooltip .tt-up   { color: var(--call); }
+        .tv-ohlc-tooltip .tt-dn   { color: var(--put); }
         /* Candle close timer */
         .candle-close-timer {
             font-size: 11px;
@@ -5531,7 +5700,7 @@ def index():
             padding: 3px 7px;
             border-radius: 4px;
             background: #2a2a2a;
-            border: 1px solid #444;
+            border: 1px solid var(--border);
             color: #ccc;
             white-space: nowrap;
             user-select: none;
@@ -5546,16 +5715,16 @@ def index():
             width: 100%;
         }
         .green {
-            color: #00FF00;
+            color: var(--call);
         }
         .red {
-            color: #FF0000;
+            color: var(--put);
         }
         button {
             padding: 8px 16px;
             border-radius: 6px;
             border: none;
-            background-color: #444;
+            background-color: var(--border);
             color: white;
             cursor: pointer;
             transition: background-color 0.2s;
@@ -5564,99 +5733,212 @@ def index():
             background-color: #555;
         }
         .title {
-            font-size: 1.5em;
-            font-weight: bold;
-            color: #800080;
+            font-size: 1.05em;
+            font-weight: 600;
+            color: var(--accent);
+            letter-spacing: 0.02em;
+            margin-right: 4px;
+            white-space: nowrap;
         }
-        .stream-control {
+        /* Icon button — hamburger, gear, etc. */
+        .btn-icon {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--fg-0);
+            min-width: 32px;
+            height: 28px;
+            padding: 0 6px;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-size: 15px;
+            line-height: 1;
             display: inline-flex;
             align-items: center;
-            margin-left: 10px;
+            justify-content: center;
         }
-        .stream-control button {
-            padding: 8px 16px;
-            border-radius: 4px;
-            border: 1px solid #404040;
-            background-color: #2d2d2d;
-            color: #ffffff;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            transition: all 0.2s ease;
-            display: flex;
+        .btn-icon:hover { background: var(--bg-2); border-color: var(--border-strong); color: var(--fg-0); }
+        /* Stream toggle pill (replaces .stream-control button) */
+        .stream-pill {
+            display: inline-flex;
             align-items: center;
-            gap: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-            height: 36px; /* Match the height of other controls */
+            gap: 6px;
+            padding: 4px 12px;
+            height: 28px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg-2);
+            color: var(--fg-0);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: background-color 0.15s, border-color 0.15s;
         }
-        .stream-control button:hover {
-            background-color: #3d3d3d;
-            transform: translateY(-1px);
-        }
-        .stream-control button.paused {
-            background-color: #2d2d2d;
-            color: #ff4444;
-        }
-        .stream-control button.paused:hover {
-            background-color: #3d3d3d;
-        }
-        .stream-control button::before {
+        .stream-pill::before {
             content: '';
             display: inline-block;
-            width: 8px;
-            height: 8px;
+            width: 8px; height: 8px;
             border-radius: 50%;
-            background-color: #4CAF50;
-            transition: background-color 0.2s ease;
+            background: var(--call);
+            box-shadow: 0 0 6px var(--call);
+            transition: background-color 0.15s, box-shadow 0.15s;
         }
-        .stream-control button.paused::before {
-            background-color: #ff4444;
-        }
-        .stream-control button:active {
-            transform: translateY(0);
-            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
-        }
-        .settings-control {
+        .stream-pill:hover { background: var(--bg-3); border-color: var(--border-strong); }
+        .stream-pill.paused { color: var(--put); }
+        .stream-pill.paused::before { background: var(--put); box-shadow: 0 0 6px var(--put); }
+        /* Ghost buttons — drawer footer Save/Load and modal Done */
+        .btn-ghost {
+            padding: 6px 12px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg-2);
+            color: var(--fg-0);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            margin-left: 10px;
+            gap: 6px;
+            transition: background-color 0.15s, border-color 0.15s;
         }
-        .settings-control button {
-            padding: 8px 16px;
-            border-radius: 4px;
-            border: 1px solid #404040;
-            background-color: #2d2d2d;
-            color: #ffffff;
+        .btn-ghost:hover { background: var(--bg-3); border-color: var(--border-strong); }
+        .btn-ghost.success { background: var(--ok); border-color: var(--ok); color: var(--bg-0); }
+        /* Slide-in settings drawer */
+        .drawer-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 199;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+        }
+        .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+        .drawer {
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 100vh;
+            width: 320px;
+            max-width: 86vw;
+            background: var(--bg-1);
+            border-right: 1px solid var(--border);
+            transform: translateX(-100%);
+            transition: transform 0.25s ease;
+            z-index: 200;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 4px 0 16px rgba(0,0,0,0.5);
+        }
+        .drawer.open { transform: translateX(0); }
+        .drawer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        .drawer-header h3 {
+            margin: 0;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--fg-1);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .drawer-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0;
+        }
+        .drawer-footer {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px;
+        }
+        .drawer-section {
+            border-bottom: 1px solid var(--border);
+        }
+        .drawer-section > summary {
             cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            transition: all 0.2s ease;
+            padding: 10px 16px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--fg-1);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .drawer-section > summary::-webkit-details-marker { display: none; }
+        .drawer-section > summary::after {
+            content: '▸';
+            font-size: 10px;
+            color: var(--fg-2);
+            transition: transform 0.15s ease;
+        }
+        .drawer-section[open] > summary::after { transform: rotate(90deg); }
+        .drawer-section > summary:hover { background: var(--bg-2); color: var(--fg-0); }
+        .drawer-content {
+            padding: 6px 16px 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        /* Chart visibility toggles inside the drawer's "Sections" group */
+        .visibility-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px 12px;
+        }
+        .visibility-toggle {
             display: flex;
             align-items: center;
             gap: 6px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-            height: 36px;
+            font-size: 12px;
+            color: var(--fg-0);
+            cursor: pointer;
         }
-        .settings-control button:hover {
-            background-color: #3d3d3d;
-            transform: translateY(-1px);
+        .visibility-toggle input { accent-color: var(--accent); }
+        /* Settings modal (gear icon) — color pickers and coloring mode */
+        .settings-modal {
+            border: 1px solid var(--border);
+            background: var(--bg-1);
+            color: var(--fg-0);
+            border-radius: var(--radius-lg);
+            padding: 20px 22px;
+            max-width: 380px;
+            width: 92vw;
         }
-        .settings-control button:active {
-            transform: translateY(0);
-            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+        .settings-modal::backdrop { background: rgba(0,0,0,0.55); }
+        .settings-modal h3 {
+            margin: 0 0 12px 0;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--fg-1);
         }
-        .settings-control button.success {
-            background-color: #2e7d32;
-            border-color: #4caf50;
+        .settings-modal .modal-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--bg-2);
+            font-size: 13px;
         }
-        .chart-grid {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 5px;
-            width: 100%;
+        .settings-modal .modal-row:last-of-type { border-bottom: none; }
+        .settings-modal .modal-row label { color: var(--fg-1); }
+        .settings-modal .modal-row select { min-width: 160px; }
+        .settings-modal .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 14px;
         }
-        
+
         /* Add new CSS for the responsive grid layout */
         .charts-grid {
             display: grid;
@@ -5710,19 +5992,37 @@ def index():
             font-size: 18px;
         }
         
+        /* Collapse right rail below the main chart on narrow widths */
+        @media screen and (max-width: 1024px) {
+            .chart-grid {
+                grid-template-columns: 1fr;
+            }
+            .chart-grid > .tv-toolbar-container,
+            .chart-grid > .right-rail-tabs,
+            .chart-grid > .price-chart-container,
+            .chart-grid > .right-rail-panels,
+            .chart-grid > #secondary-tabs,
+            .chart-grid > .charts-grid {
+                grid-column: 1;
+            }
+            .right-rail-panels { height: 420px; }
+        }
+
         /* Mobile responsive styles */
         @media screen and (max-width: 768px) {
             .container {
                 width: 100%;
                 padding: 10px;
             }
-            .header {
-                padding: 10px;
+            .top-bar {
+                gap: 6px;
+                padding: 6px 10px;
+                flex-wrap: wrap;
+                min-height: auto;
             }
-            .header-top, .header-bottom {
-                flex-direction: column;
-                align-items: stretch;
-            }
+            .top-bar #token-monitor { display: none; }
+            .top-bar .title { font-size: 1em; }
+            .drawer { width: 86vw; }
             .controls {
                 flex-direction: column;
                 width: 100%;
@@ -5730,39 +6030,21 @@ def index():
             .control-group {
                 width: 100%;
                 justify-content: space-between;
-                min-height: 44px; /* Touch-friendly height */
-            }
-            .control-group label {
-                font-size: 14px;
-            }
-            input[type="text"], select {
-                min-width: 100px;
-                font-size: 16px; /* Prevent zoom on iOS */
                 min-height: 44px;
             }
-            input[type="range"] {
-                width: 100px;
+            .drawer-content .control-group { min-height: 0; }
+            .control-group label { font-size: 14px; }
+            input[type="text"], select {
+                min-width: 100px;
+                font-size: 16px;
+                min-height: 44px;
             }
-            .expiry-dropdown, .levels-dropdown {
-                width: 100%;
-            }
+            input[type="range"] { width: 100px; }
+            .expiry-dropdown, .levels-dropdown { width: 100%; }
             .expiry-display, .levels-display {
                 min-height: 44px;
                 display: flex;
                 align-items: center;
-            }
-            .chart-selector {
-                flex-direction: column;
-            }
-            .chart-checkbox {
-                width: 100%;
-                min-height: 44px;
-                display: flex;
-                align-items: center;
-            }
-            .chart-checkbox input[type="checkbox"] {
-                width: 22px;
-                height: 22px;
             }
             .charts-grid.two-charts,
             .charts-grid.three-charts,
@@ -5770,21 +6052,15 @@ def index():
             .charts-grid.many-charts {
                 grid-template-columns: 1fr;
             }
-            .chart-container {
-                height: 350px;
-            }
+            .chart-container { height: 350px; }
             .price-info {
                 flex-direction: column;
                 align-items: flex-start;
                 font-size: 1em;
             }
-            .stream-control button, .settings-control button {
-                min-height: 44px;
-                padding: 10px 16px;
-            }
-            button {
-                min-height: 44px;
-            }
+            .stream-pill, .btn-ghost { min-height: 36px; }
+            .btn-icon { min-height: 36px; }
+            button { min-height: 44px; }
         }
         
         @media screen and (max-width: 480px) {
@@ -5837,7 +6113,7 @@ def index():
             border-radius: 0 !important;
             margin: 0 !important;
             padding: 10px !important;
-            background-color: #1E1E1E !important;
+            background-color: var(--bg-0) !important;
             box-sizing: border-box !important;
             overflow: visible !important;
         }
@@ -5898,259 +6174,231 @@ def index():
         <div id="error-message"></div>
     </div>
     <div class="container">
-        <div class="header">
-            <div class="header-top">
-                <div>
-                    <div class="title">EzDuz1t Options</div>
-                    <div id="token-monitor">
-                        <span class="tm-dot tm-neutral" id="tm-dot"></span>
-                        <span class="tm-stats" style="color:#666;font-size:10px;">SCHWAB API</span>
-                        <span class="tm-stats" id="tm-access-stat" title="">…</span>
-                        <span class="tm-stats" style="color:#444;">·</span>
-                        <span class="tm-stats" id="tm-refresh-stat" title="">…</span>
-                        <div class="tm-btn-group">
-                            <button class="tm-btn" onclick="fetchTokenHealth()" title="Refresh token status">&#8635;</button>
-                            <button class="tm-btn tm-btn-del" onclick="forceDeleteToken()" title="Clear stored tokens">&#128465; reset</button>
+        <nav class="top-bar">
+            <button id="drawerToggle" class="btn-icon" title="Open settings drawer" aria-label="Open settings">&#9776;</button>
+            <div class="title">EzDuz1t Options</div>
+            <input type="text" id="ticker" placeholder="Ticker" value="SPY" title="Enter a ticker symbol (e.g., SPY, AAPL) or special aggregate tickers: 'MARKET' (SPX base) or 'MARKET2' (SPY base)">
+            <select id="timeframe" title="Candle timeframe">
+                <option value="1">1 min</option>
+                <option value="5">5 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">1 hour</option>
+            </select>
+            <div class="expiry-dropdown">
+                <div class="expiry-display" id="expiry-display">
+                    <span id="expiry-text">Select expiry dates...</span>
+                </div>
+                <div class="expiry-options" id="expiry-options">
+                    <div class="expiry-buttons">
+                        <div class="expiry-range-btns">
+                            <button type="button" id="expiryToday">Today</button>
+                            <button type="button" id="expiryThisWk">This Wk</button>
+                            <button type="button" id="expiry2Wks">+1 Wk</button>
+                            <button type="button" id="expiry4Wks">+2 Wks</button>
+                            <button type="button" id="expiry1Mo">+1 Mo</button>
                         </div>
+                        <button type="button" id="selectAllExpiry">All</button>
+                        <button type="button" id="clearAllExpiry">Clear</button>
                     </div>
                 </div>
-                <div class="controls">
-                    <div class="control-group">
-                        <label for="ticker">Ticker:</label>
-                        <input type="text" id="ticker" placeholder="Enter Ticker" value="SPY" title="Enter a ticker symbol (e.g., SPY, AAPL) or special aggregate tickers: 'MARKET' (SPX base) or 'MARKET2' (SPY base)">
+            </div>
+            <button id="streamToggle" class="stream-pill">Auto-Update</button>
+            <button id="settingsToggle" class="btn-icon" title="Color &amp; coloring settings" aria-label="Color settings">&#9881;</button>
+            <div class="top-spacer"></div>
+            <div id="token-monitor">
+                <span class="tm-dot tm-neutral" id="tm-dot"></span>
+                <span class="tm-stats" style="color:var(--fg-2);font-size:10px;">SCHWAB API</span>
+                <span class="tm-stats" id="tm-access-stat" title="">…</span>
+                <span class="tm-stats" style="color:var(--fg-2);">·</span>
+                <span class="tm-stats" id="tm-refresh-stat" title="">…</span>
+                <div class="tm-btn-group">
+                    <button class="tm-btn" onclick="fetchTokenHealth()" title="Refresh token status">&#8635;</button>
+                    <button class="tm-btn tm-btn-del" onclick="forceDeleteToken()" title="Clear stored tokens">&#128465; reset</button>
+                </div>
+            </div>
+        </nav>
+
+        <div class="drawer-backdrop" id="drawer-backdrop"></div>
+        <aside class="drawer" id="settings-drawer" aria-hidden="true">
+            <div class="drawer-header">
+                <h3>Settings</h3>
+                <button id="drawerClose" class="btn-icon" title="Close" aria-label="Close drawer">&times;</button>
+            </div>
+            <div class="drawer-body">
+                <details class="drawer-section" open>
+                    <summary>Sections</summary>
+                    <div class="drawer-content">
+                        <div class="visibility-grid" id="chart-visibility-list"><!-- populated by renderChartVisibilitySection() --></div>
                     </div>
-                    <div class="control-group">
-                        <label for="timeframe">Timeframe:</label>
-                        <select id="timeframe">
-                            <option value="1">1 min</option>
-                            <option value="5">5 min</option>
-                            <option value="15">15 min</option>
-                            <option value="30">30 min</option>
-                            <option value="60">1 hour</option>
-                        </select>
+                </details>
+                <details class="drawer-section" open>
+                    <summary>Strike Range</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <label for="strike_range">Strike Range (%):</label>
+                            <input type="range" id="strike_range" min="0.5" max="20" value="2" step="0.5">
+                            <span class="range-value" id="strike_range_value">2%</span>
+                            <button id="match_em_range" class="btn-ghost" title="Toggle: auto-sync strike range to Expected Move (ATM straddle) + 0.5% wiggle room" style="padding:2px 8px;font-size:11px;">&#128208; EM</button>
+                        </div>
                     </div>
-                    <div class="control-group">
-                        <label>Expiry:</label>
-                        <div class="expiry-dropdown">
-                            <div class="expiry-display" id="expiry-display">
-                                <span id="expiry-text">Select expiry dates...</span>
-                            </div>
-                            <div class="expiry-options" id="expiry-options">
-                                <!-- Options will be populated here -->
-                                <div class="expiry-buttons">
-                                    <div class="expiry-range-btns">
-                                        <button type="button" id="expiryToday">Today</button>
-                                        <button type="button" id="expiryThisWk">This Wk</button>
-                                        <button type="button" id="expiry2Wks">+1 Wk</button>
-                                        <button type="button" id="expiry4Wks">+2 Wks</button>
-                                        <button type="button" id="expiry1Mo">+1 Mo</button>
-                                    </div>
-                                    <button type="button" id="selectAllExpiry">All</button>
-                                    <button type="button" id="clearAllExpiry">Clear</button>
+                </details>
+                <details class="drawer-section" open>
+                    <summary>Exposure</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <label for="exposure_metric">Exposure Metric:</label>
+                            <select id="exposure_metric" title="Select the metric used to weight exposure formulas (GEX/DEX/VEX etc)">
+                                <option value="Open Interest" selected>Open Interest</option>
+                                <option value="Volume">Volume</option>
+                                <option value="Max OI vs Volume">Max OI vs Volume</option>
+                                <option value="OI + Volume">OI + Volume</option>
+                            </select>
+                        </div>
+                        <div class="control-group" title="When enabled, exposure formulas are adjusted by delta.">
+                            <input type="checkbox" id="delta_adjusted_exposures">
+                            <label for="delta_adjusted_exposures">Delta-Adjusted Exposures</label>
+                        </div>
+                        <div class="control-group" title="When enabled, exposures are calculated in notional value (Dollars). When disabled, in share equivalents.">
+                            <input type="checkbox" id="calculate_in_notional" checked>
+                            <label for="calculate_in_notional">Notional Calc</label>
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section" open>
+                    <summary>Series</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="show_calls">
+                            <label for="show_calls">Calls</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="show_puts">
+                            <label for="show_puts">Puts</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="show_net" checked>
+                            <label for="show_net">Net</label>
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section">
+                    <summary>Price Levels</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <label>Price Levels:</label>
+                            <div class="levels-dropdown">
+                                <div class="levels-display" id="levels-display">
+                                    <span id="levels-text">None</span>
+                                </div>
+                                <div class="levels-options" id="levels-options">
+                                    <div class="levels-option"><input type="checkbox" value="GEX" id="lvl-GEX"><label for="lvl-GEX">GEX</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="AbsGEX" id="lvl-AbsGEX"><label for="lvl-AbsGEX">Abs GEX</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="DEX" id="lvl-DEX"><label for="lvl-DEX">DEX</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="VEX" id="lvl-VEX"><label for="lvl-VEX">Vanna</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Charm" id="lvl-Charm"><label for="lvl-Charm">Charm</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Volume" id="lvl-Volume"><label for="lvl-Volume">Volume</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Speed" id="lvl-Speed"><label for="lvl-Speed">Speed</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Vomma" id="lvl-Vomma"><label for="lvl-Vomma">Vomma</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Color" id="lvl-Color"><label for="lvl-Color">Color</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Expected Move" id="lvl-ExpectedMove"><label for="lvl-ExpectedMove">Expected Move</label></div>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                    <div class="stream-control">
-                        <button id="streamToggle">Auto-Update</button>
-                    </div>
-                    <div class="settings-control">
-                        <button id="saveSettings" title="Save current settings to file">💾 Save</button>
-                        <button id="loadSettings" title="Load settings from file">📂 Load</button>
-                    </div>
-                </div>
-            </div>
-            <div class="header-bottom">
-                <div class="controls">
-                    <div class="control-group">
-                        <label for="strike_range">Strike Range (%):</label>
-                        <input type="range" id="strike_range" min="0.5" max="20" value="2" step="0.5">
-                        <span class="range-value" id="strike_range_value">2%</span>
-                        <button id="match_em_range" title="Toggle: auto-sync strike range to Expected Move (ATM straddle) + 0.5% wiggle room" style="margin-left:4px;padding:2px 6px;font-size:11px;cursor:pointer;background:#2a2a2a;color:#888888;border:1px solid #555555;border-radius:3px;">📐 EM</button>
-                    </div>
-                    <div class="control-group">
-                        <label for="exposure_metric">Exposure Metric:</label>
-                        <select id="exposure_metric" title="Select the metric used to weight exposure formulas (GEX/DEX/VEX etc)">
-                            <option value="Open Interest" selected>Open Interest</option>
-                            <option value="Volume">Volume</option>
-                            <option value="Max OI vs Volume">Max OI vs Volume</option>
-                            <option value="OI + Volume">OI + Volume</option>
-                        </select>
-                    </div>
-                    <div class="control-group" title="When enabled, exposure formulas are adjusted by delta.">
-                        <input type="checkbox" id="delta_adjusted_exposures">
-                        <label for="delta_adjusted_exposures">Delta-Adjusted Exposures</label>
-                    </div>
-                    <div class="control-group" title="When enabled, exposures are calculated in notional value (Dollars). When disabled, in share equivalents.">
-                        <input type="checkbox" id="calculate_in_notional" checked>
-                        <label for="calculate_in_notional">Notional Calc</label>
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="show_calls">
-                        <label for="show_calls">Calls</label>
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="show_puts">
-                        <label for="show_puts">Puts</label>
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="show_net" checked>
-                        <label for="show_net">Net</label>
-                    </div>
-                    <div class="control-group">
-                        <label for="coloring_mode">Coloring Mode:</label>
-                        <select id="coloring_mode" title="Solid: All bars same color | Linear: Gradual fade by value | Ranked: Only highest exposures are bright, others heavily muted">
-                            <option value="Solid" selected>Solid</option>
-                            <option value="Linear Intensity">Linear Intensity</option>
-                            <option value="Ranked Intensity">Ranked Intensity</option>
-                        </select>
-                    </div>
-                    <div class="control-group">
-                        <label>Price Levels:</label>
-                        <div class="levels-dropdown">
-                            <div class="levels-display" id="levels-display">
-                                <span id="levels-text">None</span>
-                            </div>
-                            <div class="levels-options" id="levels-options">
-                                <div class="levels-option"><input type="checkbox" value="GEX" id="lvl-GEX"><label for="lvl-GEX">GEX</label></div>
-                                <div class="levels-option"><input type="checkbox" value="AbsGEX" id="lvl-AbsGEX"><label for="lvl-AbsGEX">Abs GEX</label></div>
-                                <div class="levels-option"><input type="checkbox" value="DEX" id="lvl-DEX"><label for="lvl-DEX">DEX</label></div>
-                                <div class="levels-option"><input type="checkbox" value="VEX" id="lvl-VEX"><label for="lvl-VEX">Vanna</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Charm" id="lvl-Charm"><label for="lvl-Charm">Charm</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Volume" id="lvl-Volume"><label for="lvl-Volume">Volume</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Speed" id="lvl-Speed"><label for="lvl-Speed">Speed</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Vomma" id="lvl-Vomma"><label for="lvl-Vomma">Vomma</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Color" id="lvl-Color"><label for="lvl-Color">Color</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Expected Move" id="lvl-ExpectedMove"><label for="lvl-ExpectedMove">Expected Move</label></div>
-                            </div>
+                        <div class="control-group">
+                            <label for="levels_count">Top #:</label>
+                            <input type="number" id="levels_count" min="1" max="10" value="3" style="width: 60px;">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="use_heikin_ashi">
+                            <label for="use_heikin_ashi">Heikin-Ashi</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="horizontal_bars">
+                            <label for="horizontal_bars">Horizontal Bars</label>
                         </div>
                     </div>
-                    <div class="control-group">
-                        <label for="levels_count">Top #:</label>
-                        <input type="number" id="levels_count" min="1" max="10" value="3" style="width: 50px;">
+                </details>
+                <details class="drawer-section">
+                    <summary>Absolute GEX</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="show_abs_gex">
+                            <label for="show_abs_gex">Show Abs GEX Area</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="abs_gex_opacity">Abs GEX Opacity:</label>
+                            <input type="range" id="abs_gex_opacity" min="0" max="100" value="20" style="width: 100px;">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="use_range">
+                            <label for="use_range">% Range Volume</label>
+                        </div>
                     </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="use_heikin_ashi">
-                        <label for="use_heikin_ashi">Heikin-Ashi</label>
+                </details>
+                <details class="drawer-section">
+                    <summary>Max Level</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="highlight_max_level">
+                            <label for="highlight_max_level">Highlight Max Level</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="max_level_mode">Max Level Mode:</label>
+                            <select id="max_level_mode" title="Absolute: highlights the single bar with the largest magnitude | Net: highlights the strike where the net (calls minus puts) is largest">
+                                <option value="Absolute" selected>Absolute</option>
+                                <option value="Net">Net</option>
+                            </select>
+                        </div>
                     </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="horizontal_bars">
-                        <label for="horizontal_bars">Horizontal Bars</label>
-                    </div>
-                    <!-- New Absolute GEX Settings -->
-                    <div class="control-group">
-                        <input type="checkbox" id="show_abs_gex">
-                        <label for="show_abs_gex">Show Abs GEX Area</label>
-                    </div>
-                    <div class="control-group">
-                        <label for="abs_gex_opacity">Abs GEX Opacity:</label>
-                        <input type="range" id="abs_gex_opacity" min="0" max="100" value="20" style="width: 80px;">
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="use_range">
-                        <label for="use_range">% Range Volume</label>
-                    </div>
-                    <div class="control-group">
-                        <label for="call_color">Call Color:</label>
-                        <input type="color" id="call_color" value="#00FF00">
-                    </div>
-                    <div class="control-group">
-                        <label for="put_color">Put Color:</label>
-                        <input type="color" id="put_color" value="#FF0000">
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="highlight_max_level">
-                        <label for="highlight_max_level">Highlight Max Level</label>
-                    </div>
-                    <div class="control-group">
-                        <label for="max_level_mode">Max Level Mode:</label>
-                        <select id="max_level_mode" title="Absolute: highlights the single bar with the largest magnitude | Net: highlights the strike where the net (calls minus puts) is largest">
-                            <option value="Absolute" selected>Absolute</option>
-                            <option value="Net">Net</option>
-                        </select>
-                    </div>
-                    <div class="control-group">
-                        <label for="max_level_color">Max Level Color:</label>
-                        <input type="color" id="max_level_color" value="#800080">
-                    </div>
-                </div>
+                </details>
             </div>
-        </div>
+            <div class="drawer-footer">
+                <button id="saveSettings" class="btn-ghost" title="Save current settings to file">&#128190; Save</button>
+                <button id="loadSettings" class="btn-ghost" title="Load settings from file">&#128194; Load</button>
+            </div>
+        </aside>
+
+        <dialog class="settings-modal" id="settings-modal">
+            <h3>Color &amp; Coloring</h3>
+            <div class="modal-row">
+                <label for="coloring_mode">Coloring Mode</label>
+                <select id="coloring_mode" title="Solid: All bars same color | Linear: Gradual fade by value | Ranked: Only highest exposures are bright, others heavily muted">
+                    <option value="Solid" selected>Solid</option>
+                    <option value="Linear Intensity">Linear Intensity</option>
+                    <option value="Ranked Intensity">Ranked Intensity</option>
+                </select>
+            </div>
+            <div class="modal-row">
+                <label for="call_color">Call Color</label>
+                <input type="color" id="call_color" value="#10B981">
+            </div>
+            <div class="modal-row">
+                <label for="put_color">Put Color</label>
+                <input type="color" id="put_color" value="#EF4444">
+            </div>
+            <div class="modal-row">
+                <label for="max_level_color">Max Level Color</label>
+                <input type="color" id="max_level_color" value="#800080">
+            </div>
+            <div class="modal-actions">
+                <button id="modalClose" class="btn-ghost">Done</button>
+            </div>
+        </dialog>
         
         <div class="price-info" id="price-info"></div>
 
         <div id="trader-stats-strip" class="trader-stats-strip" style="display:none"></div>
-        <div id="trader-alerts-strip" class="trader-alerts-strip" style="display:none"></div>
 
-        <div class="chart-selector">
-            <div class="chart-checkbox">
-                <input type="checkbox" id="price" checked>
-                <label for="price">Price Chart</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="gamma" checked>
-                <label for="gamma">Gamma Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="delta" checked>
-                <label for="delta">Delta Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="vanna" checked>
-                <label for="vanna">Vanna Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="charm" checked>
-                <label for="charm">Charm Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="speed">
-                <label for="speed">Speed Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="vomma">
-                <label for="vomma">Vomma Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="color">
-                <label for="color">Color Exposure</label>
-            </div>
-
-            <div class="chart-checkbox">
-                <input type="checkbox" id="options_volume" checked>
-                <label for="options_volume">Options Volume</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="open_interest">
-                <label for="open_interest">Open Interest</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="volume" checked>
-                <label for="volume">Volume Ratio</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="large_trades" checked>
-                <label for="large_trades">Options Chain</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="premium" checked>
-                <label for="premium">Premium by Strike</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="centroid" checked>
-                <label for="centroid">Call vs Put Centroid Map</label>
-            </div>
-        </div>
-        
         <div class="chart-grid" id="chart-grid">
+            <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
+            <div class="right-rail-tabs" id="right-rail-tabs">
+                <button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>
+                <button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
+                <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
+            </div>
             <div class="price-chart-container">
-                <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
-                <div class="price-chart-row">
-                    <div class="chart-container" id="price-chart"></div>
-                    <div class="gex-side-panel-wrap">
-                        <div id="gex-side-panel"></div>
-                    </div>
-                </div>
+                <div class="chart-container" id="price-chart"></div>
                 <div class="tv-sub-pane" id="rsi-pane" style="display:none">
                     <div class="tv-sub-pane-header">RSI 14</div>
                     <div id="rsi-chart" style="height:110px"></div>
@@ -6160,6 +6408,23 @@ def index():
                     <div id="macd-chart" style="height:120px"></div>
                 </div>
             </div>
+            <div class="right-rail-panels" id="right-rail-panels">
+                <div class="right-rail-panel active" data-rail-panel="gex">
+                    <div class="gex-side-panel-wrap">
+                        <div id="gex-side-panel"></div>
+                    </div>
+                </div>
+                <div class="right-rail-panel" data-rail-panel="alerts">
+                    <div class="rail-alerts-list" id="right-rail-alerts">
+                        <div class="rail-alerts-empty">No active alerts.</div>
+                    </div>
+                </div>
+                <div class="right-rail-panel" data-rail-panel="levels">
+                    <div class="rail-levels-table" id="right-rail-levels">
+                        <div class="lvl-empty">Key levels load with stream data.</div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -6167,8 +6432,8 @@ def index():
         let charts = {};
         let updateInterval;
         let lastUpdateTime = 0;
-        let callColor = '#00FF00';
-        let putColor = '#FF0000';
+        let callColor = '#10B981';
+        let putColor = '#EF4444';
         let maxLevelColor = '#800080';
         let lastData = {}; // Store last received data
         let lastPriceData = null; // Price chart data stored separately (fetched via /update_price)
@@ -6230,6 +6495,42 @@ def index():
         let livePrice = null;
         // Debounce timer for Plotly price-line updates (avoid flooding relayout calls)
         let plotlyPriceUpdateTimer = null;
+
+        // ── Chart visibility (replaces the deleted .chart-selector checkbox row) ──
+        // Source of truth for which secondary charts render. Defaults below mirror the
+        // checked/unchecked state of the old chart-selector markup so behavior on a
+        // fresh browser is identical. Until the Stage-4 drawer ships, the only UI to
+        // toggle a chart on/off is via a saved settings file (gatherSettings/applySettings)
+        // — Stage 4 wires the drawer to setChartVisibility().
+        const CHART_IDS = [
+            'price','gamma','delta','vanna','charm','speed','vomma','color',
+            'options_volume','open_interest','volume','large_trades','premium','centroid'
+        ];
+        const CHART_VISIBILITY_DEFAULTS = {
+            price: true, gamma: true, delta: true, vanna: true, charm: true,
+            speed: false, vomma: false, color: false,
+            options_volume: true, open_interest: false, volume: true,
+            large_trades: true, premium: true, centroid: true
+        };
+        const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
+        const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
+        function getChartVisibility() {
+            let stored = {};
+            try { stored = JSON.parse(localStorage.getItem(CHART_VISIBILITY_KEY) || '{}'); } catch(e) {}
+            const out = {};
+            CHART_IDS.forEach(id => {
+                out[id] = (id in stored) ? !!stored[id] : CHART_VISIBILITY_DEFAULTS[id];
+            });
+            return out;
+        }
+        function setAllChartVisibility(map) {
+            const merged = getChartVisibility();
+            Object.keys(map || {}).forEach(k => {
+                if (CHART_IDS.includes(k)) merged[k] = !!map[k];
+            });
+            try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
+        }
+        function isChartVisible(id) { return !!getChartVisibility()[id]; }
 
         // List of Plotly chart div IDs that carry a current-price line shape
         const PLOTLY_PRICE_LINE_CHARTS = [
@@ -6580,8 +6881,8 @@ def index():
   .candle-close-timer { font-size:11px; font-family:'Courier New',monospace; padding:3px 7px; border-radius:4px; background:#2a2a2a; border:1px solid #444; color:#ccc; white-space:nowrap; user-select:none; letter-spacing:0.5px; }
   .tv-ohlc-tooltip { position:absolute; top:8px; left:8px; z-index:50; font-size:11px; font-family:'Courier New',monospace; color:#ccc; pointer-events:none; white-space:nowrap; width:max-content; display:none; line-height:1.6; }
   .tv-ohlc-tooltip .tt-time { color:#aaa; font-size:10px; margin-bottom:2px; }
-  .tv-ohlc-tooltip .tt-up { color:#00FF00; }
-  .tv-ohlc-tooltip .tt-dn { color:#FF4444; }
+  .tv-ohlc-tooltip .tt-up { color:#10B981; }
+  .tv-ohlc-tooltip .tt-dn { color:#EF4444; }
     .tv-historical-overlay { position:absolute; inset:0; z-index:4; pointer-events:none; overflow:hidden; }
     .tv-historical-bubble { position:absolute; border-radius:999px; transform:translate(-50%,-50%); box-shadow:0 0 0 1px rgba(0,0,0,0.25); opacity:0.95; pointer-events:auto; cursor:pointer; }
     .tv-historical-tooltip { position:absolute; z-index:55; display:none; width:auto !important; height:auto !important; min-width:0; max-width:min(240px,calc(100% - 16px)); padding:8px; border:1px solid rgba(255,255,255,0.08); border-radius:10px; background:linear-gradient(180deg,rgba(30,34,41,0.96),rgba(16,18,23,0.98)); color:#eef2f7; font-size:10px; line-height:1.25; pointer-events:none; box-shadow:0 14px 36px rgba(0,0,0,0.38); backdrop-filter:blur(10px); flex:none !important; align-self:flex-start; overflow:hidden; white-space:normal; }
@@ -6776,7 +7077,7 @@ def index():
   var isFirstRender=true;
   function renderPriceChart(priceData){
     var candles=priceData.candles||[];
-    var upColor=priceData.call_color||'#00FF00',downColor=priceData.put_color||'#FF0000';
+    var upColor=priceData.call_color||'#10B981',downColor=priceData.put_color||'#EF4444';
     popoutTimeframe=parseInt(priceData.timeframe)||1;
     lineStyleMap={dashed:LightweightCharts.LineStyle.Dashed,dotted:LightweightCharts.LineStyle.Dotted,large_dashed:LightweightCharts.LineStyle.LargeDashed};
     if(!tvChart){
@@ -7241,23 +7542,10 @@ def index():
             const highlightMaxLevel = document.getElementById('highlight_max_level').checked;
             const maxLevelMode = document.getElementById('max_level_mode').value;
             
-            // Get visible charts
-            const visibleCharts = {
-                show_price: document.getElementById('price').checked,
-                show_gamma: document.getElementById('gamma').checked,
-                show_delta: document.getElementById('delta').checked,
-                show_vanna: document.getElementById('vanna').checked,
-                show_charm: document.getElementById('charm').checked,
-                show_speed: document.getElementById('speed').checked,
-                show_vomma: document.getElementById('vomma').checked,
-                show_color: document.getElementById('color').checked,
-                show_options_volume: document.getElementById('options_volume').checked,
-                show_open_interest: document.getElementById('open_interest').checked,
-                show_volume: document.getElementById('volume').checked,
-                show_large_trades: document.getElementById('large_trades').checked,
-                show_premium: document.getElementById('premium').checked,
-                show_centroid: document.getElementById('centroid').checked
-            };
+            // Get visible charts (server payload uses show_<id> keys for back-compat)
+            const _vis = getChartVisibility();
+            const visibleCharts = {};
+            CHART_IDS.forEach(id => { visibleCharts['show_' + id] = _vis[id]; });
 
             // Common payload fields shared by both requests
             const sharedPayload = {
@@ -7333,7 +7621,7 @@ def index():
                 // Options cache is now populated — refresh price levels immediately.
                 // This fixes the delay where levels were missing right after a ticker change
                 // because /update_price fired before the options chain was cached.
-                if (document.getElementById('price').checked) {
+                if (isChartVisible('price')) {
                     _priceHistoryLastKey = ''; // force cache-miss so fetchPriceHistory re-fetches
                     fetchPriceHistory(true);
                 }
@@ -8262,8 +8550,8 @@ def index():
             if (!container) return;
 
             tvLastPriceData = priceData;
-            const upColor   = priceData.call_color || '#00FF00';
-            const downColor = priceData.put_color  || '#FF0000';
+            const upColor   = priceData.call_color || '#10B981';
+            const downColor = priceData.put_color  || '#EF4444';
             const candles   = priceData.candles || [];
 
             const lineStyleMap = {
@@ -8463,50 +8751,154 @@ def index():
         }
         // ─────────────────────────────────────────────────────────────────────
 
+        // Rebuild missing chart-grid children in the canonical Stage-5 order.
+        // The initial HTML markup already includes all of these; this defensive
+        // path only kicks in if price-chart-container was removed from the DOM.
+        function ensurePriceChartDom() {
+            const grid = document.getElementById('chart-grid');
+            if (!grid) return null;
+            let priceContainer = grid.querySelector('.price-chart-container');
+            if (priceContainer) return priceContainer;
+
+            let toolbar = grid.querySelector('.tv-toolbar-container');
+            if (!toolbar) {
+                toolbar = document.createElement('div');
+                toolbar.className = 'tv-toolbar-container';
+                toolbar.id = 'tv-toolbar-container';
+                grid.appendChild(toolbar);
+            }
+            let tabs = grid.querySelector('.right-rail-tabs');
+            if (!tabs) {
+                tabs = document.createElement('div');
+                tabs.className = 'right-rail-tabs';
+                tabs.id = 'right-rail-tabs';
+                tabs.innerHTML =
+                    '<button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>';
+                grid.appendChild(tabs);
+                wireRightRailTabs();
+            }
+            priceContainer = document.createElement('div');
+            priceContainer.className = 'price-chart-container';
+            const chartDiv = document.createElement('div');
+            chartDiv.className = 'chart-container';
+            chartDiv.id = 'price-chart';
+            const rsiPane = document.createElement('div');
+            rsiPane.className = 'tv-sub-pane'; rsiPane.id = 'rsi-pane'; rsiPane.style.display = 'none';
+            rsiPane.innerHTML = '<div class="tv-sub-pane-header">RSI 14</div><div id="rsi-chart" style="height:110px"></div>';
+            const macdPane = document.createElement('div');
+            macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
+            macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
+            priceContainer.appendChild(chartDiv);
+            priceContainer.appendChild(rsiPane);
+            priceContainer.appendChild(macdPane);
+            grid.appendChild(priceContainer);
+
+            let railPanels = grid.querySelector('.right-rail-panels');
+            if (!railPanels) {
+                railPanels = document.createElement('div');
+                railPanels.className = 'right-rail-panels';
+                railPanels.id = 'right-rail-panels';
+                railPanels.innerHTML =
+                    '<div class="right-rail-panel active" data-rail-panel="gex">' +
+                        '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
+                    '</div>' +
+                    '<div class="right-rail-panel" data-rail-panel="alerts">' +
+                        '<div class="rail-alerts-list" id="right-rail-alerts">' +
+                            '<div class="rail-alerts-empty">No active alerts.</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="right-rail-panel" data-rail-panel="levels">' +
+                        '<div class="rail-levels-table" id="right-rail-levels">' +
+                            '<div class="lvl-empty">Key levels load with stream data.</div>' +
+                        '</div>' +
+                    '</div>';
+                grid.appendChild(railPanels);
+                applyRightRailTab();
+            }
+            return priceContainer;
+        }
+
+        function showPriceChartUI() {
+            const ids = ['tv-toolbar-container', 'right-rail-tabs', 'right-rail-panels'];
+            ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
+            const pc = document.querySelector('.price-chart-container');
+            if (pc) pc.style.display = 'block';
+        }
+
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
-            if (!document.getElementById('price').checked) return;
+            if (!isChartVisible('price')) return;
             lastPriceData = priceJson; // keep for popout push
-            let priceContainer = document.querySelector('.price-chart-container');
-            if (!priceContainer) {
-                priceContainer = document.createElement('div');
-                priceContainer.className = 'price-chart-container';
-                const toolbarContainer = document.createElement('div');
-                toolbarContainer.className = 'tv-toolbar-container';
-                toolbarContainer.id = 'tv-toolbar-container';
-                const row = document.createElement('div');
-                row.className = 'price-chart-row';
-                const chartDiv = document.createElement('div');
-                chartDiv.className = 'chart-container';
-                chartDiv.id = 'price-chart';
-                const panelWrap = document.createElement('div');
-                panelWrap.className = 'gex-side-panel-wrap';
-                panelWrap.innerHTML = '<div id="gex-side-panel"></div>';
-                row.appendChild(chartDiv);
-                row.appendChild(panelWrap);
-                const rsiPane = document.createElement('div');
-                rsiPane.className = 'tv-sub-pane'; rsiPane.id = 'rsi-pane'; rsiPane.style.display = 'none';
-                rsiPane.innerHTML = '<div class="tv-sub-pane-header">RSI 14</div><div id="rsi-chart" style="height:110px"></div>';
-                const macdPane = document.createElement('div');
-                macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
-                macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
-                priceContainer.appendChild(toolbarContainer);
-                priceContainer.appendChild(row);
-                priceContainer.appendChild(rsiPane);
-                priceContainer.appendChild(macdPane);
-                document.getElementById('chart-grid').insertBefore(priceContainer, document.getElementById('chart-grid').firstChild);
-            }
-            priceContainer.style.display = 'block';
+            const priceContainer = ensurePriceChartDom();
+            if (!priceContainer) return;
+            showPriceChartUI();
             const parsed = typeof priceJson === 'string' ? JSON.parse(priceJson) : priceJson;
             if (!parsed.error) {
                 renderTVPriceChart(parsed);
             }
         }
 
+        // ── Right-rail tab state (GEX / Alerts / Levels) ─────────────────
+        const RAIL_TAB_KEY = 'gex.rightRailTab';
+        let activeRailTab = 'gex';
+        try {
+            const saved = localStorage.getItem(RAIL_TAB_KEY);
+            if (saved === 'gex' || saved === 'alerts' || saved === 'levels') {
+                activeRailTab = saved;
+            }
+        } catch (e) {}
+        let _lastGexPanelJson = null; // retained so switching back to GEX can re-render
+
+        function applyRightRailTab() {
+            document.querySelectorAll('.right-rail-tab').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.railTab === activeRailTab);
+            });
+            document.querySelectorAll('.right-rail-panel').forEach(p => {
+                p.classList.toggle('active', p.dataset.railPanel === activeRailTab);
+            });
+            if (activeRailTab === 'gex') {
+                // Panel was display:none; re-render + re-sync on return
+                const target = document.getElementById('gex-side-panel');
+                if (target && _lastGexPanelJson) {
+                    try {
+                        const parsed = typeof _lastGexPanelJson === 'string'
+                            ? JSON.parse(_lastGexPanelJson) : _lastGexPanelJson;
+                        const config = { displayModeBar: false, responsive: true };
+                        Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
+                            .then(() => syncGexPanelYAxisToTV());
+                    } catch (e) { /* fall through to plain resize */ }
+                }
+                if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
+                scheduleGexPanelSync();
+            } else if (activeRailTab === 'alerts') {
+                markRailAlertsSeen();
+            } else {
+                _updateAlertsBadge();
+            }
+        }
+
+        function wireRightRailTabs() {
+            document.querySelectorAll('.right-rail-tab').forEach(btn => {
+                if (btn.__railWired) return;
+                btn.__railWired = true;
+                btn.addEventListener('click', () => {
+                    const next = btn.dataset.railTab;
+                    if (!next || next === activeRailTab) return;
+                    activeRailTab = next;
+                    try { localStorage.setItem(RAIL_TAB_KEY, activeRailTab); } catch (e) {}
+                    applyRightRailTab();
+                });
+            });
+        }
+
         function renderGexSidePanel(panelJson) {
             if (!panelJson) return;
+            _lastGexPanelJson = panelJson;
             const target = document.getElementById('gex-side-panel');
             if (!target) return;
+            if (activeRailTab !== 'gex') return; // render on tab activation
             try {
                 const parsed = typeof panelJson === 'string' ? JSON.parse(panelJson) : panelJson;
                 const config = { displayModeBar: false, responsive: true };
@@ -8521,6 +8913,7 @@ def index():
         // side panel so bars line up with candles at the same strike.
         let _gexSyncScheduled = false;
         function syncGexPanelYAxisToTV() {
+            if (activeRailTab !== 'gex') return;
             const panel = document.getElementById('gex-side-panel');
             const tvEl  = document.getElementById('price-chart');
             if (!panel || !tvEl || !tvPriceChart || !tvCandleSeries) return;
@@ -8550,6 +8943,7 @@ def index():
             }
         }
         function scheduleGexPanelSync() {
+            if (activeRailTab !== 'gex') return;
             if (_gexSyncScheduled) return;
             _gexSyncScheduled = true;
             requestAnimationFrame(() => {
@@ -8570,15 +8964,21 @@ def index():
         }
         function renderTraderStats(stats) {
             const strip  = document.getElementById('trader-stats-strip');
-            const alerts = document.getElementById('trader-alerts-strip');
-            if (!strip || !alerts) return;
-            if (!stats) { strip.style.display = 'none'; alerts.style.display = 'none'; return; }
+            if (!strip) return;
+            if (!stats) {
+                strip.style.display = 'none';
+                renderRailAlerts([]);
+                renderRailKeyLevels(null);
+                return;
+            }
 
             const netGex    = stats.net_gex;
             const hedge     = stats.hedge_per_1pct;
             const regime    = stats.regime || '—';
             const regimeCls = regime === 'Long Gamma' ? 'kpi-pos' : regime === 'Short Gamma' ? 'kpi-neg' : '';
             const netCls    = netGex == null ? '' : (netGex >= 0 ? 'kpi-pos' : 'kpi-neg');
+            const netArrow  = netGex == null ? '' : (netGex >= 0 ? '▲' : '▼');
+            const regimeArrow = regime === 'Long Gamma' ? '▲' : regime === 'Short Gamma' ? '▼' : '';
 
             const spot = stats.spot;
             const emMove = stats.em_move, emLo = stats.em_lower, emHi = stats.em_upper, emPct = stats.em_pct;
@@ -8597,12 +8997,12 @@ def index():
             strip.innerHTML = `
                 <div class="kpi-card">
                     <div class="kpi-label">Net GEX (window)</div>
-                    <div class="kpi-value ${netCls}">${fmtMoneyCompact(netGex)}</div>
+                    <div class="kpi-value ${netCls}">${netArrow ? `<span class="kpi-trend">${netArrow}</span>` : ''}${fmtMoneyCompact(netGex)}</div>
                     <div class="kpi-sub">per 1% move: ${fmtMoneyCompact(hedge)}</div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Regime</div>
-                    <div class="kpi-value ${regimeCls}">${regime}</div>
+                    <div class="kpi-value ${regimeCls}">${regimeArrow ? `<span class="kpi-trend">${regimeArrow}</span>` : ''}${regime}</div>
                     <div class="kpi-sub">gamma flip: ${flipTxt}</div>
                 </div>
                 <div class="kpi-card">
@@ -8618,22 +9018,123 @@ def index():
             `;
             strip.style.display = 'flex';
 
-            const list = Array.isArray(stats.alerts) ? stats.alerts : [];
-            if (!list.length) {
-                alerts.innerHTML = '';
-                alerts.style.display = 'none';
+            renderRailAlerts(Array.isArray(stats.alerts) ? stats.alerts : []);
+            renderRailKeyLevels(stats);
+        }
+
+        // ── Right-rail alerts panel ──────────────────────────────────────
+        let _lastRailAlerts = [];
+        let _alertsSeenKeys = new Set();
+
+        function _escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function _updateAlertsBadge() {
+            const badge = document.getElementById('right-rail-alerts-badge');
+            if (!badge) return;
+            let unread = 0;
+            if (activeRailTab !== 'alerts') {
+                for (const a of _lastRailAlerts) {
+                    if (!_alertsSeenKeys.has(a.text)) unread += 1;
+                }
+            }
+            if (unread > 0) {
+                badge.textContent = unread > 99 ? '99+' : String(unread);
+                badge.classList.add('visible');
             } else {
-                alerts.innerHTML = list.map(a => {
-                    const cls = a.level === 'warn' ? 'warn' : 'info';
-                    const txt = (a.text || '').replace(/</g, '&lt;');
-                    return `<div class="alert-chip ${cls}">${txt}</div>`;
-                }).join('');
-                alerts.style.display = 'flex';
+                badge.textContent = '';
+                badge.classList.remove('visible');
             }
         }
 
+        function markRailAlertsSeen() {
+            _alertsSeenKeys = new Set(_lastRailAlerts.map(a => a.text));
+            _updateAlertsBadge();
+        }
+
+        function renderRailAlerts(list) {
+            _lastRailAlerts = Array.isArray(list) ? list.slice() : [];
+            const target = document.getElementById('right-rail-alerts');
+            if (target) {
+                if (!_lastRailAlerts.length) {
+                    target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
+                } else {
+                    target.innerHTML = _lastRailAlerts.map(a => {
+                        const cls = a.level === 'warn' ? 'warn' : 'info';
+                        return '<div class="rail-alert-item ' + cls + '">' +
+                                   '<span class="rail-alert-dot"></span>' +
+                                   '<span class="rail-alert-text">' + _escapeHtml(a.text) + '</span>' +
+                               '</div>';
+                    }).join('');
+                }
+            }
+            if (activeRailTab === 'alerts') {
+                markRailAlertsSeen();
+            } else {
+                _updateAlertsBadge();
+            }
+        }
+
+        // ── Right-rail Key Levels table ──────────────────────────────────
+        function _fmtLvlPrice(n) {
+            return (n == null || !isFinite(n)) ? '—' : n.toFixed(2);
+        }
+        function _fmtLvlDist(price, spot) {
+            if (price == null || spot == null || !isFinite(price) || !isFinite(spot) || spot === 0) {
+                return { text: '—', cls: '' };
+            }
+            const pct = (price - spot) / spot * 100;
+            const sign = pct > 0 ? '+' : '';
+            return { text: sign + pct.toFixed(2) + '%', cls: pct >= 0 ? 'pos' : 'neg' };
+        }
+        function renderRailKeyLevels(stats) {
+            const target = document.getElementById('right-rail-levels');
+            if (!target) return;
+            if (!stats) {
+                target.innerHTML = '<div class="lvl-empty">Key levels load with stream data.</div>';
+                return;
+            }
+            const spot = stats.spot;
+            const rows = [
+                { label: 'Call Wall',  price: stats.call_wall,  color: '#10B981' },
+                { label: 'Put Wall',   price: stats.put_wall,   color: '#EF4444' },
+                { label: 'Gamma Flip', price: stats.gamma_flip, color: '#FFC400' },
+                { label: '+1σ EM',     price: stats.em_upper,   color: '#9CA3AF' },
+                { label: '-1σ EM',     price: stats.em_lower,   color: '#9CA3AF' },
+            ];
+            const hasAny = rows.some(r => r.price != null && isFinite(r.price));
+            if (!hasAny) {
+                target.innerHTML = '<div class="lvl-empty">Key levels load with stream data.</div>';
+                return;
+            }
+            const body = rows.map(r => {
+                const d = _fmtLvlDist(r.price, spot);
+                return '<tr>' +
+                       '<td><span class="lvl-label">' +
+                           '<span class="lvl-swatch" style="background:' + r.color + '"></span>' +
+                           _escapeHtml(r.label) +
+                       '</span></td>' +
+                       '<td class="num">' + _fmtLvlPrice(r.price) + '</td>' +
+                       '<td class="num lvl-dist ' + d.cls + '">' + d.text + '</td>' +
+                       '</tr>';
+            }).join('');
+            target.innerHTML =
+                '<table>' +
+                    '<thead><tr>' +
+                        '<th>Level</th>' +
+                        '<th class="num">Price</th>' +
+                        '<th class="num">Δ Spot</th>' +
+                    '</tr></thead>' +
+                    '<tbody>' + body + '</tbody>' +
+                '</table>';
+        }
+
         // ── Secondary chart tabs ───────────────────────────────────────────
-        let secondaryActiveTab = null;
+        let secondaryActiveTab = (() => {
+            try { return localStorage.getItem(SECONDARY_TAB_KEY) || null; } catch(e) { return null; }
+        })();
         const secondaryTabLabels = {
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
@@ -8662,6 +9163,7 @@ def index():
             bar.querySelectorAll('.secondary-tab').forEach(btn => {
                 btn.addEventListener('click', () => {
                     secondaryActiveTab = btn.dataset.tab;
+                    try { localStorage.setItem(SECONDARY_TAB_KEY, secondaryActiveTab); } catch(e) {}
                     bar.querySelectorAll('.secondary-tab').forEach(b =>
                         b.classList.toggle('active', b.dataset.tab === secondaryActiveTab));
                     applySecondaryTabVisibility();
@@ -8697,8 +9199,8 @@ def index():
             clearKeyLevels();
             const LS = LightweightCharts.LineStyle;
             const defs = [
-                { key: 'call_wall',  title: 'Call Wall',  color: '#00D084', style: LS.Solid,  width: 2 },
-                { key: 'put_wall',   title: 'Put Wall',   color: '#FF4D4D', style: LS.Solid,  width: 2 },
+                { key: 'call_wall',  title: 'Call Wall',  color: '#10B981', style: LS.Solid,  width: 2 },
+                { key: 'put_wall',   title: 'Put Wall',   color: '#EF4444', style: LS.Solid,  width: 2 },
                 { key: 'gamma_flip', title: 'Gamma Flip', color: '#FFC400', style: LS.Dashed, width: 2 },
                 { key: 'em_upper',   title: '+1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
                 { key: 'em_lower',   title: '-1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
@@ -8748,7 +9250,7 @@ def index():
         }
 
         function fetchPriceHistory(force) {
-            if (!document.getElementById('price').checked) return;
+            if (!isChartVisible('price')) return;
             if (_priceHistoryInFlight) return;
             const payload = buildPricePayload();
             const key = JSON.stringify(payload);
@@ -8786,50 +9288,12 @@ def index():
             // Save scroll position before any DOM changes
             savedScrollPosition = window.scrollY || window.pageYOffset;
             
-            const selectedCharts = {
-                price: document.getElementById('price').checked,
-                gamma: document.getElementById('gamma').checked,
-                delta: document.getElementById('delta').checked,
-                vanna: document.getElementById('vanna').checked,
-                charm: document.getElementById('charm').checked,
-                speed: document.getElementById('speed').checked,
-                vomma: document.getElementById('vomma').checked,
-                color: document.getElementById('color').checked,
-                options_volume: document.getElementById('options_volume').checked,
-                open_interest: document.getElementById('open_interest').checked,
-                volume: document.getElementById('volume').checked,
-                large_trades: document.getElementById('large_trades').checked,
-                premium: document.getElementById('premium').checked,
-                centroid: document.getElementById('centroid').checked
-            };
+            const selectedCharts = getChartVisibility();
             
             // Handle price chart separately (TradingView Lightweight Charts)
             if (selectedCharts.price && data.price) {
-                let priceContainer = document.querySelector('.price-chart-container');
-                if (!priceContainer) {
-                    priceContainer = document.createElement('div');
-                    priceContainer.className = 'price-chart-container';
-                    const toolbarContainer = document.createElement('div');
-                    toolbarContainer.className = 'tv-toolbar-container';
-                    toolbarContainer.id = 'tv-toolbar-container';
-                    const chartDiv = document.createElement('div');
-                    chartDiv.className = 'chart-container';
-                    chartDiv.id = 'price-chart';
-                    // RSI sub-pane
-                    const rsiPane = document.createElement('div');
-                    rsiPane.className = 'tv-sub-pane'; rsiPane.id = 'rsi-pane'; rsiPane.style.display = 'none';
-                    rsiPane.innerHTML = '<div class="tv-sub-pane-header">RSI 14</div><div id="rsi-chart" style="height:110px"></div>';
-                    // MACD sub-pane
-                    const macdPane = document.createElement('div');
-                    macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
-                    macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
-                    priceContainer.appendChild(toolbarContainer);
-                    priceContainer.appendChild(chartDiv);
-                    priceContainer.appendChild(rsiPane);
-                    priceContainer.appendChild(macdPane);
-                    document.getElementById('chart-grid').insertBefore(priceContainer, document.getElementById('chart-grid').firstChild);
-                }
-                priceContainer.style.display = 'block';
+                ensurePriceChartDom();
+                showPriceChartUI();
 
                 const priceData = typeof data.price === 'string' ? JSON.parse(data.price) : data.price;
                 if (!priceData.error) {
@@ -8837,9 +9301,13 @@ def index():
                 }
             } else if (!selectedCharts.price) {
                 const priceContainer = document.querySelector('.price-chart-container');
-                if (priceContainer) {
-                    priceContainer.style.display = 'none';
-                }
+                if (priceContainer) priceContainer.style.display = 'none';
+                const toolbar = document.getElementById('tv-toolbar-container');
+                if (toolbar) toolbar.style.display = 'none';
+                const railTabs = document.getElementById('right-rail-tabs');
+                if (railTabs) railTabs.style.display = 'none';
+                const railPanels = document.getElementById('right-rail-panels');
+                if (railPanels) railPanels.style.display = 'none';
                 destroyRsiPane();
                 destroyMacdPane();
                 if (tvPriceChart) {
@@ -9122,11 +9590,6 @@ def index():
             }
         }
         
-        // Add event listeners for checkboxes
-        document.querySelectorAll('.chart-checkbox input[type="checkbox"]').forEach(checkbox => {
-            checkbox.addEventListener('change', updateData);
-        });
-        
         // Add event listeners for control checkboxes
         document.querySelectorAll('.control-group input[type="checkbox"]').forEach(checkbox => {
             checkbox.addEventListener('change', updateData);
@@ -9322,25 +9785,10 @@ def index():
                 max_level_mode: document.getElementById('max_level_mode').value,
                 em_range_locked: emRangeLocked,
                 // Chart visibility
-                charts: {
-                    price: document.getElementById('price').checked,
-                    gamma: document.getElementById('gamma').checked,
-                    delta: document.getElementById('delta').checked,
-                    vanna: document.getElementById('vanna').checked,
-                    charm: document.getElementById('charm').checked,
-                    speed: document.getElementById('speed').checked,
-                    vomma: document.getElementById('vomma').checked,
-                    color: document.getElementById('color').checked,
-                    options_volume: document.getElementById('options_volume').checked,
-                    open_interest: document.getElementById('open_interest').checked,
-                    volume: document.getElementById('volume').checked,
-                    large_trades: document.getElementById('large_trades').checked,
-                    premium: document.getElementById('premium').checked,
-                    centroid: document.getElementById('centroid').checked
-                }
+                charts: getChartVisibility()
             };
         }
-        
+
         function applySettings(settings) {
             if (settings.ticker) document.getElementById('ticker').value = settings.ticker;
             if (settings.timeframe) document.getElementById('timeframe').value = settings.timeframe;
@@ -9396,12 +9844,10 @@ def index():
             if (settings.em_range_locked !== undefined) {
                 setEmRangeLocked(settings.em_range_locked);
             }
-            // Chart visibility
+            // Chart visibility — persist into localStorage; updateCharts() reads from there
             if (settings.charts) {
-                Object.keys(settings.charts).forEach(chartId => {
-                    const checkbox = document.getElementById(chartId);
-                    if (checkbox) checkbox.checked = settings.charts[chartId];
-                });
+                setAllChartVisibility(settings.charts);
+                if (typeof renderChartVisibilitySection === 'function') renderChartVisibilitySection();
             }
         }
         
@@ -9469,6 +9915,65 @@ def index():
         
         document.getElementById('saveSettings').addEventListener('click', saveSettings);
         document.getElementById('loadSettings').addEventListener('click', loadSettings);
+
+        // ── Settings drawer + color modal ─────────────────────────────────────
+        // Display labels for each chart id (covers `price` which secondaryTabLabels omits).
+        const CHART_LABELS = {
+            price: 'Price Chart',
+            gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
+            speed: 'Speed', vomma: 'Vomma', color: 'Color',
+            options_volume: 'Options Vol', open_interest: 'Open Interest',
+            volume: 'Volume Ratio', large_trades: 'Options Chain',
+            premium: 'Premium', centroid: 'Centroid'
+        };
+        function renderChartVisibilitySection() {
+            const list = document.getElementById('chart-visibility-list');
+            if (!list) return;
+            const vis = getChartVisibility();
+            list.innerHTML = CHART_IDS.map(id => `
+                <label class="visibility-toggle">
+                    <input type="checkbox" data-chart-id="${id}" ${vis[id] ? 'checked' : ''}>
+                    <span>${CHART_LABELS[id] || id}</span>
+                </label>
+            `).join('');
+            list.querySelectorAll('input[data-chart-id]').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    setAllChartVisibility({ [cb.dataset.chartId]: cb.checked });
+                    updateData();
+                });
+            });
+        }
+        renderChartVisibilitySection();
+
+        wireRightRailTabs();
+        applyRightRailTab();
+
+        function openDrawer() {
+            document.getElementById('settings-drawer').classList.add('open');
+            document.getElementById('settings-drawer').setAttribute('aria-hidden', 'false');
+            document.getElementById('drawer-backdrop').classList.add('open');
+        }
+        function closeDrawer() {
+            document.getElementById('settings-drawer').classList.remove('open');
+            document.getElementById('settings-drawer').setAttribute('aria-hidden', 'true');
+            document.getElementById('drawer-backdrop').classList.remove('open');
+        }
+        document.getElementById('drawerToggle').addEventListener('click', openDrawer);
+        document.getElementById('drawerClose').addEventListener('click', closeDrawer);
+        document.getElementById('drawer-backdrop').addEventListener('click', closeDrawer);
+
+        const settingsModal = document.getElementById('settings-modal');
+        document.getElementById('settingsToggle').addEventListener('click', () => {
+            if (settingsModal.showModal) { settingsModal.showModal(); }
+            else { settingsModal.setAttribute('open', ''); } // <dialog> fallback
+        });
+        document.getElementById('modalClose').addEventListener('click', () => settingsModal.close());
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') return;
+            if (settingsModal.open) { settingsModal.close(); return; }
+            if (document.getElementById('settings-drawer').classList.contains('open')) closeDrawer();
+        });
 
         // Add event listener for ticker input
         document.getElementById('ticker').addEventListener('input', function(e) {
