@@ -3124,6 +3124,245 @@ def build_historical_levels_overlay(ticker, display_date, chart_times, latest_pr
     return historical_points, historical_expected_moves
 
 
+def create_gex_side_panel(calls, puts, S, strike_range=0.02,
+                          call_color='#00FF00', put_color='#FF0000',
+                          selected_expiries=None):
+    """Horizontal-bar GEX panel keyed to strike, intended to render in a sibling
+    div next to the TradingView candle chart with a shared visible price range.
+
+    Calls contribute positive net GEX (dealers long gamma, green), puts
+    contribute negative (dealers short gamma, red). Each row in calls/puts is
+    summed at its native strike — SPY's native grid is $1, SPX's is $5, so the
+    resulting bar resolution naturally matches the underlying.
+    """
+    empty = go.Figure()
+    empty.update_layout(
+        paper_bgcolor='#1E1E1E', plot_bgcolor='#1E1E1E',
+        margin=dict(l=4, r=4, t=4, b=24),
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+    )
+
+    if (calls is None or getattr(calls, 'empty', True)) and \
+       (puts is None or getattr(puts, 'empty', True)):
+        return empty.to_json()
+
+    if calls is not None and not calls.empty and selected_expiries and 'expiration_date' in calls.columns:
+        calls = calls[calls['expiration_date'].isin(selected_expiries)]
+    if puts is not None and not puts.empty and selected_expiries and 'expiration_date' in puts.columns:
+        puts = puts[puts['expiration_date'].isin(selected_expiries)]
+
+    min_strike = S * (1 - strike_range)
+    max_strike = S * (1 + strike_range)
+
+    def strike_sum(df):
+        if df is None or df.empty or 'GEX' not in df.columns:
+            return {}
+        f = df[(df['strike'] >= min_strike) & (df['strike'] <= max_strike)]
+        if f.empty:
+            return {}
+        return f.groupby('strike')['GEX'].sum().to_dict()
+
+    call_map = strike_sum(calls)
+    put_map = strike_sum(puts)
+    strikes = sorted(set(call_map) | set(put_map))
+    if not strikes:
+        return empty.to_json()
+
+    call_vals = [call_map.get(s, 0) for s in strikes]
+    put_vals = [put_map.get(s, 0) for s in strikes]
+    net = [c - p for c, p in zip(call_vals, put_vals)]
+    colors = [call_color if v >= 0 else put_color for v in net]
+    customdata = list(zip(call_vals, put_vals))
+
+    native_interval = 1.0
+    if len(strikes) >= 2:
+        diffs = [round(strikes[i] - strikes[i - 1], 4) for i in range(1, len(strikes))]
+        diffs = [d for d in diffs if d > 0]
+        if diffs:
+            from collections import Counter
+            native_interval = Counter(diffs).most_common(1)[0][0]
+    bar_width = max(native_interval * 0.3, 0.05)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=net, y=strikes,
+        orientation='h',
+        width=bar_width,
+        marker=dict(color=colors, line=dict(width=0)),
+        customdata=customdata,
+        hovertemplate=(
+            'Strike %{y}<br>'
+            'Net GEX %{x:,.0f}<br>'
+            'Call GEX %{customdata[0]:,.0f}<br>'
+            'Put GEX %{customdata[1]:,.0f}<extra></extra>'
+        ),
+        showlegend=False,
+    ))
+    fig.add_vline(x=0, line_color='#555', line_width=1)
+    fig.add_hline(y=S, line_color='#888', line_dash='dot', line_width=1)
+
+    fig.update_layout(
+        paper_bgcolor='#1E1E1E',
+        plot_bgcolor='#1E1E1E',
+        margin=dict(l=4, r=4, t=4, b=24),
+        height=680,
+        xaxis=dict(
+            zeroline=False,
+            gridcolor='#2A2A2A',
+            color='#888',
+            tickfont=dict(size=9),
+            title=dict(text='Net GEX', font=dict(size=10, color='#888')),
+        ),
+        yaxis=dict(
+            zeroline=False,
+            gridcolor='#2A2A2A',
+            color='#aaa',
+            tickfont=dict(size=9),
+            side='right',
+            range=[min_strike, max_strike],
+        ),
+    )
+    return fig.to_json()
+
+
+def compute_key_levels(calls, puts, S, selected_expiries=None):
+    """Return the key dealer-flow levels to draw on the price chart.
+
+    Call Wall: strike with the highest net (positive) GEX — resistance.
+    Put Wall:  strike with the most-negative net GEX — support.
+    Gamma Flip: strike where cumulative net GEX (summed from the lowest
+                strike upward) first crosses zero — the regime boundary
+                between long-gamma and short-gamma dealer positioning.
+    EM Upper/Lower: ATM straddle-based ±1σ expected move bracket.
+
+    All values can be None independently if the inputs don't support them
+    (e.g. EM only when bid/ask are present).
+    """
+    out = {
+        'call_wall': None, 'put_wall': None, 'gamma_flip': None,
+        'em_upper': None, 'em_lower': None,
+    }
+    if S is None:
+        return out
+
+    def _filter(df):
+        if df is None or df.empty or 'GEX' not in df.columns:
+            return None
+        if selected_expiries and 'expiration_date' in df.columns:
+            df = df[df['expiration_date'].isin(selected_expiries)]
+        return df if not df.empty else None
+
+    c = _filter(calls)
+    p = _filter(puts)
+
+    call_map = c.groupby('strike')['GEX'].sum().to_dict() if c is not None else {}
+    put_map  = p.groupby('strike')['GEX'].sum().to_dict() if p is not None else {}
+    strikes = sorted(set(call_map) | set(put_map))
+    if strikes:
+        net = {s: call_map.get(s, 0) - put_map.get(s, 0) for s in strikes}
+
+        pos_strikes = [(s, v) for s, v in net.items() if v > 0]
+        neg_strikes = [(s, v) for s, v in net.items() if v < 0]
+        if pos_strikes:
+            cw_strike, cw_val = max(pos_strikes, key=lambda kv: kv[1])
+            out['call_wall'] = {'price': float(cw_strike), 'gex': float(cw_val)}
+        if neg_strikes:
+            pw_strike, pw_val = min(neg_strikes, key=lambda kv: kv[1])
+            out['put_wall'] = {'price': float(pw_strike), 'gex': float(pw_val)}
+
+        # Gamma flip: cumulative net GEX from lowest strike up; find first
+        # sign change. Interpolate between the bracketing strikes for a
+        # smoother flip price.
+        cum = 0.0
+        prev_s, prev_cum = None, 0.0
+        flip_price = None
+        for s in strikes:
+            cum += net[s]
+            if prev_s is not None and (prev_cum <= 0) != (cum <= 0) and (cum - prev_cum) != 0:
+                t = (0 - prev_cum) / (cum - prev_cum)
+                flip_price = prev_s + t * (s - prev_s)
+                break
+            prev_s, prev_cum = s, cum
+        if flip_price is not None:
+            out['gamma_flip'] = {'price': float(flip_price)}
+
+    em = calculate_expected_move_snapshot(calls, puts, S)
+    if em:
+        out['em_upper'] = {'price': float(em['upper']), 'move': float(em['move'])}
+        out['em_lower'] = {'price': float(em['lower']), 'move': float(em['move'])}
+
+    return out
+
+
+def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None):
+    """High-level trader KPIs + a short alerts list, for the header strip.
+
+    Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
+    between the chart lines and the KPI strip.
+    """
+    out = {
+        'net_gex': None,              # dollar-notional net GEX in the window
+        'hedge_per_1pct': None,       # dollar-notional dealer hedge for ±1% move
+        'regime': None,               # 'Long Gamma' | 'Short Gamma'
+        'em_move': None, 'em_upper': None, 'em_lower': None, 'em_pct': None,
+        'call_wall': None, 'put_wall': None, 'gamma_flip': None,
+        'spot': float(S) if S is not None else None,
+        'alerts': [],
+    }
+    if S is None:
+        return out
+
+    levels = compute_key_levels(calls, puts, S, selected_expiries=selected_expiries)
+    if levels.get('call_wall'):  out['call_wall']  = levels['call_wall']['price']
+    if levels.get('put_wall'):   out['put_wall']   = levels['put_wall']['price']
+    if levels.get('gamma_flip'): out['gamma_flip'] = levels['gamma_flip']['price']
+    if levels.get('em_upper'):
+        out['em_upper'] = levels['em_upper']['price']
+        out['em_move']  = levels['em_upper']['move']
+    if levels.get('em_lower'):   out['em_lower']   = levels['em_lower']['price']
+    if out['em_move'] is not None and S:
+        out['em_pct'] = round(out['em_move'] / S * 100, 2)
+
+    def _window_sum(df):
+        if df is None or df.empty or 'GEX' not in df.columns:
+            return 0.0
+        if selected_expiries and 'expiration_date' in df.columns:
+            df = df[df['expiration_date'].isin(selected_expiries)]
+        lo = S * (1 - strike_range); hi = S * (1 + strike_range)
+        f = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
+        return float(f['GEX'].sum()) if not f.empty else 0.0
+
+    call_gex = _window_sum(calls)
+    put_gex  = _window_sum(puts)
+    net_gex  = call_gex - put_gex
+    out['net_gex'] = net_gex
+    # A 1% spot move requires dealers to re-hedge ~1% of the gross gamma
+    # notional; this is the standard back-of-envelope number UW and gammalab
+    # display as "Hedging Impact per 1%".
+    out['hedge_per_1pct'] = 0.01 * net_gex
+
+    if out['gamma_flip'] is not None:
+        out['regime'] = 'Long Gamma' if S >= out['gamma_flip'] else 'Short Gamma'
+    else:
+        out['regime'] = 'Long Gamma' if net_gex >= 0 else 'Short Gamma'
+
+    alerts = []
+    def _near(a, b, pct):
+        return a is not None and b is not None and b > 0 and abs(a - b) / b <= pct
+    if _near(S, out['call_wall'], 0.003):
+        alerts.append({'level': 'warn', 'text': f"Near Call Wall @ {out['call_wall']:.2f}"})
+    if _near(S, out['put_wall'], 0.003):
+        alerts.append({'level': 'warn', 'text': f"Near Put Wall @ {out['put_wall']:.2f}"})
+    if _near(S, out['gamma_flip'], 0.005):
+        alerts.append({'level': 'info', 'text': f"Approaching Gamma Flip @ {out['gamma_flip']:.2f}"})
+    if out['regime'] == 'Short Gamma':
+        alerts.append({'level': 'warn', 'text': 'Short-gamma regime — moves may accelerate'})
+    elif out['regime'] == 'Long Gamma':
+        alerts.append({'level': 'info', 'text': 'Long-gamma regime — dealer hedging dampens moves'})
+    out['alerts'] = alerts
+    return out
+
+
 def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_types=[],
                               exposure_levels_count=3, call_color='#00FF00', put_color='#FF0000',
                               strike_range=0.1, use_heikin_ashi=False,
@@ -4962,6 +5201,108 @@ def index():
             margin-bottom: 5px;
             grid-column: 1 / -1;
         }
+        .price-chart-row {
+            display: flex;
+            flex-direction: row;
+            gap: 4px;
+            align-items: stretch;
+        }
+        .price-chart-row > #price-chart { flex: 1 1 78%; min-width: 0; }
+        .price-chart-row > .gex-side-panel-wrap { flex: 0 0 22%; min-width: 180px; max-width: 320px; }
+        .gex-side-panel-wrap {
+            background: #1E1E1E;
+            border-radius: 0;
+            height: 680px;
+            display: flex;
+            flex-direction: column;
+        }
+        .gex-side-panel-header {
+            padding: 6px 8px;
+            font-size: 11px;
+            color: #888;
+            border-bottom: 1px solid #2A2A2A;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        #gex-side-panel { flex: 1; min-height: 0; }
+
+        /* ── Trader stats KPI strip ────────────────────────────────── */
+        .trader-stats-strip {
+            display: flex;
+            gap: 8px;
+            margin: 0 0 8px 0;
+            flex-wrap: wrap;
+        }
+        .kpi-card {
+            flex: 1 1 0;
+            min-width: 170px;
+            background: #1E1E1E;
+            border: 1px solid #2A2A2A;
+            border-radius: 4px;
+            padding: 8px 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .kpi-label {
+            font-size: 10px;
+            color: #888;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .kpi-value { font-size: 18px; font-weight: 600; color: #e5e5e5; }
+        .kpi-sub   { font-size: 11px; color: #aaa; }
+        .kpi-pos   { color: #00D084; }
+        .kpi-neg   { color: #FF4D4D; }
+
+        /* ── Alerts strip ─────────────────────────────────────────── */
+        .trader-alerts-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin: 0 0 10px 0;
+        }
+        .alert-chip {
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            background: #1E1E1E;
+            border: 1px solid #2A2A2A;
+            color: #ccc;
+        }
+        .alert-chip.warn { border-color: #FFC400; color: #FFC400; }
+        .alert-chip.info { border-color: #3E82F1; color: #88B4FF; }
+
+        /* ── Secondary chart tab bar ──────────────────────────────── */
+        .secondary-tabs {
+            display: flex;
+            gap: 2px;
+            margin: 8px 0 6px 0;
+            flex-wrap: wrap;
+            border-bottom: 1px solid #2A2A2A;
+            padding-bottom: 0;
+        }
+        .secondary-tab {
+            background: transparent;
+            color: #888;
+            border: none;
+            border-bottom: 2px solid transparent;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            letter-spacing: 0.02em;
+        }
+        .secondary-tab:hover { color: #ddd; }
+        .secondary-tab.active {
+            color: #e5e5e5;
+            border-bottom-color: #3E82F1;
+        }
+        /* When tabs are active we stack the grid as a single column and
+           show only the active chart via .tab-hidden. */
+        .charts-grid.tabbed {
+            display: block !important;
+        }
+        .charts-grid .chart-container.tab-hidden { display: none !important; }
         #price-chart {
             padding: 0 !important;
             background-color: #1E1E1E !important;
@@ -5737,7 +6078,10 @@ def index():
         </div>
         
         <div class="price-info" id="price-info"></div>
-        
+
+        <div id="trader-stats-strip" class="trader-stats-strip" style="display:none"></div>
+        <div id="trader-alerts-strip" class="trader-alerts-strip" style="display:none"></div>
+
         <div class="chart-selector">
             <div class="chart-checkbox">
                 <input type="checkbox" id="price" checked>
@@ -5801,7 +6145,12 @@ def index():
         <div class="chart-grid" id="chart-grid">
             <div class="price-chart-container">
                 <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
-                <div class="chart-container" id="price-chart"></div>
+                <div class="price-chart-row">
+                    <div class="chart-container" id="price-chart"></div>
+                    <div class="gex-side-panel-wrap">
+                        <div id="gex-side-panel"></div>
+                    </div>
+                </div>
                 <div class="tv-sub-pane" id="rsi-pane" style="display:none">
                     <div class="tv-sub-pane-header">RSI 14</div>
                     <div id="rsi-chart" style="height:110px"></div>
@@ -5859,6 +6208,7 @@ def index():
         // kept so they can be removed without a full chart rebuild
         let tvExposurePriceLines = [];
         let tvExpectedMovePriceLines = [];
+        let tvKeyLevelLines = [];
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
         let tvHistoricalOverlayPending = false;
@@ -7996,12 +8346,15 @@ def index():
                 // Toolbar + title (only built once)
                 buildTVToolbar(container, candles, upColor, downColor);
                 ensureTVHistoricalOverlay();
-                tvPriceChart.timeScale().subscribeVisibleLogicalRangeChange(() => scheduleTVHistoricalOverlayDraw());
+                tvPriceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+                    scheduleTVHistoricalOverlayDraw();
+                    scheduleGexPanelSync();
+                });
                 if (!tvHistoricalOverlayDomEventsBound) {
                     tvHistoricalOverlayDomEventsBound = true;
-                    container.addEventListener('wheel', () => scheduleTVHistoricalOverlayDraw(), { passive: true });
-                    container.addEventListener('mouseup', () => scheduleTVHistoricalOverlayDraw());
-                    container.addEventListener('touchend', () => scheduleTVHistoricalOverlayDraw(), { passive: true });
+                    container.addEventListener('wheel',    () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
+                    container.addEventListener('mouseup',  () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); });
+                    container.addEventListener('touchend', () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
                     container.addEventListener('mousemove', (event) => updateTVHistoricalTooltip(event));
                     container.addEventListener('mouseleave', () => {
                         const tooltip = ensureTVHistoricalTooltip();
@@ -8089,6 +8442,8 @@ def index():
 
             tvApplyAutoscale();
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
+            // Re-sync GEX side panel after candles + autoscale settle
+            scheduleGexPanelSync();
 
             // fitContent on first render, when auto-range is ON, or when explicitly forced (ticker change)
             if (tvAutoRange || isFirstRender || tvForceFit) {
@@ -8119,9 +8474,16 @@ def index():
                 const toolbarContainer = document.createElement('div');
                 toolbarContainer.className = 'tv-toolbar-container';
                 toolbarContainer.id = 'tv-toolbar-container';
+                const row = document.createElement('div');
+                row.className = 'price-chart-row';
                 const chartDiv = document.createElement('div');
                 chartDiv.className = 'chart-container';
                 chartDiv.id = 'price-chart';
+                const panelWrap = document.createElement('div');
+                panelWrap.className = 'gex-side-panel-wrap';
+                panelWrap.innerHTML = '<div id="gex-side-panel"></div>';
+                row.appendChild(chartDiv);
+                row.appendChild(panelWrap);
                 const rsiPane = document.createElement('div');
                 rsiPane.className = 'tv-sub-pane'; rsiPane.id = 'rsi-pane'; rsiPane.style.display = 'none';
                 rsiPane.innerHTML = '<div class="tv-sub-pane-header">RSI 14</div><div id="rsi-chart" style="height:110px"></div>';
@@ -8129,7 +8491,7 @@ def index():
                 macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
                 macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
                 priceContainer.appendChild(toolbarContainer);
-                priceContainer.appendChild(chartDiv);
+                priceContainer.appendChild(row);
                 priceContainer.appendChild(rsiPane);
                 priceContainer.appendChild(macdPane);
                 document.getElementById('chart-grid').insertBefore(priceContainer, document.getElementById('chart-grid').firstChild);
@@ -8139,6 +8501,225 @@ def index():
             if (!parsed.error) {
                 renderTVPriceChart(parsed);
             }
+        }
+
+        function renderGexSidePanel(panelJson) {
+            if (!panelJson) return;
+            const target = document.getElementById('gex-side-panel');
+            if (!target) return;
+            try {
+                const parsed = typeof panelJson === 'string' ? JSON.parse(panelJson) : panelJson;
+                const config = { displayModeBar: false, responsive: true };
+                Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
+                    .then(() => syncGexPanelYAxisToTV());
+            } catch (e) {
+                console.warn('gex side panel render failed', e);
+            }
+        }
+
+        // Mirror the TradingView chart's visible price range onto the Plotly
+        // side panel so bars line up with candles at the same strike.
+        let _gexSyncScheduled = false;
+        function syncGexPanelYAxisToTV() {
+            const panel = document.getElementById('gex-side-panel');
+            const tvEl  = document.getElementById('price-chart');
+            if (!panel || !tvEl || !tvPriceChart || !tvCandleSeries) return;
+            try {
+                const h = tvEl.clientHeight;
+                if (!h) return;
+                // TV plot area = full container minus the time axis at bottom
+                const tsH = (tvPriceChart.timeScale && tvPriceChart.timeScale().height)
+                    ? tvPriceChart.timeScale().height() : 0;
+                const plotBottomPx = Math.max(0, h - tsH);
+                const top = tvCandleSeries.coordinateToPrice(0);
+                const bot = tvCandleSeries.coordinateToPrice(plotBottomPx);
+                if (top == null || bot == null) return;
+                const lo = Math.min(top, bot);
+                const hi = Math.max(top, bot);
+                if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return;
+                // Mirror TV's plot-area pixel bounds by zeroing Plotly top margin
+                // and matching bottom margin to TV's time-axis height. That way
+                // the Plotly y-axis range maps to the same screen pixels as TV's.
+                Plotly.relayout(panel, {
+                    'yaxis.range': [lo, hi],
+                    'margin.t': 0,
+                    'margin.b': tsH,
+                });
+            } catch (e) {
+                // TV chart may not be ready yet; skip silently
+            }
+        }
+        function scheduleGexPanelSync() {
+            if (_gexSyncScheduled) return;
+            _gexSyncScheduled = true;
+            requestAnimationFrame(() => {
+                _gexSyncScheduled = false;
+                syncGexPanelYAxisToTV();
+            });
+        }
+
+        // ── Trader stats KPI strip + alerts ─────────────────────────────────
+        function fmtMoneyCompact(n) {
+            if (n == null || !isFinite(n)) return '—';
+            const abs = Math.abs(n);
+            const sign = n < 0 ? '-' : '';
+            if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(2) + 'B';
+            if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+            if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
+            return sign + '$' + abs.toFixed(0);
+        }
+        function renderTraderStats(stats) {
+            const strip  = document.getElementById('trader-stats-strip');
+            const alerts = document.getElementById('trader-alerts-strip');
+            if (!strip || !alerts) return;
+            if (!stats) { strip.style.display = 'none'; alerts.style.display = 'none'; return; }
+
+            const netGex    = stats.net_gex;
+            const hedge     = stats.hedge_per_1pct;
+            const regime    = stats.regime || '—';
+            const regimeCls = regime === 'Long Gamma' ? 'kpi-pos' : regime === 'Short Gamma' ? 'kpi-neg' : '';
+            const netCls    = netGex == null ? '' : (netGex >= 0 ? 'kpi-pos' : 'kpi-neg');
+
+            const spot = stats.spot;
+            const emMove = stats.em_move, emLo = stats.em_lower, emHi = stats.em_upper, emPct = stats.em_pct;
+            const emValue = (emMove != null)
+                ? '±$' + emMove.toFixed(2) + (emPct != null ? ' (' + emPct.toFixed(2) + '%)' : '')
+                : '—';
+            const emSub = (emLo != null && emHi != null)
+                ? emLo.toFixed(2) + ' — ' + emHi.toFixed(2) : '';
+
+            const cw = stats.call_wall, pw = stats.put_wall, gf = stats.gamma_flip;
+            const walls = (cw != null || pw != null)
+                ? (cw != null ? cw.toFixed(2) : '—') + ' / ' + (pw != null ? pw.toFixed(2) : '—')
+                : '—';
+            const flipTxt = gf != null ? gf.toFixed(2) : '—';
+
+            strip.innerHTML = `
+                <div class="kpi-card">
+                    <div class="kpi-label">Net GEX (window)</div>
+                    <div class="kpi-value ${netCls}">${fmtMoneyCompact(netGex)}</div>
+                    <div class="kpi-sub">per 1% move: ${fmtMoneyCompact(hedge)}</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Regime</div>
+                    <div class="kpi-value ${regimeCls}">${regime}</div>
+                    <div class="kpi-sub">gamma flip: ${flipTxt}</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Expected Move (±1σ)</div>
+                    <div class="kpi-value">${emValue}</div>
+                    <div class="kpi-sub">${emSub}</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Call / Put Wall</div>
+                    <div class="kpi-value">${walls}</div>
+                    <div class="kpi-sub">spot: ${spot != null ? spot.toFixed(2) : '—'}</div>
+                </div>
+            `;
+            strip.style.display = 'flex';
+
+            const list = Array.isArray(stats.alerts) ? stats.alerts : [];
+            if (!list.length) {
+                alerts.innerHTML = '';
+                alerts.style.display = 'none';
+            } else {
+                alerts.innerHTML = list.map(a => {
+                    const cls = a.level === 'warn' ? 'warn' : 'info';
+                    const txt = (a.text || '').replace(/</g, '&lt;');
+                    return `<div class="alert-chip ${cls}">${txt}</div>`;
+                }).join('');
+                alerts.style.display = 'flex';
+            }
+        }
+
+        // ── Secondary chart tabs ───────────────────────────────────────────
+        let secondaryActiveTab = null;
+        const secondaryTabLabels = {
+            gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
+            speed: 'Speed', vomma: 'Vomma', color: 'Color',
+            options_volume: 'Options Vol', open_interest: 'Open Interest',
+            volume: 'Volume', volume_ratio: 'Vol Ratio', options_chain: 'Chain',
+            premium: 'Premium', large_trades: 'Large Trades', centroid: 'Centroid',
+        };
+        function updateSecondaryTabs(chartIds) {
+            const grid = document.querySelector('.charts-grid');
+            if (!grid) return;
+            let bar = document.getElementById('secondary-tabs');
+            if (!chartIds.length) {
+                if (bar) bar.remove();
+                return;
+            }
+            if (!bar) {
+                bar = document.createElement('div');
+                bar.id = 'secondary-tabs';
+                bar.className = 'secondary-tabs';
+                grid.parentNode.insertBefore(bar, grid);
+            }
+            if (!chartIds.includes(secondaryActiveTab)) secondaryActiveTab = chartIds[0];
+            bar.innerHTML = chartIds.map(id =>
+                `<button class="secondary-tab${id === secondaryActiveTab ? ' active' : ''}" data-tab="${id}">${secondaryTabLabels[id] || id}</button>`
+            ).join('');
+            bar.querySelectorAll('.secondary-tab').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    secondaryActiveTab = btn.dataset.tab;
+                    bar.querySelectorAll('.secondary-tab').forEach(b =>
+                        b.classList.toggle('active', b.dataset.tab === secondaryActiveTab));
+                    applySecondaryTabVisibility();
+                });
+            });
+            grid.classList.add('tabbed');
+            applySecondaryTabVisibility();
+        }
+        function applySecondaryTabVisibility() {
+            const grid = document.querySelector('.charts-grid');
+            if (!grid) return;
+            grid.querySelectorAll('.chart-container').forEach(el => {
+                const id = el.id.replace('-chart', '');
+                const hide = id !== secondaryActiveTab;
+                el.classList.toggle('tab-hidden', hide);
+                if (!hide) {
+                    try { Plotly.Plots.resize(el); } catch (e) {}
+                }
+            });
+        }
+
+        // ── Key levels (Call Wall / Put Wall / Gamma Flip / ±1σ EM) ──────────
+        function clearKeyLevels() {
+            if (!tvCandleSeries) { tvKeyLevelLines = []; return; }
+            tvKeyLevelLines.forEach(l => {
+                try { tvCandleSeries.removePriceLine(l); } catch (e) {}
+            });
+            tvKeyLevelLines = [];
+        }
+
+        function renderKeyLevels(levels) {
+            if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
+            clearKeyLevels();
+            const LS = LightweightCharts.LineStyle;
+            const defs = [
+                { key: 'call_wall',  title: 'Call Wall',  color: '#00D084', style: LS.Solid,  width: 2 },
+                { key: 'put_wall',   title: 'Put Wall',   color: '#FF4D4D', style: LS.Solid,  width: 2 },
+                { key: 'gamma_flip', title: 'Gamma Flip', color: '#FFC400', style: LS.Dashed, width: 2 },
+                { key: 'em_upper',   title: '+1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
+                { key: 'em_lower',   title: '-1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
+            ];
+            defs.forEach(def => {
+                const entry = levels[def.key];
+                if (!entry || entry.price == null || !isFinite(entry.price)) return;
+                try {
+                    const line = tvCandleSeries.createPriceLine({
+                        price: entry.price,
+                        color: def.color,
+                        lineWidth: def.width,
+                        lineStyle: def.style,
+                        axisLabelVisible: true,
+                        title: def.title,
+                    });
+                    tvKeyLevelLines.push(line);
+                } catch (e) {
+                    console.warn('createPriceLine failed for', def.title, e);
+                }
+            });
         }
 
         // ── Throttled price history fetcher ───────────────────────────────────
@@ -8186,6 +8767,15 @@ def index():
             .then(priceResp => {
                 if (!priceResp.error && priceResp.price) {
                     applyPriceData(priceResp.price);
+                }
+                if (priceResp && priceResp.gex_panel) {
+                    renderGexSidePanel(priceResp.gex_panel);
+                }
+                if (priceResp && priceResp.key_levels) {
+                    renderKeyLevels(priceResp.key_levels);
+                }
+                if (priceResp && priceResp.trader_stats) {
+                    renderTraderStats(priceResp.trader_stats);
                 }
             })
             .catch(err => console.error('Error fetching price chart:', err))
@@ -8261,6 +8851,7 @@ def index():
                     tvIndicatorSeries = {};
                     tvHistoricalPoints = [];
                     tvHistoricalExpectedMoveSeries = [];
+                    tvKeyLevelLines = [];
                 }
                 if (tvResizeObserver) {
                     tvResizeObserver.disconnect();
@@ -8292,27 +8883,14 @@ def index():
             if (regularCharts.length === 0) {
                 chartsGrid.style.display = 'none';
                 chartsGrid.innerHTML = '';
+                updateSecondaryTabs([]);
             } else {
-                chartsGrid.style.display = 'grid';
-                
+                chartsGrid.style.display = 'block';
+
                 // Only rebuild if chart selection changed
                 if (needsGridRebuild) {
                     chartsGrid.innerHTML = '';
-                    chartsGrid.className = 'charts-grid';
-                    
-                    // Add appropriate class based on number of enabled charts
-                    if (regularCharts.length === 1) {
-                        chartsGrid.classList.add('one-chart');
-                    } else if (regularCharts.length === 2) {
-                        chartsGrid.classList.add('two-charts');
-                    } else if (regularCharts.length === 3) {
-                        chartsGrid.classList.add('three-charts');
-                    } else if (regularCharts.length === 4) {
-                        chartsGrid.classList.add('four-charts');
-                    } else {
-                        chartsGrid.classList.add('many-charts');
-                    }
-                    
+                    chartsGrid.className = 'charts-grid tabbed';
                     regularCharts.forEach(([key, selected]) => {
                         const newContainer = document.createElement('div');
                         newContainer.className = 'chart-container';
@@ -8321,6 +8899,7 @@ def index():
                         chartContainerCache[key] = newContainer;
                     });
                 }
+                updateSecondaryTabs(regularChartIds);
                 
                 // Update chart data
                 regularCharts.forEach(([key, selected]) => {
@@ -8684,8 +9263,9 @@ def index():
                 }
             });
             scheduleTVHistoricalOverlayDraw();
+            scheduleGexPanelSync();
         });
-        
+
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
             clearInterval(updateInterval);
@@ -9352,7 +9932,41 @@ def update_price():
             price_chart = _json.dumps(pc_dict)
         except Exception:
             pass
-        return jsonify({'price': price_chart})
+
+        gex_panel = None
+        key_levels = None
+        S_for_panel = cached.get('S')
+        if calls is not None and puts is not None and S_for_panel is not None:
+            try:
+                gex_panel = create_gex_side_panel(
+                    calls, puts, S_for_panel, strike_range=strike_range,
+                    call_color=call_color, put_color=put_color,
+                )
+            except Exception as e:
+                print(f"[gex_panel] build failed: {e}")
+                gex_panel = None
+            try:
+                key_levels = compute_key_levels(calls, puts, S_for_panel)
+            except Exception as e:
+                print(f"[key_levels] build failed: {e}")
+                key_levels = None
+
+        trader_stats = None
+        if calls is not None and puts is not None and S_for_panel is not None:
+            try:
+                trader_stats = compute_trader_stats(
+                    calls, puts, S_for_panel, strike_range=strike_range,
+                )
+            except Exception as e:
+                print(f"[trader_stats] build failed: {e}")
+                trader_stats = None
+
+        return jsonify({
+            'price': price_chart,
+            'gex_panel': gex_panel,
+            'key_levels': key_levels,
+            'trader_stats': trader_stats,
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
