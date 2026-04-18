@@ -1,6 +1,6 @@
 # GEX Dashboard — UI Modernization Plan
 
-**Status:** In progress — 3 of 7 stages landed
+**Status:** In progress — 4 of 7 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/ui-modernization`
@@ -10,7 +10,7 @@
 
 ## 0. Where are we? (read this first)
 
-**Current state (as of 2026-04-18):** Stages 1, 2, and 3 have landed on `feat/ui-modernization`. Next stage: **4** — slim top bar + slide-in settings drawer. See §10 for per-stage progress notes and deviations from spec.
+**Current state (as of 2026-04-18):** Stages 1–4 have landed on `feat/ui-modernization`. Next stage: **5** — tabbed right rail (GEX / Alerts / Key Levels). See §10 for per-stage progress notes and deviations from spec.
 
 Line numbers throughout this doc are a snapshot as of commit `3d26533` (the commit that introduced the doc). **They drift as soon as Stage 1 lands.** Grep by anchor name — CSS class names (`.header`, `.secondary-tabs`, `.kpi-card`, `.gex-side-panel-wrap`), function names (`renderGexSidePanel`, `renderTraderStats`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `create_exposure_chart`), or element IDs (`#chart-grid`, `#trader-stats-strip`, `#gex-side-panel`) — rather than trusting the numbers.
 
@@ -243,6 +243,7 @@ Each stage is one commit on `feat/ui-modernization`. Every stage leaves the app 
    **Status:** ✅ Landed — see §10.3 for notes (Stage 4 drawer needed before chart on/off UI returns).
 4. **Slim top bar + drawer.** Restructure `.header` → `.top-bar` + `.drawer`. Group the ~30 controls into `<details>` sections. Hamburger toggles `.drawer.open`. Color pickers / coloring mode move to `<dialog>` opened by the gear icon.
    Commit: `feat(ui): add slim top bar and slide-in settings drawer`
+   **Status:** ✅ Landed — see §10.4 for notes (also closes the Stage-3 chart-visibility UI gap via a "Sections" drawer group).
 5. **Right-rail restructure.** Move GEX panel out of `.price-chart-row`; create `.right-rail` with three tab buttons. Default to GEX. Gate `syncGexPanelYAxisToTV()` on active tab.
    Commit: `feat(ui): tabbed right rail — GEX / Alerts / Key Levels`
 6. **Alerts & Key Levels tabs.** Render alerts into the right-rail panel with an unread-count badge; build the Key Levels table from `compute_trader_stats()` output.
@@ -354,3 +355,50 @@ Other notes:
 - The 14-id list lives in three places by intent: `CHART_IDS` (JS, drives visibility), `selectedCharts` consumers (still keyed by id), and `secondaryTabLabels` (display strings only). Kept separate because `secondaryTabLabels` carries extra never-rendered ids (`volume_ratio`, `options_chain`) that pre-date this stage — leaving them alone to avoid scope creep.
 - `gex.chartVisibility` and `gex.secondaryActiveTab` are the first two `localStorage` keys this app uses; namespacing with `gex.` is forward-looking for Stages 4–7 (drawer state, right-rail tab, etc.).
 - AST parse clean. No remaining `.chart-selector` / `.chart-checkbox` references in the file (two surviving hits are in the new explanatory comments). No remaining per-chart `getElementById('<id>').checked` reads.
+
+### 10.4 Stage 4 — `feat(ui): add slim top bar and slide-in settings drawer`
+
+**Landed:** 2026-04-18.
+
+The 4-row `.header` (~180 lines of markup) is gone. Replaced by three peers:
+
+1. **`<nav class="top-bar">`** — ~44 px sticky bar with hamburger, title, ticker, timeframe, expiry, stream pill (`#streamToggle`), gear, and the token monitor right-aligned. The expiry dropdown / `#expiry-display` keep their existing ids and styles so the dropdown JS at `expiry-display`/`selectAllExpiry`/`expiryToday`/etc. is untouched.
+
+2. **`<aside class="drawer" id="settings-drawer">`** — fixed-left, 320 px, `transform: translateX(-100%)` until `.drawer.open` toggles it in. Backdrop (`#drawer-backdrop`) dims the content underneath; click-backdrop and Esc both close. Sections (all `<details>`):
+   - **Sections** — chart visibility toggles (closes Stage-3 §10.3 gap; see below)
+   - **Strike Range** — `strike_range`, `match_em_range`
+   - **Exposure** — `exposure_metric`, `delta_adjusted_exposures`, `calculate_in_notional`
+   - **Series** — `show_calls`, `show_puts`, `show_net`
+   - **Price Levels** — `levels-display`/`levels-options`, `levels_count`, `use_heikin_ashi`, `horizontal_bars`
+   - **Absolute GEX** — `show_abs_gex`, `abs_gex_opacity`, `use_range`
+   - **Max Level** — `highlight_max_level`, `max_level_mode`
+
+   Footer holds **Save** / **Load** (id-preserved → existing handlers in `saveSettings`/`loadSettings` work unchanged).
+
+3. **`<dialog class="settings-modal" id="settings-modal">`** — opened by the gear button. Hosts `coloring_mode` + the three color pickers (`call_color`, `put_color`, `max_level_color`). Esc and the Done button close. Uses native `<dialog>.showModal()` with a fallback to `setAttribute('open','')`.
+
+**Critical preservation: every control id is unchanged.** The drawer is purely a re-housing — every existing event handler (`document.getElementById('strike_range').addEventListener('input', …)`, the page-init `.control-group input[type="checkbox"]` change → `updateData` loop, the color-picker `change` handlers, etc.) continues to bind to the same DOM nodes. Only the wrapping markup changed.
+
+**Stage-3 gap closed.** A new `renderChartVisibilitySection()` runs at init and after `applySettings()`, building 14 `.visibility-toggle` checkboxes from `CHART_IDS` and `CHART_LABELS`. Each toggle calls `setAllChartVisibility({[id]: checked})` then `updateData()` — the chart appears/disappears immediately, and the persisted map in `localStorage['gex.chartVisibility']` survives reload. `CHART_LABELS` is a separate map from `secondaryTabLabels` because the latter omits `price`.
+
+**CSS additions** (in declaration order in the style block):
+
+- `.top-bar` + tightened `input/select/expiry-display` overrides scoped to `.top-bar`.
+- `.controls` / `.control-group` retained, plus a `.drawer-content .control-group` override that strips the pill background and goes full-width.
+- `.btn-icon` (hamburger, gear, drawer close) and `.btn-ghost` (Save / Load / Done).
+- `.stream-pill` (replaces `.stream-control button`, keeps the `.paused` toggle behavior used by `toggleStreaming`).
+- `.drawer`, `.drawer.open`, `.drawer-backdrop`, `.drawer-header/body/footer/section`, custom `<summary>` styling with rotating ▸.
+- `.settings-modal` + `::backdrop`.
+- `.visibility-grid` / `.visibility-toggle` for the chart-visibility section.
+
+**Removed CSS:** `.header`, `.header-top`, `.header-bottom`, `.stream-control` (and all variants), `.settings-control` (and all variants). Responsive media-query rules updated to target `.top-bar` and `.drawer` instead.
+
+**Deviations from §4 spec:**
+
+- §4 says the modal hosts "color pickers / coloring mode". Done as specified, plus `max_level_color` was moved into the modal too — it's a third color picker so grouping it with the others felt natural and §4's table doesn't otherwise call out where it should live.
+- §4 doesn't explicitly place Save / Load. We put them in the drawer footer, on the assumption that they're settings-management actions (they belong with the controls they save) and the top bar should stay slim.
+- The `match_em_range` button kept its inline-style attribute but lost the hardcoded `#2a2a2a/#888888/#555555` colors — restyled with `.btn-ghost` plus a tiny `padding/font-size` inline override. Could be promoted to a clean class later.
+- Token monitor stayed in the top bar per spec; it hides at <768 px to keep the bar single-line on mobile.
+- The existing TM button styling (`.tm-btn` / `.tm-dot` / `.tm-stats`) was not touched — those rules are defined further down in the style block and remain external to the header restructure.
+
+**Verification:** AST parse clean. Cross-checked all `getElementById('<id>')` references against markup `id="..."` attributes — every required id is present (5 unmatched are dynamic creates: `candle-close-timer`, `secondary-tabs`, `tv-draw-color`, `tv-ohlc-tooltip`, plus the `tm-stats` class match). No stale `.header` / `.header-top` / `.header-bottom` / `.stream-control` / `.settings-control` selectors anywhere — two remaining grep hits are explanatory comments. Browser smoke test deferred (port 5001 was in use during the commit run).

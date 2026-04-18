@@ -4937,47 +4937,67 @@ def index():
             margin: 0 auto;
             padding: 15px;
         }
-        .header {
+        /* Slim sticky top bar (replaces .header / .header-top / .header-bottom) */
+        .top-bar {
             display: flex;
-            flex-direction: column;
-            gap: 15px;
-            margin-bottom: 20px;
-            padding: 20px;
-            background-color: var(--bg-1);
-            border-radius: 10px;
-            width: 100%;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 14px;
+            background: var(--bg-1);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            min-height: 44px;
             box-sizing: border-box;
+            margin-bottom: 14px;
         }
-        .header-top {
-            display: flex;
-            justify-content: space-between;
+        .top-bar .top-spacer { flex: 1; }
+        .top-bar input[type="text"],
+        .top-bar select {
+            padding: 4px 8px;
+            min-width: 0;
+            min-height: 28px;
+            font-size: 13px;
+        }
+        .top-bar #ticker { width: 90px; min-width: 90px; }
+        .top-bar #timeframe { width: 92px; min-width: 92px; }
+        .top-bar .expiry-dropdown { min-width: 150px; }
+        .top-bar .expiry-display { padding: 4px 8px; min-height: 28px; font-size: 13px; }
+        .top-bar #token-monitor {
+            display: inline-flex;
             align-items: center;
-            flex-wrap: wrap;
-            gap: 15px;
+            gap: 6px;
+            font-size: 11px;
         }
-        .header-bottom {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 15px;
-            padding-top: 15px;
-            border-top: 1px solid var(--border);
-        }
+        /* Drawer/modal-friendly control wrappers (still used by existing event handlers) */
         .controls {
             display: flex;
-            gap: 15px;
+            gap: 10px;
             align-items: center;
             flex-wrap: wrap;
         }
         .control-group {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: center;
             background-color: var(--bg-2);
             padding: 8px 12px;
-            border-radius: 6px;
+            border-radius: var(--radius);
         }
+        /* Inside the drawer, control-groups go full-width and lose their pill background */
+        .drawer-content .control-group {
+            background: transparent;
+            padding: 0;
+            border-radius: 0;
+            width: 100%;
+            flex-wrap: wrap;
+        }
+        .drawer-content .control-group label { font-size: 12px; color: var(--fg-1); }
+        .drawer-content input[type="text"],
+        .drawer-content select { width: 100%; min-width: 0; }
+        .drawer-content .expiry-dropdown,
+        .drawer-content .levels-dropdown { width: 100%; min-width: 0; }
         .expiry-dropdown {
             position: relative;
             min-width: 150px;
@@ -5567,91 +5587,210 @@ def index():
             background-color: #555;
         }
         .title {
-            font-size: 1.5em;
-            font-weight: bold;
-            color: #800080;
+            font-size: 1.05em;
+            font-weight: 600;
+            color: var(--accent);
+            letter-spacing: 0.02em;
+            margin-right: 4px;
+            white-space: nowrap;
         }
-        .stream-control {
+        /* Icon button — hamburger, gear, etc. */
+        .btn-icon {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--fg-0);
+            min-width: 32px;
+            height: 28px;
+            padding: 0 6px;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-size: 15px;
+            line-height: 1;
             display: inline-flex;
             align-items: center;
-            margin-left: 10px;
+            justify-content: center;
         }
-        .stream-control button {
-            padding: 8px 16px;
-            border-radius: 4px;
-            border: 1px solid #404040;
-            background-color: #2d2d2d;
-            color: #ffffff;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            transition: all 0.2s ease;
-            display: flex;
+        .btn-icon:hover { background: var(--bg-2); border-color: var(--border-strong); color: var(--fg-0); }
+        /* Stream toggle pill (replaces .stream-control button) */
+        .stream-pill {
+            display: inline-flex;
             align-items: center;
-            gap: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-            height: 36px; /* Match the height of other controls */
+            gap: 6px;
+            padding: 4px 12px;
+            height: 28px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg-2);
+            color: var(--fg-0);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: background-color 0.15s, border-color 0.15s;
         }
-        .stream-control button:hover {
-            background-color: #3d3d3d;
-            transform: translateY(-1px);
-        }
-        .stream-control button.paused {
-            background-color: #2d2d2d;
-            color: #ff4444;
-        }
-        .stream-control button.paused:hover {
-            background-color: #3d3d3d;
-        }
-        .stream-control button::before {
+        .stream-pill::before {
             content: '';
             display: inline-block;
-            width: 8px;
-            height: 8px;
+            width: 8px; height: 8px;
             border-radius: 50%;
-            background-color: #4CAF50;
-            transition: background-color 0.2s ease;
+            background: var(--call);
+            box-shadow: 0 0 6px var(--call);
+            transition: background-color 0.15s, box-shadow 0.15s;
         }
-        .stream-control button.paused::before {
-            background-color: #ff4444;
-        }
-        .stream-control button:active {
-            transform: translateY(0);
-            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
-        }
-        .settings-control {
+        .stream-pill:hover { background: var(--bg-3); border-color: var(--border-strong); }
+        .stream-pill.paused { color: var(--put); }
+        .stream-pill.paused::before { background: var(--put); box-shadow: 0 0 6px var(--put); }
+        /* Ghost buttons — drawer footer Save/Load and modal Done */
+        .btn-ghost {
+            padding: 6px 12px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg-2);
+            color: var(--fg-0);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            margin-left: 10px;
+            gap: 6px;
+            transition: background-color 0.15s, border-color 0.15s;
         }
-        .settings-control button {
-            padding: 8px 16px;
-            border-radius: 4px;
-            border: 1px solid #404040;
-            background-color: #2d2d2d;
-            color: #ffffff;
+        .btn-ghost:hover { background: var(--bg-3); border-color: var(--border-strong); }
+        .btn-ghost.success { background: var(--ok); border-color: var(--ok); color: var(--bg-0); }
+        /* Slide-in settings drawer */
+        .drawer-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 199;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+        }
+        .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+        .drawer {
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 100vh;
+            width: 320px;
+            max-width: 86vw;
+            background: var(--bg-1);
+            border-right: 1px solid var(--border);
+            transform: translateX(-100%);
+            transition: transform 0.25s ease;
+            z-index: 200;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 4px 0 16px rgba(0,0,0,0.5);
+        }
+        .drawer.open { transform: translateX(0); }
+        .drawer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        .drawer-header h3 {
+            margin: 0;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--fg-1);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .drawer-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0;
+        }
+        .drawer-footer {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px;
+        }
+        .drawer-section {
+            border-bottom: 1px solid var(--border);
+        }
+        .drawer-section > summary {
             cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            transition: all 0.2s ease;
+            padding: 10px 16px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--fg-1);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .drawer-section > summary::-webkit-details-marker { display: none; }
+        .drawer-section > summary::after {
+            content: '▸';
+            font-size: 10px;
+            color: var(--fg-2);
+            transition: transform 0.15s ease;
+        }
+        .drawer-section[open] > summary::after { transform: rotate(90deg); }
+        .drawer-section > summary:hover { background: var(--bg-2); color: var(--fg-0); }
+        .drawer-content {
+            padding: 6px 16px 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        /* Chart visibility toggles inside the drawer's "Sections" group */
+        .visibility-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px 12px;
+        }
+        .visibility-toggle {
             display: flex;
             align-items: center;
             gap: 6px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-            height: 36px;
+            font-size: 12px;
+            color: var(--fg-0);
+            cursor: pointer;
         }
-        .settings-control button:hover {
-            background-color: #3d3d3d;
-            transform: translateY(-1px);
+        .visibility-toggle input { accent-color: var(--accent); }
+        /* Settings modal (gear icon) — color pickers and coloring mode */
+        .settings-modal {
+            border: 1px solid var(--border);
+            background: var(--bg-1);
+            color: var(--fg-0);
+            border-radius: var(--radius-lg);
+            padding: 20px 22px;
+            max-width: 380px;
+            width: 92vw;
         }
-        .settings-control button:active {
-            transform: translateY(0);
-            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+        .settings-modal::backdrop { background: rgba(0,0,0,0.55); }
+        .settings-modal h3 {
+            margin: 0 0 12px 0;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--fg-1);
         }
-        .settings-control button.success {
-            background-color: #2e7d32;
-            border-color: #4caf50;
+        .settings-modal .modal-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--bg-2);
+            font-size: 13px;
+        }
+        .settings-modal .modal-row:last-of-type { border-bottom: none; }
+        .settings-modal .modal-row label { color: var(--fg-1); }
+        .settings-modal .modal-row select { min-width: 160px; }
+        .settings-modal .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 14px;
         }
         .chart-grid {
             display: grid;
@@ -5719,13 +5858,15 @@ def index():
                 width: 100%;
                 padding: 10px;
             }
-            .header {
-                padding: 10px;
+            .top-bar {
+                gap: 6px;
+                padding: 6px 10px;
+                flex-wrap: wrap;
+                min-height: auto;
             }
-            .header-top, .header-bottom {
-                flex-direction: column;
-                align-items: stretch;
-            }
+            .top-bar #token-monitor { display: none; }
+            .top-bar .title { font-size: 1em; }
+            .drawer { width: 86vw; }
             .controls {
                 flex-direction: column;
                 width: 100%;
@@ -5733,22 +5874,17 @@ def index():
             .control-group {
                 width: 100%;
                 justify-content: space-between;
-                min-height: 44px; /* Touch-friendly height */
-            }
-            .control-group label {
-                font-size: 14px;
-            }
-            input[type="text"], select {
-                min-width: 100px;
-                font-size: 16px; /* Prevent zoom on iOS */
                 min-height: 44px;
             }
-            input[type="range"] {
-                width: 100px;
+            .drawer-content .control-group { min-height: 0; }
+            .control-group label { font-size: 14px; }
+            input[type="text"], select {
+                min-width: 100px;
+                font-size: 16px;
+                min-height: 44px;
             }
-            .expiry-dropdown, .levels-dropdown {
-                width: 100%;
-            }
+            input[type="range"] { width: 100px; }
+            .expiry-dropdown, .levels-dropdown { width: 100%; }
             .expiry-display, .levels-display {
                 min-height: 44px;
                 display: flex;
@@ -5760,21 +5896,15 @@ def index():
             .charts-grid.many-charts {
                 grid-template-columns: 1fr;
             }
-            .chart-container {
-                height: 350px;
-            }
+            .chart-container { height: 350px; }
             .price-info {
                 flex-direction: column;
                 align-items: flex-start;
                 font-size: 1em;
             }
-            .stream-control button, .settings-control button {
-                min-height: 44px;
-                padding: 10px 16px;
-            }
-            button {
-                min-height: 44px;
-            }
+            .stream-pill, .btn-ghost { min-height: 36px; }
+            .btn-icon { min-height: 36px; }
+            button { min-height: 44px; }
         }
         
         @media screen and (max-width: 480px) {
@@ -5888,184 +6018,217 @@ def index():
         <div id="error-message"></div>
     </div>
     <div class="container">
-        <div class="header">
-            <div class="header-top">
-                <div>
-                    <div class="title">EzDuz1t Options</div>
-                    <div id="token-monitor">
-                        <span class="tm-dot tm-neutral" id="tm-dot"></span>
-                        <span class="tm-stats" style="color:#666;font-size:10px;">SCHWAB API</span>
-                        <span class="tm-stats" id="tm-access-stat" title="">…</span>
-                        <span class="tm-stats" style="color:#444;">·</span>
-                        <span class="tm-stats" id="tm-refresh-stat" title="">…</span>
-                        <div class="tm-btn-group">
-                            <button class="tm-btn" onclick="fetchTokenHealth()" title="Refresh token status">&#8635;</button>
-                            <button class="tm-btn tm-btn-del" onclick="forceDeleteToken()" title="Clear stored tokens">&#128465; reset</button>
+        <nav class="top-bar">
+            <button id="drawerToggle" class="btn-icon" title="Open settings drawer" aria-label="Open settings">&#9776;</button>
+            <div class="title">EzDuz1t Options</div>
+            <input type="text" id="ticker" placeholder="Ticker" value="SPY" title="Enter a ticker symbol (e.g., SPY, AAPL) or special aggregate tickers: 'MARKET' (SPX base) or 'MARKET2' (SPY base)">
+            <select id="timeframe" title="Candle timeframe">
+                <option value="1">1 min</option>
+                <option value="5">5 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">1 hour</option>
+            </select>
+            <div class="expiry-dropdown">
+                <div class="expiry-display" id="expiry-display">
+                    <span id="expiry-text">Select expiry dates...</span>
+                </div>
+                <div class="expiry-options" id="expiry-options">
+                    <div class="expiry-buttons">
+                        <div class="expiry-range-btns">
+                            <button type="button" id="expiryToday">Today</button>
+                            <button type="button" id="expiryThisWk">This Wk</button>
+                            <button type="button" id="expiry2Wks">+1 Wk</button>
+                            <button type="button" id="expiry4Wks">+2 Wks</button>
+                            <button type="button" id="expiry1Mo">+1 Mo</button>
                         </div>
+                        <button type="button" id="selectAllExpiry">All</button>
+                        <button type="button" id="clearAllExpiry">Clear</button>
                     </div>
                 </div>
-                <div class="controls">
-                    <div class="control-group">
-                        <label for="ticker">Ticker:</label>
-                        <input type="text" id="ticker" placeholder="Enter Ticker" value="SPY" title="Enter a ticker symbol (e.g., SPY, AAPL) or special aggregate tickers: 'MARKET' (SPX base) or 'MARKET2' (SPY base)">
+            </div>
+            <button id="streamToggle" class="stream-pill">Auto-Update</button>
+            <button id="settingsToggle" class="btn-icon" title="Color &amp; coloring settings" aria-label="Color settings">&#9881;</button>
+            <div class="top-spacer"></div>
+            <div id="token-monitor">
+                <span class="tm-dot tm-neutral" id="tm-dot"></span>
+                <span class="tm-stats" style="color:var(--fg-2);font-size:10px;">SCHWAB API</span>
+                <span class="tm-stats" id="tm-access-stat" title="">…</span>
+                <span class="tm-stats" style="color:var(--fg-2);">·</span>
+                <span class="tm-stats" id="tm-refresh-stat" title="">…</span>
+                <div class="tm-btn-group">
+                    <button class="tm-btn" onclick="fetchTokenHealth()" title="Refresh token status">&#8635;</button>
+                    <button class="tm-btn tm-btn-del" onclick="forceDeleteToken()" title="Clear stored tokens">&#128465; reset</button>
+                </div>
+            </div>
+        </nav>
+
+        <div class="drawer-backdrop" id="drawer-backdrop"></div>
+        <aside class="drawer" id="settings-drawer" aria-hidden="true">
+            <div class="drawer-header">
+                <h3>Settings</h3>
+                <button id="drawerClose" class="btn-icon" title="Close" aria-label="Close drawer">&times;</button>
+            </div>
+            <div class="drawer-body">
+                <details class="drawer-section" open>
+                    <summary>Sections</summary>
+                    <div class="drawer-content">
+                        <div class="visibility-grid" id="chart-visibility-list"><!-- populated by renderChartVisibilitySection() --></div>
                     </div>
-                    <div class="control-group">
-                        <label for="timeframe">Timeframe:</label>
-                        <select id="timeframe">
-                            <option value="1">1 min</option>
-                            <option value="5">5 min</option>
-                            <option value="15">15 min</option>
-                            <option value="30">30 min</option>
-                            <option value="60">1 hour</option>
-                        </select>
+                </details>
+                <details class="drawer-section" open>
+                    <summary>Strike Range</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <label for="strike_range">Strike Range (%):</label>
+                            <input type="range" id="strike_range" min="0.5" max="20" value="2" step="0.5">
+                            <span class="range-value" id="strike_range_value">2%</span>
+                            <button id="match_em_range" class="btn-ghost" title="Toggle: auto-sync strike range to Expected Move (ATM straddle) + 0.5% wiggle room" style="padding:2px 8px;font-size:11px;">&#128208; EM</button>
+                        </div>
                     </div>
-                    <div class="control-group">
-                        <label>Expiry:</label>
-                        <div class="expiry-dropdown">
-                            <div class="expiry-display" id="expiry-display">
-                                <span id="expiry-text">Select expiry dates...</span>
-                            </div>
-                            <div class="expiry-options" id="expiry-options">
-                                <!-- Options will be populated here -->
-                                <div class="expiry-buttons">
-                                    <div class="expiry-range-btns">
-                                        <button type="button" id="expiryToday">Today</button>
-                                        <button type="button" id="expiryThisWk">This Wk</button>
-                                        <button type="button" id="expiry2Wks">+1 Wk</button>
-                                        <button type="button" id="expiry4Wks">+2 Wks</button>
-                                        <button type="button" id="expiry1Mo">+1 Mo</button>
-                                    </div>
-                                    <button type="button" id="selectAllExpiry">All</button>
-                                    <button type="button" id="clearAllExpiry">Clear</button>
+                </details>
+                <details class="drawer-section" open>
+                    <summary>Exposure</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <label for="exposure_metric">Exposure Metric:</label>
+                            <select id="exposure_metric" title="Select the metric used to weight exposure formulas (GEX/DEX/VEX etc)">
+                                <option value="Open Interest" selected>Open Interest</option>
+                                <option value="Volume">Volume</option>
+                                <option value="Max OI vs Volume">Max OI vs Volume</option>
+                                <option value="OI + Volume">OI + Volume</option>
+                            </select>
+                        </div>
+                        <div class="control-group" title="When enabled, exposure formulas are adjusted by delta.">
+                            <input type="checkbox" id="delta_adjusted_exposures">
+                            <label for="delta_adjusted_exposures">Delta-Adjusted Exposures</label>
+                        </div>
+                        <div class="control-group" title="When enabled, exposures are calculated in notional value (Dollars). When disabled, in share equivalents.">
+                            <input type="checkbox" id="calculate_in_notional" checked>
+                            <label for="calculate_in_notional">Notional Calc</label>
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section" open>
+                    <summary>Series</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="show_calls">
+                            <label for="show_calls">Calls</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="show_puts">
+                            <label for="show_puts">Puts</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="show_net" checked>
+                            <label for="show_net">Net</label>
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section">
+                    <summary>Price Levels</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <label>Price Levels:</label>
+                            <div class="levels-dropdown">
+                                <div class="levels-display" id="levels-display">
+                                    <span id="levels-text">None</span>
+                                </div>
+                                <div class="levels-options" id="levels-options">
+                                    <div class="levels-option"><input type="checkbox" value="GEX" id="lvl-GEX"><label for="lvl-GEX">GEX</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="AbsGEX" id="lvl-AbsGEX"><label for="lvl-AbsGEX">Abs GEX</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="DEX" id="lvl-DEX"><label for="lvl-DEX">DEX</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="VEX" id="lvl-VEX"><label for="lvl-VEX">Vanna</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Charm" id="lvl-Charm"><label for="lvl-Charm">Charm</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Volume" id="lvl-Volume"><label for="lvl-Volume">Volume</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Speed" id="lvl-Speed"><label for="lvl-Speed">Speed</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Vomma" id="lvl-Vomma"><label for="lvl-Vomma">Vomma</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Color" id="lvl-Color"><label for="lvl-Color">Color</label></div>
+                                    <div class="levels-option"><input type="checkbox" value="Expected Move" id="lvl-ExpectedMove"><label for="lvl-ExpectedMove">Expected Move</label></div>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                    <div class="stream-control">
-                        <button id="streamToggle">Auto-Update</button>
-                    </div>
-                    <div class="settings-control">
-                        <button id="saveSettings" title="Save current settings to file">💾 Save</button>
-                        <button id="loadSettings" title="Load settings from file">📂 Load</button>
-                    </div>
-                </div>
-            </div>
-            <div class="header-bottom">
-                <div class="controls">
-                    <div class="control-group">
-                        <label for="strike_range">Strike Range (%):</label>
-                        <input type="range" id="strike_range" min="0.5" max="20" value="2" step="0.5">
-                        <span class="range-value" id="strike_range_value">2%</span>
-                        <button id="match_em_range" title="Toggle: auto-sync strike range to Expected Move (ATM straddle) + 0.5% wiggle room" style="margin-left:4px;padding:2px 6px;font-size:11px;cursor:pointer;background:#2a2a2a;color:#888888;border:1px solid #555555;border-radius:3px;">📐 EM</button>
-                    </div>
-                    <div class="control-group">
-                        <label for="exposure_metric">Exposure Metric:</label>
-                        <select id="exposure_metric" title="Select the metric used to weight exposure formulas (GEX/DEX/VEX etc)">
-                            <option value="Open Interest" selected>Open Interest</option>
-                            <option value="Volume">Volume</option>
-                            <option value="Max OI vs Volume">Max OI vs Volume</option>
-                            <option value="OI + Volume">OI + Volume</option>
-                        </select>
-                    </div>
-                    <div class="control-group" title="When enabled, exposure formulas are adjusted by delta.">
-                        <input type="checkbox" id="delta_adjusted_exposures">
-                        <label for="delta_adjusted_exposures">Delta-Adjusted Exposures</label>
-                    </div>
-                    <div class="control-group" title="When enabled, exposures are calculated in notional value (Dollars). When disabled, in share equivalents.">
-                        <input type="checkbox" id="calculate_in_notional" checked>
-                        <label for="calculate_in_notional">Notional Calc</label>
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="show_calls">
-                        <label for="show_calls">Calls</label>
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="show_puts">
-                        <label for="show_puts">Puts</label>
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="show_net" checked>
-                        <label for="show_net">Net</label>
-                    </div>
-                    <div class="control-group">
-                        <label for="coloring_mode">Coloring Mode:</label>
-                        <select id="coloring_mode" title="Solid: All bars same color | Linear: Gradual fade by value | Ranked: Only highest exposures are bright, others heavily muted">
-                            <option value="Solid" selected>Solid</option>
-                            <option value="Linear Intensity">Linear Intensity</option>
-                            <option value="Ranked Intensity">Ranked Intensity</option>
-                        </select>
-                    </div>
-                    <div class="control-group">
-                        <label>Price Levels:</label>
-                        <div class="levels-dropdown">
-                            <div class="levels-display" id="levels-display">
-                                <span id="levels-text">None</span>
-                            </div>
-                            <div class="levels-options" id="levels-options">
-                                <div class="levels-option"><input type="checkbox" value="GEX" id="lvl-GEX"><label for="lvl-GEX">GEX</label></div>
-                                <div class="levels-option"><input type="checkbox" value="AbsGEX" id="lvl-AbsGEX"><label for="lvl-AbsGEX">Abs GEX</label></div>
-                                <div class="levels-option"><input type="checkbox" value="DEX" id="lvl-DEX"><label for="lvl-DEX">DEX</label></div>
-                                <div class="levels-option"><input type="checkbox" value="VEX" id="lvl-VEX"><label for="lvl-VEX">Vanna</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Charm" id="lvl-Charm"><label for="lvl-Charm">Charm</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Volume" id="lvl-Volume"><label for="lvl-Volume">Volume</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Speed" id="lvl-Speed"><label for="lvl-Speed">Speed</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Vomma" id="lvl-Vomma"><label for="lvl-Vomma">Vomma</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Color" id="lvl-Color"><label for="lvl-Color">Color</label></div>
-                                <div class="levels-option"><input type="checkbox" value="Expected Move" id="lvl-ExpectedMove"><label for="lvl-ExpectedMove">Expected Move</label></div>
-                            </div>
+                        <div class="control-group">
+                            <label for="levels_count">Top #:</label>
+                            <input type="number" id="levels_count" min="1" max="10" value="3" style="width: 60px;">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="use_heikin_ashi">
+                            <label for="use_heikin_ashi">Heikin-Ashi</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="horizontal_bars">
+                            <label for="horizontal_bars">Horizontal Bars</label>
                         </div>
                     </div>
-                    <div class="control-group">
-                        <label for="levels_count">Top #:</label>
-                        <input type="number" id="levels_count" min="1" max="10" value="3" style="width: 50px;">
+                </details>
+                <details class="drawer-section">
+                    <summary>Absolute GEX</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="show_abs_gex">
+                            <label for="show_abs_gex">Show Abs GEX Area</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="abs_gex_opacity">Abs GEX Opacity:</label>
+                            <input type="range" id="abs_gex_opacity" min="0" max="100" value="20" style="width: 100px;">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="use_range">
+                            <label for="use_range">% Range Volume</label>
+                        </div>
                     </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="use_heikin_ashi">
-                        <label for="use_heikin_ashi">Heikin-Ashi</label>
+                </details>
+                <details class="drawer-section">
+                    <summary>Max Level</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="highlight_max_level">
+                            <label for="highlight_max_level">Highlight Max Level</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="max_level_mode">Max Level Mode:</label>
+                            <select id="max_level_mode" title="Absolute: highlights the single bar with the largest magnitude | Net: highlights the strike where the net (calls minus puts) is largest">
+                                <option value="Absolute" selected>Absolute</option>
+                                <option value="Net">Net</option>
+                            </select>
+                        </div>
                     </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="horizontal_bars">
-                        <label for="horizontal_bars">Horizontal Bars</label>
-                    </div>
-                    <!-- New Absolute GEX Settings -->
-                    <div class="control-group">
-                        <input type="checkbox" id="show_abs_gex">
-                        <label for="show_abs_gex">Show Abs GEX Area</label>
-                    </div>
-                    <div class="control-group">
-                        <label for="abs_gex_opacity">Abs GEX Opacity:</label>
-                        <input type="range" id="abs_gex_opacity" min="0" max="100" value="20" style="width: 80px;">
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="use_range">
-                        <label for="use_range">% Range Volume</label>
-                    </div>
-                    <div class="control-group">
-                        <label for="call_color">Call Color:</label>
-                        <input type="color" id="call_color" value="#00FF00">
-                    </div>
-                    <div class="control-group">
-                        <label for="put_color">Put Color:</label>
-                        <input type="color" id="put_color" value="#FF0000">
-                    </div>
-                    <div class="control-group">
-                        <input type="checkbox" id="highlight_max_level">
-                        <label for="highlight_max_level">Highlight Max Level</label>
-                    </div>
-                    <div class="control-group">
-                        <label for="max_level_mode">Max Level Mode:</label>
-                        <select id="max_level_mode" title="Absolute: highlights the single bar with the largest magnitude | Net: highlights the strike where the net (calls minus puts) is largest">
-                            <option value="Absolute" selected>Absolute</option>
-                            <option value="Net">Net</option>
-                        </select>
-                    </div>
-                    <div class="control-group">
-                        <label for="max_level_color">Max Level Color:</label>
-                        <input type="color" id="max_level_color" value="#800080">
-                    </div>
-                </div>
+                </details>
             </div>
-        </div>
+            <div class="drawer-footer">
+                <button id="saveSettings" class="btn-ghost" title="Save current settings to file">&#128190; Save</button>
+                <button id="loadSettings" class="btn-ghost" title="Load settings from file">&#128194; Load</button>
+            </div>
+        </aside>
+
+        <dialog class="settings-modal" id="settings-modal">
+            <h3>Color &amp; Coloring</h3>
+            <div class="modal-row">
+                <label for="coloring_mode">Coloring Mode</label>
+                <select id="coloring_mode" title="Solid: All bars same color | Linear: Gradual fade by value | Ranked: Only highest exposures are bright, others heavily muted">
+                    <option value="Solid" selected>Solid</option>
+                    <option value="Linear Intensity">Linear Intensity</option>
+                    <option value="Ranked Intensity">Ranked Intensity</option>
+                </select>
+            </div>
+            <div class="modal-row">
+                <label for="call_color">Call Color</label>
+                <input type="color" id="call_color" value="#00FF00">
+            </div>
+            <div class="modal-row">
+                <label for="put_color">Put Color</label>
+                <input type="color" id="put_color" value="#FF0000">
+            </div>
+            <div class="modal-row">
+                <label for="max_level_color">Max Level Color</label>
+                <input type="color" id="max_level_color" value="#800080">
+            </div>
+            <div class="modal-actions">
+                <button id="modalClose" class="btn-ghost">Done</button>
+            </div>
+        </dialog>
         
         <div class="price-info" id="price-info"></div>
 
@@ -9320,6 +9483,7 @@ def index():
             // Chart visibility — persist into localStorage; updateCharts() reads from there
             if (settings.charts) {
                 setAllChartVisibility(settings.charts);
+                if (typeof renderChartVisibilitySection === 'function') renderChartVisibilitySection();
             }
         }
         
@@ -9387,6 +9551,62 @@ def index():
         
         document.getElementById('saveSettings').addEventListener('click', saveSettings);
         document.getElementById('loadSettings').addEventListener('click', loadSettings);
+
+        // ── Settings drawer + color modal ─────────────────────────────────────
+        // Display labels for each chart id (covers `price` which secondaryTabLabels omits).
+        const CHART_LABELS = {
+            price: 'Price Chart',
+            gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
+            speed: 'Speed', vomma: 'Vomma', color: 'Color',
+            options_volume: 'Options Vol', open_interest: 'Open Interest',
+            volume: 'Volume Ratio', large_trades: 'Options Chain',
+            premium: 'Premium', centroid: 'Centroid'
+        };
+        function renderChartVisibilitySection() {
+            const list = document.getElementById('chart-visibility-list');
+            if (!list) return;
+            const vis = getChartVisibility();
+            list.innerHTML = CHART_IDS.map(id => `
+                <label class="visibility-toggle">
+                    <input type="checkbox" data-chart-id="${id}" ${vis[id] ? 'checked' : ''}>
+                    <span>${CHART_LABELS[id] || id}</span>
+                </label>
+            `).join('');
+            list.querySelectorAll('input[data-chart-id]').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    setAllChartVisibility({ [cb.dataset.chartId]: cb.checked });
+                    updateData();
+                });
+            });
+        }
+        renderChartVisibilitySection();
+
+        function openDrawer() {
+            document.getElementById('settings-drawer').classList.add('open');
+            document.getElementById('settings-drawer').setAttribute('aria-hidden', 'false');
+            document.getElementById('drawer-backdrop').classList.add('open');
+        }
+        function closeDrawer() {
+            document.getElementById('settings-drawer').classList.remove('open');
+            document.getElementById('settings-drawer').setAttribute('aria-hidden', 'true');
+            document.getElementById('drawer-backdrop').classList.remove('open');
+        }
+        document.getElementById('drawerToggle').addEventListener('click', openDrawer);
+        document.getElementById('drawerClose').addEventListener('click', closeDrawer);
+        document.getElementById('drawer-backdrop').addEventListener('click', closeDrawer);
+
+        const settingsModal = document.getElementById('settings-modal');
+        document.getElementById('settingsToggle').addEventListener('click', () => {
+            if (settingsModal.showModal) { settingsModal.showModal(); }
+            else { settingsModal.setAttribute('open', ''); } // <dialog> fallback
+        });
+        document.getElementById('modalClose').addEventListener('click', () => settingsModal.close());
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') return;
+            if (settingsModal.open) { settingsModal.close(); return; }
+            if (document.getElementById('settings-drawer').classList.contains('open')) closeDrawer();
+        });
 
         // Add event listener for ticker input
         document.getElementById('ticker').addEventListener('input', function(e) {
