@@ -5165,29 +5165,6 @@ def index():
             min-width: 40px;
             text-align: center;
         }
-        .chart-selector {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-            margin: 20px 0;
-            width: 100%;
-        }
-        .chart-checkbox {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            background-color: var(--bg-2);
-            padding: 6px 10px;
-            border-radius: 6px;
-        }
-        .chart-checkbox input[type="checkbox"] {
-            width: 16px;
-            height: 16px;
-            cursor: pointer;
-        }
-        .chart-checkbox label {
-            cursor: pointer;
-        }
         .chart-grid {
             display: grid;
             grid-template-columns: 1fr;
@@ -5777,19 +5754,6 @@ def index():
                 display: flex;
                 align-items: center;
             }
-            .chart-selector {
-                flex-direction: column;
-            }
-            .chart-checkbox {
-                width: 100%;
-                min-height: 44px;
-                display: flex;
-                align-items: center;
-            }
-            .chart-checkbox input[type="checkbox"] {
-                width: 22px;
-                height: 22px;
-            }
             .charts-grid.two-charts,
             .charts-grid.three-charts,
             .charts-grid.four-charts,
@@ -6108,66 +6072,6 @@ def index():
         <div id="trader-stats-strip" class="trader-stats-strip" style="display:none"></div>
         <div id="trader-alerts-strip" class="trader-alerts-strip" style="display:none"></div>
 
-        <div class="chart-selector">
-            <div class="chart-checkbox">
-                <input type="checkbox" id="price" checked>
-                <label for="price">Price Chart</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="gamma" checked>
-                <label for="gamma">Gamma Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="delta" checked>
-                <label for="delta">Delta Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="vanna" checked>
-                <label for="vanna">Vanna Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="charm" checked>
-                <label for="charm">Charm Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="speed">
-                <label for="speed">Speed Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="vomma">
-                <label for="vomma">Vomma Exposure</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="color">
-                <label for="color">Color Exposure</label>
-            </div>
-
-            <div class="chart-checkbox">
-                <input type="checkbox" id="options_volume" checked>
-                <label for="options_volume">Options Volume</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="open_interest">
-                <label for="open_interest">Open Interest</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="volume" checked>
-                <label for="volume">Volume Ratio</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="large_trades" checked>
-                <label for="large_trades">Options Chain</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="premium" checked>
-                <label for="premium">Premium by Strike</label>
-            </div>
-            <div class="chart-checkbox">
-                <input type="checkbox" id="centroid" checked>
-                <label for="centroid">Call vs Put Centroid Map</label>
-            </div>
-        </div>
-        
         <div class="chart-grid" id="chart-grid">
             <div class="price-chart-container">
                 <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
@@ -6256,6 +6160,42 @@ def index():
         let livePrice = null;
         // Debounce timer for Plotly price-line updates (avoid flooding relayout calls)
         let plotlyPriceUpdateTimer = null;
+
+        // ── Chart visibility (replaces the deleted .chart-selector checkbox row) ──
+        // Source of truth for which secondary charts render. Defaults below mirror the
+        // checked/unchecked state of the old chart-selector markup so behavior on a
+        // fresh browser is identical. Until the Stage-4 drawer ships, the only UI to
+        // toggle a chart on/off is via a saved settings file (gatherSettings/applySettings)
+        // — Stage 4 wires the drawer to setChartVisibility().
+        const CHART_IDS = [
+            'price','gamma','delta','vanna','charm','speed','vomma','color',
+            'options_volume','open_interest','volume','large_trades','premium','centroid'
+        ];
+        const CHART_VISIBILITY_DEFAULTS = {
+            price: true, gamma: true, delta: true, vanna: true, charm: true,
+            speed: false, vomma: false, color: false,
+            options_volume: true, open_interest: false, volume: true,
+            large_trades: true, premium: true, centroid: true
+        };
+        const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
+        const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
+        function getChartVisibility() {
+            let stored = {};
+            try { stored = JSON.parse(localStorage.getItem(CHART_VISIBILITY_KEY) || '{}'); } catch(e) {}
+            const out = {};
+            CHART_IDS.forEach(id => {
+                out[id] = (id in stored) ? !!stored[id] : CHART_VISIBILITY_DEFAULTS[id];
+            });
+            return out;
+        }
+        function setAllChartVisibility(map) {
+            const merged = getChartVisibility();
+            Object.keys(map || {}).forEach(k => {
+                if (CHART_IDS.includes(k)) merged[k] = !!map[k];
+            });
+            try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
+        }
+        function isChartVisible(id) { return !!getChartVisibility()[id]; }
 
         // List of Plotly chart div IDs that carry a current-price line shape
         const PLOTLY_PRICE_LINE_CHARTS = [
@@ -7267,23 +7207,10 @@ def index():
             const highlightMaxLevel = document.getElementById('highlight_max_level').checked;
             const maxLevelMode = document.getElementById('max_level_mode').value;
             
-            // Get visible charts
-            const visibleCharts = {
-                show_price: document.getElementById('price').checked,
-                show_gamma: document.getElementById('gamma').checked,
-                show_delta: document.getElementById('delta').checked,
-                show_vanna: document.getElementById('vanna').checked,
-                show_charm: document.getElementById('charm').checked,
-                show_speed: document.getElementById('speed').checked,
-                show_vomma: document.getElementById('vomma').checked,
-                show_color: document.getElementById('color').checked,
-                show_options_volume: document.getElementById('options_volume').checked,
-                show_open_interest: document.getElementById('open_interest').checked,
-                show_volume: document.getElementById('volume').checked,
-                show_large_trades: document.getElementById('large_trades').checked,
-                show_premium: document.getElementById('premium').checked,
-                show_centroid: document.getElementById('centroid').checked
-            };
+            // Get visible charts (server payload uses show_<id> keys for back-compat)
+            const _vis = getChartVisibility();
+            const visibleCharts = {};
+            CHART_IDS.forEach(id => { visibleCharts['show_' + id] = _vis[id]; });
 
             // Common payload fields shared by both requests
             const sharedPayload = {
@@ -7359,7 +7286,7 @@ def index():
                 // Options cache is now populated — refresh price levels immediately.
                 // This fixes the delay where levels were missing right after a ticker change
                 // because /update_price fired before the options chain was cached.
-                if (document.getElementById('price').checked) {
+                if (isChartVisible('price')) {
                     _priceHistoryLastKey = ''; // force cache-miss so fetchPriceHistory re-fetches
                     fetchPriceHistory(true);
                 }
@@ -8491,7 +8418,7 @@ def index():
 
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
-            if (!document.getElementById('price').checked) return;
+            if (!isChartVisible('price')) return;
             lastPriceData = priceJson; // keep for popout push
             let priceContainer = document.querySelector('.price-chart-container');
             if (!priceContainer) {
@@ -8659,7 +8586,9 @@ def index():
         }
 
         // ── Secondary chart tabs ───────────────────────────────────────────
-        let secondaryActiveTab = null;
+        let secondaryActiveTab = (() => {
+            try { return localStorage.getItem(SECONDARY_TAB_KEY) || null; } catch(e) { return null; }
+        })();
         const secondaryTabLabels = {
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
@@ -8688,6 +8617,7 @@ def index():
             bar.querySelectorAll('.secondary-tab').forEach(btn => {
                 btn.addEventListener('click', () => {
                     secondaryActiveTab = btn.dataset.tab;
+                    try { localStorage.setItem(SECONDARY_TAB_KEY, secondaryActiveTab); } catch(e) {}
                     bar.querySelectorAll('.secondary-tab').forEach(b =>
                         b.classList.toggle('active', b.dataset.tab === secondaryActiveTab));
                     applySecondaryTabVisibility();
@@ -8774,7 +8704,7 @@ def index():
         }
 
         function fetchPriceHistory(force) {
-            if (!document.getElementById('price').checked) return;
+            if (!isChartVisible('price')) return;
             if (_priceHistoryInFlight) return;
             const payload = buildPricePayload();
             const key = JSON.stringify(payload);
@@ -8812,22 +8742,7 @@ def index():
             // Save scroll position before any DOM changes
             savedScrollPosition = window.scrollY || window.pageYOffset;
             
-            const selectedCharts = {
-                price: document.getElementById('price').checked,
-                gamma: document.getElementById('gamma').checked,
-                delta: document.getElementById('delta').checked,
-                vanna: document.getElementById('vanna').checked,
-                charm: document.getElementById('charm').checked,
-                speed: document.getElementById('speed').checked,
-                vomma: document.getElementById('vomma').checked,
-                color: document.getElementById('color').checked,
-                options_volume: document.getElementById('options_volume').checked,
-                open_interest: document.getElementById('open_interest').checked,
-                volume: document.getElementById('volume').checked,
-                large_trades: document.getElementById('large_trades').checked,
-                premium: document.getElementById('premium').checked,
-                centroid: document.getElementById('centroid').checked
-            };
+            const selectedCharts = getChartVisibility();
             
             // Handle price chart separately (TradingView Lightweight Charts)
             if (selectedCharts.price && data.price) {
@@ -9148,11 +9063,6 @@ def index():
             }
         }
         
-        // Add event listeners for checkboxes
-        document.querySelectorAll('.chart-checkbox input[type="checkbox"]').forEach(checkbox => {
-            checkbox.addEventListener('change', updateData);
-        });
-        
         // Add event listeners for control checkboxes
         document.querySelectorAll('.control-group input[type="checkbox"]').forEach(checkbox => {
             checkbox.addEventListener('change', updateData);
@@ -9348,25 +9258,10 @@ def index():
                 max_level_mode: document.getElementById('max_level_mode').value,
                 em_range_locked: emRangeLocked,
                 // Chart visibility
-                charts: {
-                    price: document.getElementById('price').checked,
-                    gamma: document.getElementById('gamma').checked,
-                    delta: document.getElementById('delta').checked,
-                    vanna: document.getElementById('vanna').checked,
-                    charm: document.getElementById('charm').checked,
-                    speed: document.getElementById('speed').checked,
-                    vomma: document.getElementById('vomma').checked,
-                    color: document.getElementById('color').checked,
-                    options_volume: document.getElementById('options_volume').checked,
-                    open_interest: document.getElementById('open_interest').checked,
-                    volume: document.getElementById('volume').checked,
-                    large_trades: document.getElementById('large_trades').checked,
-                    premium: document.getElementById('premium').checked,
-                    centroid: document.getElementById('centroid').checked
-                }
+                charts: getChartVisibility()
             };
         }
-        
+
         function applySettings(settings) {
             if (settings.ticker) document.getElementById('ticker').value = settings.ticker;
             if (settings.timeframe) document.getElementById('timeframe').value = settings.timeframe;
@@ -9422,12 +9317,9 @@ def index():
             if (settings.em_range_locked !== undefined) {
                 setEmRangeLocked(settings.em_range_locked);
             }
-            // Chart visibility
+            // Chart visibility — persist into localStorage; updateCharts() reads from there
             if (settings.charts) {
-                Object.keys(settings.charts).forEach(chartId => {
-                    const checkbox = document.getElementById(chartId);
-                    if (checkbox) checkbox.checked = settings.charts[chartId];
-                });
+                setAllChartVisibility(settings.charts);
             }
         }
         

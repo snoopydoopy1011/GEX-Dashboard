@@ -1,6 +1,6 @@
 # GEX Dashboard — UI Modernization Plan
 
-**Status:** In progress — 2 of 7 stages landed
+**Status:** In progress — 3 of 7 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/ui-modernization`
@@ -10,7 +10,7 @@
 
 ## 0. Where are we? (read this first)
 
-**Current state (as of 2026-04-18):** Stages 1 and 2 have landed on `feat/ui-modernization` (commits `cc31ad2`, `ee20f4d`). Next stage: **3** — delete the chart-selector row and make the secondary-tab bar the only switcher. See §10 for per-stage progress notes and deviations from spec.
+**Current state (as of 2026-04-18):** Stages 1, 2, and 3 have landed on `feat/ui-modernization`. Next stage: **4** — slim top bar + slide-in settings drawer. See §10 for per-stage progress notes and deviations from spec.
 
 Line numbers throughout this doc are a snapshot as of commit `3d26533` (the commit that introduced the doc). **They drift as soon as Stage 1 lands.** Grep by anchor name — CSS class names (`.header`, `.secondary-tabs`, `.kpi-card`, `.gex-side-panel-wrap`), function names (`renderGexSidePanel`, `renderTraderStats`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `create_exposure_chart`), or element IDs (`#chart-grid`, `#trader-stats-strip`, `#gex-side-panel`) — rather than trusting the numbers.
 
@@ -240,6 +240,7 @@ Each stage is one commit on `feat/ui-modernization`. Every stage leaves the app 
    **Status:** ✅ Landed as `ee20f4d` — see §10.2 for notes (deviated from `**PLOT_THEME` unpack to value-dereference; reasoning captured there).
 3. **Delete chart-selector row, extend tab bar.** Remove lines 6085–6143. Make `updateSecondaryTabs()` authoritative. Persist per-chart visibility to `localStorage` (defaults match today's checked/unchecked state).
    Commit: `feat(ui): replace chart-checkbox row with always-on secondary tabs`
+   **Status:** ✅ Landed — see §10.3 for notes (Stage 4 drawer needed before chart on/off UI returns).
 4. **Slim top bar + drawer.** Restructure `.header` → `.top-bar` + `.drawer`. Group the ~30 controls into `<details>` sections. Hamburger toggles `.drawer.open`. Color pickers / coloring mode move to `<dialog>` opened by the gear icon.
    Commit: `feat(ui): add slim top bar and slide-in settings drawer`
 5. **Right-rail restructure.** Move GEX panel out of `.price-chart-row`; create `.right-rail` with three tab buttons. Default to GEX. Gate `syncGexPanelYAxisToTV()` on active tab.
@@ -320,3 +321,36 @@ Other notes:
 - **Many `'#CCCCCC'` / `'#333333'` Plotly literals remain** inside chart-specific `xaxis`/`yaxis` configs (`title_font`, `tickfont`, `tickcolor`, `spikecolor`) — not on §3's mapping table, left alone to keep Stage 2 tight.
 
 Verification status: AST parse clean; full §8 browser verification (stream on, KPI values, chart tabs render) deferred — palette change is visible but functionally transparent, and every subsequent stage will exercise the same chart-builder code paths.
+
+### 10.3 Stage 3 — `feat(ui): replace chart-checkbox row with always-on secondary tabs`
+
+**Landed:** 2026-04-18.
+
+Deleted the entire 14-checkbox `.chart-selector` row (markup + `.chart-selector` / `.chart-checkbox` CSS in both base and responsive blocks) and the `.chart-checkbox input` change-listener that drove `updateData()` re-fetches. The secondary tab bar is now the only switcher.
+
+Visibility moved off the DOM entirely. New helpers (defined immediately above `PLOTLY_PRICE_LINE_CHARTS`):
+
+- `CHART_IDS` — canonical 14-id list.
+- `CHART_VISIBILITY_DEFAULTS` — mirrors the prior checked/unchecked state exactly so a fresh browser sees the same set of charts as before.
+- `getChartVisibility()` — reads `localStorage['gex.chartVisibility']`, merges over defaults, returns a full map.
+- `setAllChartVisibility(map)` — writes the merged map back; used by `applySettings()`.
+- `isChartVisible(id)` — convenience read.
+
+Four read-sites collapsed:
+
+- `updateData()` payload assembly — the 14-line `visibleCharts` literal became `CHART_IDS.forEach(id => { visibleCharts['show_' + id] = _vis[id]; })`. Server `show_<id>` keys preserved for back-compat.
+- `updateCharts()` — the 14-line `selectedCharts` literal became `const selectedCharts = getChartVisibility();`.
+- `gatherSettings()` — `charts: { … }` → `charts: getChartVisibility()`.
+- `applySettings()` — per-checkbox `.checked = …` loop → `setAllChartVisibility(settings.charts)`.
+
+Three other `getElementById('price').checked` reads (the only single-id checks in the codebase, at the price-history fetch trigger and two early-return guards) became `isChartVisible('price')`.
+
+Active secondary tab is now persisted too: `localStorage['gex.secondaryActiveTab']` is read on init and written every time the user clicks a tab. Reload restores the active tab; the existing fallback (`if (!chartIds.includes(secondaryActiveTab)) secondaryActiveTab = chartIds[0]`) handles the case where the persisted tab is no longer visible.
+
+**Known gap until Stage 4:** with the chart-selector row gone there is currently no UI to toggle individual charts on/off — only saved-settings files (or direct `localStorage` edits) can flip a chart's visibility. The drawer in Stage 4 owns this UI per §4 ("Visibility migrates to a 'Sections' group inside the drawer"). Defaults are sized so this gap is invisible to anyone who hasn't already customized the old checkbox row.
+
+Other notes:
+
+- The 14-id list lives in three places by intent: `CHART_IDS` (JS, drives visibility), `selectedCharts` consumers (still keyed by id), and `secondaryTabLabels` (display strings only). Kept separate because `secondaryTabLabels` carries extra never-rendered ids (`volume_ratio`, `options_chain`) that pre-date this stage — leaving them alone to avoid scope creep.
+- `gex.chartVisibility` and `gex.secondaryActiveTab` are the first two `localStorage` keys this app uses; namespacing with `gex.` is forward-looking for Stages 4–7 (drawer state, right-rail tab, etc.).
+- AST parse clean. No remaining `.chart-selector` / `.chart-checkbox` references in the file (two surviving hits are in the new explanatory comments). No remaining per-chart `getElementById('<id>').checked` reads.
