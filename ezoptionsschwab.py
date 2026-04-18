@@ -2400,20 +2400,31 @@ def get_price_history(ticker, timeframe=1):
         # Get current time in EST
         est = datetime.now(pytz.timezone('US/Eastern'))
         current_date = est.date()
-        
-        # Calculate start date (5 days ago to ensure we get previous trading day)
-        start_date = datetime.combine(current_date - timedelta(days=5), datetime.min.time())
+
+        # Map timeframe (minutes) -> trading-day lookback. Finer timeframes get less
+        # history to keep payload size bounded; coarser timeframes stretch further back
+        # so the chart shows meaningful structure without wasting bandwidth on 1-min bars.
+        PERIOD_BY_TF = {1: 5, 5: 20, 15: 30, 30: 30, 60: 90}
+        period_days = PERIOD_BY_TF.get(timeframe, 20)
+
+        # +5 calendar-day cushion covers weekends/holidays that filter_market_hours() drops.
+        start_date = datetime.combine(current_date - timedelta(days=period_days + 5), datetime.min.time())
         end_date = datetime.combine(current_date + timedelta(days=1), datetime.min.time())
-        
+
         # Schwab API only supports minute frequencies: 1, 5, 10, 15, 30.
         # For 60-min (hourly), fetch 30-min candles and aggregate after.
         api_frequency = 30 if timeframe == 60 else timeframe
+
+        # Schwab's `period` param strict-validates to {1,2,3,4,5,10} for periodType="day".
+        # startDate/endDate drive the actual fetch window, so cap `period` at 10 to stay
+        # within the enum while letting `period_days` control lookback above.
+        api_period = min(period_days, 10)
 
         # Convert dates to milliseconds since epoch
         response = client.price_history(
             symbol=ticker,
             periodType="day",
-            period=5,  # Get 5 days of data
+            period=api_period,
             frequencyType="minute",
             frequency=api_frequency,
             startDate=int(start_date.timestamp() * 1000),
@@ -2462,17 +2473,18 @@ def get_price_history(ticker, timeframe=1):
         raise Exception(msg)
 
 def filter_market_hours(candles):
-    """Filter candles to only include regular market hours (9:30 AM - 4:00 PM ET)"""
+    """Filter candles to trading-day hours: pre-market 04:00 ET through after-hours 20:00 ET.
+    Overnight gap (20:00-04:00) is excluded because Schwab priceHistory returns no bars there."""
     filtered_candles = []
     for candle in candles:
         dt = datetime.fromtimestamp(candle['datetime']/1000)
         # Convert to Eastern Time
         et = dt.astimezone(pytz.timezone('US/Eastern'))
-        # Check if it's a weekday and within market hours
+        # Check if it's a weekday and within extended trading hours
         if et.weekday() < 5:  # 0-4 is Monday-Friday
-            market_open = et.replace(hour=9, minute=30, second=0, microsecond=0)
-            market_close = et.replace(hour=16, minute=0, second=0, microsecond=0)
-            if market_open <= et <= market_close:
+            session_open  = et.replace(hour=4,  minute=0, second=0, microsecond=0)
+            session_close = et.replace(hour=20, minute=0, second=0, microsecond=0)
+            if session_open <= et <= session_close:
                 filtered_candles.append(candle)
     return filtered_candles
 
@@ -3421,13 +3433,13 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         current_day_candles = [c for c in sorted_candles
                                if datetime.fromtimestamp(c['datetime'] / 1000, est).date() == most_recent_date]
 
-    # Apply Heikin-Ashi using all candles as seed, then slice to current day
+    # Display the full multi-day window so the chart shows ~20+ RTH sessions.
+    # current_day_candles is still computed above because current_day_start_time
+    # (daily VWAP anchor) depends on it.
     if use_heikin_ashi:
-        all_ha = convert_to_heikin_ashi(sorted_candles)
-        day_start_idx = len(sorted_candles) - len(current_day_candles)
-        display_candles = all_ha[day_start_idx:]
+        display_candles = convert_to_heikin_ashi(sorted_candles)
     else:
-        display_candles = current_day_candles
+        display_candles = sorted_candles
 
     # Previous day close
     previous_day_close = None
@@ -5487,6 +5499,12 @@ def index():
             z-index: 4;
             pointer-events: none;
             overflow: hidden;
+        }
+        .tv-eth-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+            pointer-events: none;
         }
         .tv-historical-bubble {
             position: absolute;
@@ -8541,8 +8559,81 @@ def index():
             tvHistoricalOverlayPending = true;
             requestAnimationFrame(() => {
                 tvHistoricalOverlayPending = false;
+                drawTVEthOverlay();
                 drawTVHistoricalOverlay();
             });
+        }
+
+        function ensureTVEthOverlay() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let canvas = container.querySelector('.tv-eth-overlay');
+            if (!canvas) {
+                canvas = document.createElement('canvas');
+                canvas.className = 'tv-eth-overlay';
+                container.appendChild(canvas);
+            }
+            return canvas;
+        }
+
+        // Cached ET-hour/minute formatter — creation is expensive vs. per-tick redraws.
+        const _tvEthFmt = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            hour: '2-digit', minute: '2-digit', hour12: false
+        });
+        function _tvIsEth(unixSec) {
+            const parts = _tvEthFmt.formatToParts(new Date(unixSec * 1000));
+            let h = +parts.find(p => p.type === 'hour').value;
+            const m = +parts.find(p => p.type === 'minute').value;
+            if (h === 24) h = 0;  // Safari/older Intl quirk
+            return h < 9 || (h === 9 && m < 30) || h >= 16;
+        }
+
+        function drawTVEthOverlay() {
+            const canvas = ensureTVEthOverlay();
+            const container = document.getElementById('price-chart');
+            if (!canvas || !container || !tvPriceChart || !tvLastCandles.length) return;
+            const bounds = container.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            if (canvas.width !== bounds.width * dpr || canvas.height !== bounds.height * dpr) {
+                canvas.width = bounds.width * dpr;
+                canvas.height = bounds.height * dpr;
+                canvas.style.width = bounds.width + 'px';
+                canvas.style.height = bounds.height + 'px';
+            }
+            const ctx = canvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, bounds.width, bounds.height);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.035)';
+
+            const ts = tvPriceChart.timeScale();
+            // Group contiguous ETH candles into runs; paint one rect per run.
+            let runStart = null, runEnd = null;
+            const flush = () => {
+                if (runStart === null) return;
+                const xs = ts.timeToCoordinate(runStart);
+                const xe = ts.timeToCoordinate(runEnd);
+                if (xs !== null && xe !== null) {
+                    const candleSpan = tvLastCandles.length > 1
+                        ? tvLastCandles[1].time - tvLastCandles[0].time
+                        : 300;
+                    const xeEnd = ts.timeToCoordinate(runEnd + candleSpan);
+                    const right = (xeEnd !== null) ? xeEnd : (xe + 2);
+                    ctx.fillRect(xs, 0, right - xs, bounds.height);
+                }
+                runStart = null;
+                runEnd = null;
+            };
+            for (let i = 0; i < tvLastCandles.length; i++) {
+                const c = tvLastCandles[i];
+                if (_tvIsEth(c.time)) {
+                    if (runStart === null) runStart = c.time;
+                    runEnd = c.time;
+                } else {
+                    flush();
+                }
+            }
+            flush();
         }
 
         function renderTVPriceChart(priceData) {
@@ -8602,8 +8693,17 @@ def index():
                         secondsVisible:   false,
                         fixLeftEdge:      false,
                         fixRightEdge:     false,
-                        tickMarkFormatter: (time) => {
+                        // TickMarkType: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds.
+                        // Show dates ("Apr 15") at day/month/year boundaries so multi-day views
+                        // are readable without vertical separators.
+                        tickMarkFormatter: (time, tickMarkType) => {
                             const d = new Date(time * 1000);
+                            if (tickMarkType === 0 || tickMarkType === 1 || tickMarkType === 2) {
+                                return d.toLocaleDateString('en-US', {
+                                    month: 'short', day: 'numeric',
+                                    timeZone: 'America/New_York'
+                                });
+                            }
                             return d.toLocaleTimeString('en-US', {
                                 hour: '2-digit', minute: '2-digit',
                                 hour12: false, timeZone: 'America/New_York'

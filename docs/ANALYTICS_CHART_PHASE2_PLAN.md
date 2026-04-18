@@ -1,6 +1,6 @@
 # GEX Dashboard — Analytics + Chart Phase 2
 
-**Status:** Not started — 0 of 4 stages landed
+**Status:** In progress — 1 of 4 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/analytics-phase2`
@@ -11,7 +11,7 @@
 
 ## 0. Where are we? (read this first)
 
-**Current state (as of 2026-04-18):** branch not cut, no stages landed.
+**Current state (as of 2026-04-18):** branch `feat/analytics-phase2` live; Stage 1 landed with deviations (see §10). Next: Stage 2 — Dealer Hedge Impact panel.
 
 Line numbers in this doc are a snapshot as of `main` @ `e276e63`. They drift as soon as Stage 1 lands. **Grep by anchor name** (function names, CSS class names, element IDs) instead of trusting line numbers. Stable anchors used throughout this doc:
 
@@ -622,7 +622,11 @@ Make all four new overlays respect the existing chart-visibility controls in the
 
 _(populate as stages land — one bullet each with commit SHA, notes on any deviation from spec)_
 
-- Stage 1 — not started
+- **Stage 1 — landed.** Commit: (this commit). Deviations from §7 Stage 1 spec:
+  - `PERIOD_BY_TF` set to `{1:5, 5:20, 15:30, 30:30, 60:90}` as spec'd, but an extra `api_period = min(period_days, 10)` cap was added because Schwab's `price_history` validates `period` against the enum `{1,2,3,4,5,10}` for `periodType="day"`. The actual lookback window is driven by `startDate`/`endDate`, so this is cosmetic — the returned data still spans `period_days`.
+  - `filter_market_hours` was **changed**, not left alone. Spec said "extended-hours bars stay excluded," but on review the ETH bars carry useful context (overnight gap detection, pre-market gappers). New behavior: keep 04:00–20:00 ET; still drops weekends + overnight (20:00–04:00). ETH bars are visually dimmed via a new `.tv-eth-overlay` canvas (`drawTVEthOverlay()`), so RTH still reads as the dominant session.
+  - `prepare_price_chart_data` was changed to display the **full multi-day window** by default (both Heikin-Ashi and regular paths). Previously it sliced to `current_day_candles` only — that slice made the "one day only" complaint persist even after the backend fix, so it had to go. The `current_day_candles` variable is preserved because daily VWAP anchoring still depends on it.
+  - `tickMarkFormatter` upgraded to switch on `tickMarkType` and render date labels ("Apr 15") at day/month/year boundaries — without this the multi-day x-axis was unreadable (only HH:MM labels, no date context).
 - Stage 2 — not started
 - Stage 3 — not started
 - Stage 4 — not started
