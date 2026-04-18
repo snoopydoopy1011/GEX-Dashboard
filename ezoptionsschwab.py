@@ -5187,16 +5187,22 @@ def index():
         }
         .chart-grid {
             display: grid;
-            grid-template-columns: 1fr;
-            gap: 5px;
+            grid-template-columns: minmax(0, 1fr) 300px;
+            column-gap: 4px;
+            row-gap: 5px;
             width: 100%;
+            align-items: stretch;
         }
-        
-        .price-chart-container {
-            /* overridden below by TV chart styles */
-        }
-        
-        
+        /* Row 1: toolbar (col 1) + right-rail tabs (col 2) — same grid row, so both stretch to the row's max height. */
+        .chart-grid > .tv-toolbar-container { grid-column: 1; }
+        .chart-grid > .right-rail-tabs      { grid-column: 2; }
+        /* Row 2: price chart (col 1) + right-rail panels (col 2). Same row → same height. */
+        .chart-grid > .price-chart-container { grid-column: 1; }
+        .chart-grid > .right-rail-panels     { grid-column: 2; }
+        /* Remaining rows span both columns. */
+        .chart-grid > #secondary-tabs { grid-column: 1 / -1; }
+        .chart-grid > .charts-grid    { grid-column: 1 / -1; }
+
         .chart-container {
             padding: 5px;
             height: 500px;
@@ -5209,7 +5215,7 @@ def index():
             display: flex;
             flex-direction: column;
         }
-        
+
         .chart-container > div {
             flex: 1;
             width: 100%;
@@ -5219,33 +5225,74 @@ def index():
         /* TradingView-style price chart overrides */
         .price-chart-container {
             background: #1a1a1a;
-            border-radius: 10px;
+            border-radius: 0 0 10px 10px;
             overflow: hidden;
             margin-bottom: 5px;
-            grid-column: 1 / -1;
         }
-        .price-chart-row {
+
+        /* ── Right rail (GEX / Alerts / Levels) ──────────────────────── */
+        .right-rail-tabs {
             display: flex;
-            flex-direction: row;
-            gap: 4px;
             align-items: stretch;
+            gap: 0;
+            background: #1a1a1a;
+            border-bottom: 1px solid var(--bg-2);
+            border-radius: 10px 10px 0 0;
+            padding: 0;
+            overflow: hidden;
         }
-        .price-chart-row > #price-chart { flex: 1 1 78%; min-width: 0; }
-        .price-chart-row > .gex-side-panel-wrap { flex: 0 0 22%; min-width: 180px; max-width: 320px; }
-        .gex-side-panel-wrap {
+        .right-rail-tab {
+            flex: 1 1 0;
+            background: transparent;
+            color: var(--fg-1);
+            border: none;
+            border-bottom: 2px solid transparent;
+            padding: 6px 4px;
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            cursor: pointer;
+            min-width: 0;
+        }
+        .right-rail-tab:hover { color: var(--fg-0); }
+        .right-rail-tab.active {
+            color: var(--fg-0);
+            border-bottom-color: var(--accent);
+        }
+        .right-rail-panels {
+            position: relative;
             background: var(--bg-0);
-            border-radius: 0;
             height: 680px;
             display: flex;
             flex-direction: column;
+            min-width: 0;
         }
-        .gex-side-panel-header {
-            padding: 6px 8px;
-            font-size: 11px;
-            color: #888;
-            border-bottom: 1px solid #2A2A2A;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
+        .right-rail-panel {
+            display: none;
+            flex: 1;
+            min-height: 0;
+            flex-direction: column;
+        }
+        .right-rail-panel.active { display: flex; }
+        .right-rail-panel .rail-placeholder {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--fg-2);
+            font-size: 12px;
+            padding: 16px;
+            text-align: center;
+            line-height: 1.4;
+        }
+        .gex-side-panel-wrap {
+            background: var(--bg-0);
+            border-radius: 0;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
         }
         #gex-side-panel { flex: 1; min-height: 0; }
 
@@ -5792,13 +5839,7 @@ def index():
             justify-content: flex-end;
             margin-top: 14px;
         }
-        .chart-grid {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 5px;
-            width: 100%;
-        }
-        
+
         /* Add new CSS for the responsive grid layout */
         .charts-grid {
             display: grid;
@@ -5852,6 +5893,22 @@ def index():
             font-size: 18px;
         }
         
+        /* Collapse right rail below the main chart on narrow widths */
+        @media screen and (max-width: 1024px) {
+            .chart-grid {
+                grid-template-columns: 1fr;
+            }
+            .chart-grid > .tv-toolbar-container,
+            .chart-grid > .right-rail-tabs,
+            .chart-grid > .price-chart-container,
+            .chart-grid > .right-rail-panels,
+            .chart-grid > #secondary-tabs,
+            .chart-grid > .charts-grid {
+                grid-column: 1;
+            }
+            .right-rail-panels { height: 420px; }
+        }
+
         /* Mobile responsive styles */
         @media screen and (max-width: 768px) {
             .container {
@@ -6236,14 +6293,14 @@ def index():
         <div id="trader-alerts-strip" class="trader-alerts-strip" style="display:none"></div>
 
         <div class="chart-grid" id="chart-grid">
+            <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
+            <div class="right-rail-tabs" id="right-rail-tabs">
+                <button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>
+                <button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts</button>
+                <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
+            </div>
             <div class="price-chart-container">
-                <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
-                <div class="price-chart-row">
-                    <div class="chart-container" id="price-chart"></div>
-                    <div class="gex-side-panel-wrap">
-                        <div id="gex-side-panel"></div>
-                    </div>
-                </div>
+                <div class="chart-container" id="price-chart"></div>
                 <div class="tv-sub-pane" id="rsi-pane" style="display:none">
                     <div class="tv-sub-pane-header">RSI 14</div>
                     <div id="rsi-chart" style="height:110px"></div>
@@ -6251,6 +6308,19 @@ def index():
                 <div class="tv-sub-pane" id="macd-pane" style="display:none">
                     <div class="tv-sub-pane-header">MACD (12,26,9)</div>
                     <div id="macd-chart" style="height:120px"></div>
+                </div>
+            </div>
+            <div class="right-rail-panels" id="right-rail-panels">
+                <div class="right-rail-panel active" data-rail-panel="gex">
+                    <div class="gex-side-panel-wrap">
+                        <div id="gex-side-panel"></div>
+                    </div>
+                </div>
+                <div class="right-rail-panel" data-rail-panel="alerts">
+                    <div class="rail-placeholder">Alerts move here in Stage 6.</div>
+                </div>
+                <div class="right-rail-panel" data-rail-panel="levels">
+                    <div class="rail-placeholder">Key levels table lands in Stage 6.</div>
                 </div>
             </div>
         </div>
@@ -8579,50 +8649,146 @@ def index():
         }
         // ─────────────────────────────────────────────────────────────────────
 
+        // Rebuild missing chart-grid children in the canonical Stage-5 order.
+        // The initial HTML markup already includes all of these; this defensive
+        // path only kicks in if price-chart-container was removed from the DOM.
+        function ensurePriceChartDom() {
+            const grid = document.getElementById('chart-grid');
+            if (!grid) return null;
+            let priceContainer = grid.querySelector('.price-chart-container');
+            if (priceContainer) return priceContainer;
+
+            let toolbar = grid.querySelector('.tv-toolbar-container');
+            if (!toolbar) {
+                toolbar = document.createElement('div');
+                toolbar.className = 'tv-toolbar-container';
+                toolbar.id = 'tv-toolbar-container';
+                grid.appendChild(toolbar);
+            }
+            let tabs = grid.querySelector('.right-rail-tabs');
+            if (!tabs) {
+                tabs = document.createElement('div');
+                tabs.className = 'right-rail-tabs';
+                tabs.id = 'right-rail-tabs';
+                tabs.innerHTML =
+                    '<button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts</button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>';
+                grid.appendChild(tabs);
+                wireRightRailTabs();
+            }
+            priceContainer = document.createElement('div');
+            priceContainer.className = 'price-chart-container';
+            const chartDiv = document.createElement('div');
+            chartDiv.className = 'chart-container';
+            chartDiv.id = 'price-chart';
+            const rsiPane = document.createElement('div');
+            rsiPane.className = 'tv-sub-pane'; rsiPane.id = 'rsi-pane'; rsiPane.style.display = 'none';
+            rsiPane.innerHTML = '<div class="tv-sub-pane-header">RSI 14</div><div id="rsi-chart" style="height:110px"></div>';
+            const macdPane = document.createElement('div');
+            macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
+            macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
+            priceContainer.appendChild(chartDiv);
+            priceContainer.appendChild(rsiPane);
+            priceContainer.appendChild(macdPane);
+            grid.appendChild(priceContainer);
+
+            let railPanels = grid.querySelector('.right-rail-panels');
+            if (!railPanels) {
+                railPanels = document.createElement('div');
+                railPanels.className = 'right-rail-panels';
+                railPanels.id = 'right-rail-panels';
+                railPanels.innerHTML =
+                    '<div class="right-rail-panel active" data-rail-panel="gex">' +
+                        '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
+                    '</div>' +
+                    '<div class="right-rail-panel" data-rail-panel="alerts">' +
+                        '<div class="rail-placeholder">Alerts move here in Stage 6.</div>' +
+                    '</div>' +
+                    '<div class="right-rail-panel" data-rail-panel="levels">' +
+                        '<div class="rail-placeholder">Key levels table lands in Stage 6.</div>' +
+                    '</div>';
+                grid.appendChild(railPanels);
+                applyRightRailTab();
+            }
+            return priceContainer;
+        }
+
+        function showPriceChartUI() {
+            const ids = ['tv-toolbar-container', 'right-rail-tabs', 'right-rail-panels'];
+            ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
+            const pc = document.querySelector('.price-chart-container');
+            if (pc) pc.style.display = 'block';
+        }
+
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
             if (!isChartVisible('price')) return;
             lastPriceData = priceJson; // keep for popout push
-            let priceContainer = document.querySelector('.price-chart-container');
-            if (!priceContainer) {
-                priceContainer = document.createElement('div');
-                priceContainer.className = 'price-chart-container';
-                const toolbarContainer = document.createElement('div');
-                toolbarContainer.className = 'tv-toolbar-container';
-                toolbarContainer.id = 'tv-toolbar-container';
-                const row = document.createElement('div');
-                row.className = 'price-chart-row';
-                const chartDiv = document.createElement('div');
-                chartDiv.className = 'chart-container';
-                chartDiv.id = 'price-chart';
-                const panelWrap = document.createElement('div');
-                panelWrap.className = 'gex-side-panel-wrap';
-                panelWrap.innerHTML = '<div id="gex-side-panel"></div>';
-                row.appendChild(chartDiv);
-                row.appendChild(panelWrap);
-                const rsiPane = document.createElement('div');
-                rsiPane.className = 'tv-sub-pane'; rsiPane.id = 'rsi-pane'; rsiPane.style.display = 'none';
-                rsiPane.innerHTML = '<div class="tv-sub-pane-header">RSI 14</div><div id="rsi-chart" style="height:110px"></div>';
-                const macdPane = document.createElement('div');
-                macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
-                macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
-                priceContainer.appendChild(toolbarContainer);
-                priceContainer.appendChild(row);
-                priceContainer.appendChild(rsiPane);
-                priceContainer.appendChild(macdPane);
-                document.getElementById('chart-grid').insertBefore(priceContainer, document.getElementById('chart-grid').firstChild);
-            }
-            priceContainer.style.display = 'block';
+            const priceContainer = ensurePriceChartDom();
+            if (!priceContainer) return;
+            showPriceChartUI();
             const parsed = typeof priceJson === 'string' ? JSON.parse(priceJson) : priceJson;
             if (!parsed.error) {
                 renderTVPriceChart(parsed);
             }
         }
 
+        // ── Right-rail tab state (GEX / Alerts / Levels) ─────────────────
+        const RAIL_TAB_KEY = 'gex.rightRailTab';
+        let activeRailTab = 'gex';
+        try {
+            const saved = localStorage.getItem(RAIL_TAB_KEY);
+            if (saved === 'gex' || saved === 'alerts' || saved === 'levels') {
+                activeRailTab = saved;
+            }
+        } catch (e) {}
+        let _lastGexPanelJson = null; // retained so switching back to GEX can re-render
+
+        function applyRightRailTab() {
+            document.querySelectorAll('.right-rail-tab').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.railTab === activeRailTab);
+            });
+            document.querySelectorAll('.right-rail-panel').forEach(p => {
+                p.classList.toggle('active', p.dataset.railPanel === activeRailTab);
+            });
+            if (activeRailTab === 'gex') {
+                // Panel was display:none; re-render + re-sync on return
+                const target = document.getElementById('gex-side-panel');
+                if (target && _lastGexPanelJson) {
+                    try {
+                        const parsed = typeof _lastGexPanelJson === 'string'
+                            ? JSON.parse(_lastGexPanelJson) : _lastGexPanelJson;
+                        const config = { displayModeBar: false, responsive: true };
+                        Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
+                            .then(() => syncGexPanelYAxisToTV());
+                    } catch (e) { /* fall through to plain resize */ }
+                }
+                if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
+                scheduleGexPanelSync();
+            }
+        }
+
+        function wireRightRailTabs() {
+            document.querySelectorAll('.right-rail-tab').forEach(btn => {
+                if (btn.__railWired) return;
+                btn.__railWired = true;
+                btn.addEventListener('click', () => {
+                    const next = btn.dataset.railTab;
+                    if (!next || next === activeRailTab) return;
+                    activeRailTab = next;
+                    try { localStorage.setItem(RAIL_TAB_KEY, activeRailTab); } catch (e) {}
+                    applyRightRailTab();
+                });
+            });
+        }
+
         function renderGexSidePanel(panelJson) {
             if (!panelJson) return;
+            _lastGexPanelJson = panelJson;
             const target = document.getElementById('gex-side-panel');
             if (!target) return;
+            if (activeRailTab !== 'gex') return; // render on tab activation
             try {
                 const parsed = typeof panelJson === 'string' ? JSON.parse(panelJson) : panelJson;
                 const config = { displayModeBar: false, responsive: true };
@@ -8637,6 +8803,7 @@ def index():
         // side panel so bars line up with candles at the same strike.
         let _gexSyncScheduled = false;
         function syncGexPanelYAxisToTV() {
+            if (activeRailTab !== 'gex') return;
             const panel = document.getElementById('gex-side-panel');
             const tvEl  = document.getElementById('price-chart');
             if (!panel || !tvEl || !tvPriceChart || !tvCandleSeries) return;
@@ -8666,6 +8833,7 @@ def index():
             }
         }
         function scheduleGexPanelSync() {
+            if (activeRailTab !== 'gex') return;
             if (_gexSyncScheduled) return;
             _gexSyncScheduled = true;
             requestAnimationFrame(() => {
@@ -8909,31 +9077,8 @@ def index():
             
             // Handle price chart separately (TradingView Lightweight Charts)
             if (selectedCharts.price && data.price) {
-                let priceContainer = document.querySelector('.price-chart-container');
-                if (!priceContainer) {
-                    priceContainer = document.createElement('div');
-                    priceContainer.className = 'price-chart-container';
-                    const toolbarContainer = document.createElement('div');
-                    toolbarContainer.className = 'tv-toolbar-container';
-                    toolbarContainer.id = 'tv-toolbar-container';
-                    const chartDiv = document.createElement('div');
-                    chartDiv.className = 'chart-container';
-                    chartDiv.id = 'price-chart';
-                    // RSI sub-pane
-                    const rsiPane = document.createElement('div');
-                    rsiPane.className = 'tv-sub-pane'; rsiPane.id = 'rsi-pane'; rsiPane.style.display = 'none';
-                    rsiPane.innerHTML = '<div class="tv-sub-pane-header">RSI 14</div><div id="rsi-chart" style="height:110px"></div>';
-                    // MACD sub-pane
-                    const macdPane = document.createElement('div');
-                    macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
-                    macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
-                    priceContainer.appendChild(toolbarContainer);
-                    priceContainer.appendChild(chartDiv);
-                    priceContainer.appendChild(rsiPane);
-                    priceContainer.appendChild(macdPane);
-                    document.getElementById('chart-grid').insertBefore(priceContainer, document.getElementById('chart-grid').firstChild);
-                }
-                priceContainer.style.display = 'block';
+                ensurePriceChartDom();
+                showPriceChartUI();
 
                 const priceData = typeof data.price === 'string' ? JSON.parse(data.price) : data.price;
                 if (!priceData.error) {
@@ -8941,9 +9086,13 @@ def index():
                 }
             } else if (!selectedCharts.price) {
                 const priceContainer = document.querySelector('.price-chart-container');
-                if (priceContainer) {
-                    priceContainer.style.display = 'none';
-                }
+                if (priceContainer) priceContainer.style.display = 'none';
+                const toolbar = document.getElementById('tv-toolbar-container');
+                if (toolbar) toolbar.style.display = 'none';
+                const railTabs = document.getElementById('right-rail-tabs');
+                if (railTabs) railTabs.style.display = 'none';
+                const railPanels = document.getElementById('right-rail-panels');
+                if (railPanels) railPanels.style.display = 'none';
                 destroyRsiPane();
                 destroyMacdPane();
                 if (tvPriceChart) {
@@ -9580,6 +9729,9 @@ def index():
             });
         }
         renderChartVisibilitySection();
+
+        wireRightRailTabs();
+        applyRightRailTab();
 
         function openDrawer() {
             document.getElementById('settings-drawer').classList.add('open');

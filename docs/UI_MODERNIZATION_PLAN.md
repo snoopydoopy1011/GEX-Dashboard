@@ -1,6 +1,6 @@
 # GEX Dashboard — UI Modernization Plan
 
-**Status:** In progress — 4 of 7 stages landed
+**Status:** In progress — 5 of 7 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/ui-modernization`
@@ -10,7 +10,7 @@
 
 ## 0. Where are we? (read this first)
 
-**Current state (as of 2026-04-18):** Stages 1–4 have landed on `feat/ui-modernization`. Next stage: **5** — tabbed right rail (GEX / Alerts / Key Levels). See §10 for per-stage progress notes and deviations from spec.
+**Current state (as of 2026-04-18):** Stages 1–5 have landed on `feat/ui-modernization`. Next stage: **6** — move alerts into the right rail and build the Key Levels table (Stage 5 left both tabs as placeholder panels). See §10 for per-stage progress notes and deviations from spec.
 
 Line numbers throughout this doc are a snapshot as of commit `3d26533` (the commit that introduced the doc). **They drift as soon as Stage 1 lands.** Grep by anchor name — CSS class names (`.header`, `.secondary-tabs`, `.kpi-card`, `.gex-side-panel-wrap`), function names (`renderGexSidePanel`, `renderTraderStats`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `create_exposure_chart`), or element IDs (`#chart-grid`, `#trader-stats-strip`, `#gex-side-panel`) — rather than trusting the numbers.
 
@@ -246,6 +246,7 @@ Each stage is one commit on `feat/ui-modernization`. Every stage leaves the app 
    **Status:** ✅ Landed — see §10.4 for notes (also closes the Stage-3 chart-visibility UI gap via a "Sections" drawer group).
 5. **Right-rail restructure.** Move GEX panel out of `.price-chart-row`; create `.right-rail` with three tab buttons. Default to GEX. Gate `syncGexPanelYAxisToTV()` on active tab.
    Commit: `feat(ui): tabbed right rail — GEX / Alerts / Key Levels`
+   **Status:** ✅ Landed — see §10.5 for notes (toolbar hoisted to `#chart-grid` for candle/GEX pixel alignment; Alerts + Levels panels are placeholders for Stage 6).
 6. **Alerts & Key Levels tabs.** Render alerts into the right-rail panel with an unread-count badge; build the Key Levels table from `compute_trader_stats()` output.
    Commit: `feat(ui): move alerts into right rail, add unread badge`
 7. **KPI strip polish.** Restyle `.kpi-card` with new tokens, add trend arrows (▲▼) using existing `.kpi-pos/.kpi-neg`, tabular-nums for every numeric. Mount above candles.
@@ -402,3 +403,36 @@ The 4-row `.header` (~180 lines of markup) is gone. Replaced by three peers:
 - The existing TM button styling (`.tm-btn` / `.tm-dot` / `.tm-stats`) was not touched — those rules are defined further down in the style block and remain external to the header restructure.
 
 **Verification:** AST parse clean. Cross-checked all `getElementById('<id>')` references against markup `id="..."` attributes — every required id is present (5 unmatched are dynamic creates: `candle-close-timer`, `secondary-tabs`, `tv-draw-color`, `tv-ohlc-tooltip`, plus the `tm-stats` class match). No stale `.header` / `.header-top` / `.header-bottom` / `.stream-control` / `.settings-control` selectors anywhere — two remaining grep hits are explanatory comments. Browser smoke test deferred (port 5001 was in use during the commit run).
+
+### 10.5 Stage 5 — `feat(ui): tabbed right rail — GEX / Alerts / Key Levels`
+
+**Landed:** 2026-04-18.
+
+`.price-chart-row` is gone. `#chart-grid` is now a 2-column CSS grid (`minmax(0,1fr) 300px`) with four named children at the top:
+
+| Row | Col 1 | Col 2 |
+|---|---|---|
+| 1 | `.tv-toolbar-container` | `.right-rail-tabs` |
+| 2 | `.price-chart-container` (just `#price-chart` + `#rsi-pane` + `#macd-pane`) | `.right-rail-panels` (GEX/Alerts/Levels panels) |
+| 3+ | `#secondary-tabs`, `.charts-grid` — both span both columns | — |
+
+**Deviation from §4: toolbar hoisted out of `.price-chart-container`.** §4 didn't call this out, but the GEX↔candles pixel alignment (preserved since `f1bcf1d`) requires `#price-chart` and `#gex-side-panel` to share the same top screen Y and same height. With the right-rail tab bar eating ~30px at the top of col 2, the GEX panel would sit below the price chart unless col 1 also loses that same height. Fix: move `.tv-toolbar-container` to be a direct child of `#chart-grid` in row 1 col 1 alongside `.right-rail-tabs` in row 1 col 2 — CSS grid's default `align-items: stretch` forces both to the same row height, so whatever the wrapped toolbar's height is, the tab bar matches. Then row 2 has `#price-chart` (col 1) aligned to `.right-rail-panels` (col 2), and the existing `syncGexPanelYAxisToTV()` math keeps working unmodified.
+
+**Tab-gating:** `activeRailTab` (`'gex'` / `'alerts'` / `'levels'`, persisted to `localStorage['gex.rightRailTab']`, default `'gex'`).
+- `renderGexSidePanel(panelJson)` now caches `panelJson` into `_lastGexPanelJson` *before* the active-tab check, so the next `/update_price` while the user is on Alerts/Levels still updates the cache. When the user clicks back to GEX, `applyRightRailTab()` re-renders from that cache and schedules a sync.
+- `syncGexPanelYAxisToTV()` and `scheduleGexPanelSync()` both early-return when `activeRailTab !== 'gex'`, so the `requestAnimationFrame` / scroll / wheel / mouseup / touchend loops stop recomputing when the panel is hidden.
+
+**Rebuild defensive path:** the `applyPriceData()` / `updateCharts()` paths that used to rebuild `.price-chart-row` collapsed into a single `ensurePriceChartDom()` helper that recreates missing chart-grid children in canonical order. The initial HTML always has everything, so this path only triggers if `.price-chart-container` was nuked externally. Uses explicit `grid-column: 1 | 2` rules per child so source order doesn't matter.
+
+**Responsive:** added a `@media (max-width: 1024px)` rule that collapses `#chart-grid` back to a single column (right rail stacks below the candles at a shorter 420px height).
+
+**Stage-5 scope: what's deliberately not done yet.** Per §7, Stage 6 owns alerts relocation + Key Levels table. This stage leaves both as placeholder `<div class="rail-placeholder">` content ("Alerts move here in Stage 6." / "Key levels table lands in Stage 6."). `#trader-alerts-strip` is still the live alerts sink — nothing about `renderTraderStats()` changed.
+
+**Other notes:**
+
+- `.gex-side-panel-wrap` kept as the styling container for the Plotly div, but no longer has a fixed `height: 680px` — its parent (`.right-rail-panel.active`) is a flex column, so the wrap stretches to fill.
+- `.price-chart-container`'s `grid-column: 1 / -1` rule dropped (it was needed when the toolbar was nested inside it and the container spanned the old 1-column grid). Border-radius dropped the top-left/top-right corners since the toolbar now owns the top.
+- Duplicate `.chart-grid { grid-template-columns: 1fr; ... }` rule near the old line 5795 removed (it was shadowing the primary rule and would have overridden the 2-col layout).
+- `let _lastGexPanelJson = null` is a new top-level script-block variable alongside `RAIL_TAB_KEY` / `activeRailTab`. Two new tab-management functions: `applyRightRailTab()` (idempotent — sync DOM classes + re-render GEX if needed) and `wireRightRailTabs()` (idempotent via `btn.__railWired` flag). Both called once at init right after `renderChartVisibilitySection()`.
+
+**Verification:** AST parse clean. Grep confirms zero remaining `.price-chart-row` references. All `#gex-side-panel` / `.gex-side-panel-wrap` references accounted for (CSS, initial markup, rebuild path, JS render/sync). Browser smoke test deferred.
