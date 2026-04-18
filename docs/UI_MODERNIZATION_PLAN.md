@@ -1,6 +1,6 @@
 # GEX Dashboard — UI Modernization Plan
 
-**Status:** In progress — 5 of 7 stages landed
+**Status:** In progress — 6 of 7 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/ui-modernization`
@@ -10,7 +10,7 @@
 
 ## 0. Where are we? (read this first)
 
-**Current state (as of 2026-04-18):** Stages 1–5 have landed on `feat/ui-modernization`. Next stage: **6** — move alerts into the right rail and build the Key Levels table (Stage 5 left both tabs as placeholder panels). See §10 for per-stage progress notes and deviations from spec.
+**Current state (as of 2026-04-18):** Stages 1–6 have landed on `feat/ui-modernization`. Next stage: **7** — KPI strip polish (restyle `.kpi-card` with tokens, trend arrows, tabular numerics; mount above candles). See §10 for per-stage progress notes and deviations from spec.
 
 Line numbers throughout this doc are a snapshot as of commit `3d26533` (the commit that introduced the doc). **They drift as soon as Stage 1 lands.** Grep by anchor name — CSS class names (`.header`, `.secondary-tabs`, `.kpi-card`, `.gex-side-panel-wrap`), function names (`renderGexSidePanel`, `renderTraderStats`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `create_exposure_chart`), or element IDs (`#chart-grid`, `#trader-stats-strip`, `#gex-side-panel`) — rather than trusting the numbers.
 
@@ -249,6 +249,7 @@ Each stage is one commit on `feat/ui-modernization`. Every stage leaves the app 
    **Status:** ✅ Landed — see §10.5 for notes (toolbar hoisted to `#chart-grid` for candle/GEX pixel alignment; Alerts + Levels panels are placeholders for Stage 6).
 6. **Alerts & Key Levels tabs.** Render alerts into the right-rail panel with an unread-count badge; build the Key Levels table from `compute_trader_stats()` output.
    Commit: `feat(ui): move alerts into right rail, add unread badge`
+   **Status:** ✅ Landed — see §10.6 for notes.
 7. **KPI strip polish.** Restyle `.kpi-card` with new tokens, add trend arrows (▲▼) using existing `.kpi-pos/.kpi-neg`, tabular-nums for every numeric. Mount above candles.
    Commit: `style(kpi): polish KPI cards with new tokens and tabular numerics`
 
@@ -436,3 +437,33 @@ The 4-row `.header` (~180 lines of markup) is gone. Replaced by three peers:
 - `let _lastGexPanelJson = null` is a new top-level script-block variable alongside `RAIL_TAB_KEY` / `activeRailTab`. Two new tab-management functions: `applyRightRailTab()` (idempotent — sync DOM classes + re-render GEX if needed) and `wireRightRailTabs()` (idempotent via `btn.__railWired` flag). Both called once at init right after `renderChartVisibilitySection()`.
 
 **Verification:** AST parse clean. Grep confirms zero remaining `.price-chart-row` references. All `#gex-side-panel` / `.gex-side-panel-wrap` references accounted for (CSS, initial markup, rebuild path, JS render/sync). Browser smoke test deferred.
+
+### 10.6 Stage 6 — `feat(ui): move alerts into right rail, add unread badge`
+
+**Landed:** 2026-04-18.
+
+The two Stage-5 placeholder panels are now live. Alerts render into `#right-rail-alerts` (`.rail-alerts-list`) as stacked items with a colored left border (warn / info) and a matching dot. Key Levels render into `#right-rail-levels` as a compact 3-column table (Level / Price / Δ Spot %) sourced from `stats.call_wall` / `put_wall` / `gamma_flip` / `em_upper` / `em_lower`.
+
+The Alerts tab button now carries a `<span class="tab-badge" id="right-rail-alerts-badge">`. Badge shows unread count when `activeRailTab !== 'alerts'` and there are alert texts not in `_alertsSeenKeys`. Switching to the Alerts tab (or rendering while already on it) calls `markRailAlertsSeen()` which copies the current alert texts into the seen set and hides the badge. `_alertsSeenKeys` is a text-keyed `Set` — simple and sufficient because `compute_trader_stats` builds alerts by deterministic template strings (`"Near Call Wall @ 450.25"`).
+
+**Deviation from §4 spec — did not "add unread-count badge" via a separate layer.** The badge is a `<span>` inside the tab button, not an absolutely-positioned dot on top of it. Reason: the tab label is short and rendered in 11 px caps — an overlay badge would have required awkward positioning and clipped against the tab's 2 px underline. Inline keeps the tab self-contained and accessible.
+
+**Key-levels table deviation — compute client-side from `trader_stats` instead of reusing `/update_price`'s `priceResp.key_levels`.** The latter drives the on-chart `renderKeyLevels()` TV price lines and has a richer shape (`{price, move, ...}` per level). `stats` (from `compute_trader_stats`) already holds the same prices as plain numbers plus `spot` for the Δ% computation — fewer moving parts, one source of truth per panel. The table re-renders on every `renderTraderStats()` call so it stays in sync.
+
+**Removed (not just hidden):**
+
+- The `#trader-alerts-strip` div in the initial markup.
+- The `.trader-alerts-strip` and `.alert-chip` CSS blocks (chip style was only used by the removed strip; the new `.rail-alert-item` has its own design).
+- The `.rail-placeholder` CSS block that briefly housed the "move here in Stage 6" copy.
+
+Per CLAUDE.md's "no backwards-compat shims" rule, these are gone rather than left in as orphaned selectors.
+
+**Other notes:**
+
+- `renderTraderStats()` still owns the KPI strip but now delegates alerts and levels rendering to `renderRailAlerts()` / `renderRailKeyLevels()`. When `stats` is null (reset path), both rail renderers are called with empty/null so the panels restore to their empty states ("No active alerts." / "Key levels load with stream data.").
+- `ensurePriceChartDom()` rebuild path updated so the new panel inner HTML survives a rebuild.
+- `applyRightRailTab()` grew two branches: `alerts` → `markRailAlertsSeen()`; `levels` (else) → `_updateAlertsBadge()` to re-sync the badge display after a tab switch.
+- Swatches in the Key Levels table (`#00D084` / `#FF4D4D` / `#FFC400` / `#9CA3AF`) match the TV chart `renderKeyLevels()` line colors verbatim — intentional visual link between the chart lines and the table rows. These are the same literals flagged in §10.1 as living in inline JS; that cleanup is still a separate future pass.
+- `_alertsSeenKeys` is held as module-level state alongside `_lastRailAlerts`, mirroring the `_lastGexPanelJson` pattern from Stage 5. No `localStorage` persistence for the seen set — reloading the page should legitimately re-surface the badge for any alerts that are still firing.
+
+**Verification:** AST parse clean. Grep for the removed tokens (`trader-alerts-strip`, `alert-chip`, `rail-placeholder`) returns zero hits across the file. All new ids (`right-rail-alerts`, `right-rail-alerts-badge`, `right-rail-levels`) have both initial-markup and rebuild-path instantiation. Browser smoke test deferred (user had the app running on :5001 during the commit run).

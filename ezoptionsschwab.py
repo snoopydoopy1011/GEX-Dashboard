@@ -5275,17 +5275,118 @@ def index():
             flex-direction: column;
         }
         .right-rail-panel.active { display: flex; }
-        .right-rail-panel .rail-placeholder {
+        .right-rail-tab { position: relative; }
+        .right-rail-tab .tab-badge {
+            display: none;
+            margin-left: 6px;
+            padding: 1px 6px;
+            background: var(--warn);
+            color: var(--bg-0);
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1.3;
+            vertical-align: middle;
+        }
+        .right-rail-tab .tab-badge.visible { display: inline-block; }
+
+        /* Alerts panel */
+        .rail-alerts-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-height: 0;
+        }
+        .rail-alerts-empty {
             flex: 1;
             display: flex;
             align-items: center;
             justify-content: center;
             color: var(--fg-2);
             font-size: 12px;
-            padding: 16px;
             text-align: center;
+            padding: 16px;
             line-height: 1.4;
         }
+        .rail-alert-item {
+            display: flex;
+            gap: 8px;
+            padding: 8px 10px;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--fg-2);
+            border-radius: var(--radius);
+            font-size: 11px;
+            color: var(--fg-0);
+            line-height: 1.35;
+        }
+        .rail-alert-item.warn { border-left-color: var(--warn); }
+        .rail-alert-item.info { border-left-color: var(--info); }
+        .rail-alert-item .rail-alert-dot {
+            flex: 0 0 auto;
+            width: 6px;
+            height: 6px;
+            margin-top: 5px;
+            border-radius: 50%;
+            background: var(--fg-2);
+        }
+        .rail-alert-item.warn .rail-alert-dot { background: var(--warn); }
+        .rail-alert-item.info .rail-alert-dot { background: var(--info); }
+
+        /* Key Levels table */
+        .rail-levels-table {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            min-height: 0;
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-levels-table table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }
+        .rail-levels-table th {
+            color: var(--fg-2);
+            font-weight: 500;
+            text-align: left;
+            padding: 6px 4px;
+            border-bottom: 1px solid var(--border);
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            font-size: 10px;
+        }
+        .rail-levels-table th.num { text-align: right; }
+        .rail-levels-table td {
+            padding: 8px 4px;
+            border-bottom: 1px solid var(--bg-2);
+            color: var(--fg-0);
+        }
+        .rail-levels-table td.num { text-align: right; }
+        .rail-levels-table .lvl-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .rail-levels-table .lvl-swatch {
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+            background: var(--fg-2);
+            flex: 0 0 auto;
+        }
+        .rail-levels-table .lvl-dist.pos { color: var(--call); }
+        .rail-levels-table .lvl-dist.neg { color: var(--put); }
+        .rail-levels-table .lvl-empty {
+            color: var(--fg-2);
+            text-align: center;
+            padding: 16px 4px;
+            font-size: 11px;
+        }
+
         .gex-side-panel-wrap {
             background: var(--bg-0);
             border-radius: 0;
@@ -5324,24 +5425,6 @@ def index():
         .kpi-sub   { font-size: 11px; color: #aaa; }
         .kpi-pos   { color: var(--call); }
         .kpi-neg   { color: var(--put); }
-
-        /* ── Alerts strip ─────────────────────────────────────────── */
-        .trader-alerts-strip {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            margin: 0 0 10px 0;
-        }
-        .alert-chip {
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            background: var(--bg-1);
-            border: 1px solid #2A2A2A;
-            color: #ccc;
-        }
-        .alert-chip.warn { border-color: #FFC400; color: #FFC400; }
-        .alert-chip.info { border-color: #3E82F1; color: #88B4FF; }
 
         /* ── Secondary chart tab bar ──────────────────────────────── */
         .secondary-tabs {
@@ -6290,13 +6373,12 @@ def index():
         <div class="price-info" id="price-info"></div>
 
         <div id="trader-stats-strip" class="trader-stats-strip" style="display:none"></div>
-        <div id="trader-alerts-strip" class="trader-alerts-strip" style="display:none"></div>
 
         <div class="chart-grid" id="chart-grid">
             <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
             <div class="right-rail-tabs" id="right-rail-tabs">
                 <button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>
-                <button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts</button>
+                <button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
             </div>
             <div class="price-chart-container">
@@ -6317,10 +6399,14 @@ def index():
                     </div>
                 </div>
                 <div class="right-rail-panel" data-rail-panel="alerts">
-                    <div class="rail-placeholder">Alerts move here in Stage 6.</div>
+                    <div class="rail-alerts-list" id="right-rail-alerts">
+                        <div class="rail-alerts-empty">No active alerts.</div>
+                    </div>
                 </div>
                 <div class="right-rail-panel" data-rail-panel="levels">
-                    <div class="rail-placeholder">Key levels table lands in Stage 6.</div>
+                    <div class="rail-levels-table" id="right-rail-levels">
+                        <div class="lvl-empty">Key levels load with stream data.</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -8672,7 +8758,7 @@ def index():
                 tabs.id = 'right-rail-tabs';
                 tabs.innerHTML =
                     '<button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>' +
-                    '<button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts</button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
                     '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>';
                 grid.appendChild(tabs);
                 wireRightRailTabs();
@@ -8703,10 +8789,14 @@ def index():
                         '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
                     '</div>' +
                     '<div class="right-rail-panel" data-rail-panel="alerts">' +
-                        '<div class="rail-placeholder">Alerts move here in Stage 6.</div>' +
+                        '<div class="rail-alerts-list" id="right-rail-alerts">' +
+                            '<div class="rail-alerts-empty">No active alerts.</div>' +
+                        '</div>' +
                     '</div>' +
                     '<div class="right-rail-panel" data-rail-panel="levels">' +
-                        '<div class="rail-placeholder">Key levels table lands in Stage 6.</div>' +
+                        '<div class="rail-levels-table" id="right-rail-levels">' +
+                            '<div class="lvl-empty">Key levels load with stream data.</div>' +
+                        '</div>' +
                     '</div>';
                 grid.appendChild(railPanels);
                 applyRightRailTab();
@@ -8766,6 +8856,10 @@ def index():
                 }
                 if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
                 scheduleGexPanelSync();
+            } else if (activeRailTab === 'alerts') {
+                markRailAlertsSeen();
+            } else {
+                _updateAlertsBadge();
             }
         }
 
@@ -8854,9 +8948,13 @@ def index():
         }
         function renderTraderStats(stats) {
             const strip  = document.getElementById('trader-stats-strip');
-            const alerts = document.getElementById('trader-alerts-strip');
-            if (!strip || !alerts) return;
-            if (!stats) { strip.style.display = 'none'; alerts.style.display = 'none'; return; }
+            if (!strip) return;
+            if (!stats) {
+                strip.style.display = 'none';
+                renderRailAlerts([]);
+                renderRailKeyLevels(null);
+                return;
+            }
 
             const netGex    = stats.net_gex;
             const hedge     = stats.hedge_per_1pct;
@@ -8902,18 +9000,117 @@ def index():
             `;
             strip.style.display = 'flex';
 
-            const list = Array.isArray(stats.alerts) ? stats.alerts : [];
-            if (!list.length) {
-                alerts.innerHTML = '';
-                alerts.style.display = 'none';
-            } else {
-                alerts.innerHTML = list.map(a => {
-                    const cls = a.level === 'warn' ? 'warn' : 'info';
-                    const txt = (a.text || '').replace(/</g, '&lt;');
-                    return `<div class="alert-chip ${cls}">${txt}</div>`;
-                }).join('');
-                alerts.style.display = 'flex';
+            renderRailAlerts(Array.isArray(stats.alerts) ? stats.alerts : []);
+            renderRailKeyLevels(stats);
+        }
+
+        // ── Right-rail alerts panel ──────────────────────────────────────
+        let _lastRailAlerts = [];
+        let _alertsSeenKeys = new Set();
+
+        function _escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function _updateAlertsBadge() {
+            const badge = document.getElementById('right-rail-alerts-badge');
+            if (!badge) return;
+            let unread = 0;
+            if (activeRailTab !== 'alerts') {
+                for (const a of _lastRailAlerts) {
+                    if (!_alertsSeenKeys.has(a.text)) unread += 1;
+                }
             }
+            if (unread > 0) {
+                badge.textContent = unread > 99 ? '99+' : String(unread);
+                badge.classList.add('visible');
+            } else {
+                badge.textContent = '';
+                badge.classList.remove('visible');
+            }
+        }
+
+        function markRailAlertsSeen() {
+            _alertsSeenKeys = new Set(_lastRailAlerts.map(a => a.text));
+            _updateAlertsBadge();
+        }
+
+        function renderRailAlerts(list) {
+            _lastRailAlerts = Array.isArray(list) ? list.slice() : [];
+            const target = document.getElementById('right-rail-alerts');
+            if (target) {
+                if (!_lastRailAlerts.length) {
+                    target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
+                } else {
+                    target.innerHTML = _lastRailAlerts.map(a => {
+                        const cls = a.level === 'warn' ? 'warn' : 'info';
+                        return '<div class="rail-alert-item ' + cls + '">' +
+                                   '<span class="rail-alert-dot"></span>' +
+                                   '<span class="rail-alert-text">' + _escapeHtml(a.text) + '</span>' +
+                               '</div>';
+                    }).join('');
+                }
+            }
+            if (activeRailTab === 'alerts') {
+                markRailAlertsSeen();
+            } else {
+                _updateAlertsBadge();
+            }
+        }
+
+        // ── Right-rail Key Levels table ──────────────────────────────────
+        function _fmtLvlPrice(n) {
+            return (n == null || !isFinite(n)) ? '—' : n.toFixed(2);
+        }
+        function _fmtLvlDist(price, spot) {
+            if (price == null || spot == null || !isFinite(price) || !isFinite(spot) || spot === 0) {
+                return { text: '—', cls: '' };
+            }
+            const pct = (price - spot) / spot * 100;
+            const sign = pct > 0 ? '+' : '';
+            return { text: sign + pct.toFixed(2) + '%', cls: pct >= 0 ? 'pos' : 'neg' };
+        }
+        function renderRailKeyLevels(stats) {
+            const target = document.getElementById('right-rail-levels');
+            if (!target) return;
+            if (!stats) {
+                target.innerHTML = '<div class="lvl-empty">Key levels load with stream data.</div>';
+                return;
+            }
+            const spot = stats.spot;
+            const rows = [
+                { label: 'Call Wall',  price: stats.call_wall,  color: '#00D084' },
+                { label: 'Put Wall',   price: stats.put_wall,   color: '#FF4D4D' },
+                { label: 'Gamma Flip', price: stats.gamma_flip, color: '#FFC400' },
+                { label: '+1σ EM',     price: stats.em_upper,   color: '#9CA3AF' },
+                { label: '-1σ EM',     price: stats.em_lower,   color: '#9CA3AF' },
+            ];
+            const hasAny = rows.some(r => r.price != null && isFinite(r.price));
+            if (!hasAny) {
+                target.innerHTML = '<div class="lvl-empty">Key levels load with stream data.</div>';
+                return;
+            }
+            const body = rows.map(r => {
+                const d = _fmtLvlDist(r.price, spot);
+                return '<tr>' +
+                       '<td><span class="lvl-label">' +
+                           '<span class="lvl-swatch" style="background:' + r.color + '"></span>' +
+                           _escapeHtml(r.label) +
+                       '</span></td>' +
+                       '<td class="num">' + _fmtLvlPrice(r.price) + '</td>' +
+                       '<td class="num lvl-dist ' + d.cls + '">' + d.text + '</td>' +
+                       '</tr>';
+            }).join('');
+            target.innerHTML =
+                '<table>' +
+                    '<thead><tr>' +
+                        '<th>Level</th>' +
+                        '<th class="num">Price</th>' +
+                        '<th class="num">Δ Spot</th>' +
+                    '</tr></thead>' +
+                    '<tbody>' + body + '</tbody>' +
+                '</table>';
         }
 
         // ── Secondary chart tabs ───────────────────────────────────────────
