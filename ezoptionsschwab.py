@@ -5401,30 +5401,46 @@ def index():
         .trader-stats-strip {
             display: flex;
             gap: 8px;
-            margin: 0 0 8px 0;
+            margin: 0 0 10px 0;
             flex-wrap: wrap;
         }
         .kpi-card {
             flex: 1 1 0;
             min-width: 170px;
             background: var(--bg-1);
-            border: 1px solid #2A2A2A;
-            border-radius: 4px;
-            padding: 8px 10px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 9px 12px;
             display: flex;
             flex-direction: column;
-            gap: 2px;
+            gap: 3px;
         }
         .kpi-label {
             font-size: 10px;
-            color: #888;
+            color: var(--fg-2);
             letter-spacing: 0.08em;
             text-transform: uppercase;
+            font-weight: 500;
         }
-        .kpi-value { font-size: 18px; font-weight: 600; color: #e5e5e5; }
-        .kpi-sub   { font-size: 11px; color: #aaa; }
+        .kpi-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--fg-0);
+            font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
+            line-height: 1.2;
+            display: flex;
+            align-items: baseline;
+            gap: 4px;
+        }
+        .kpi-sub {
+            font-size: 11px;
+            color: var(--fg-1);
+            font-variant-numeric: tabular-nums;
+        }
         .kpi-pos   { color: var(--call); }
         .kpi-neg   { color: var(--put); }
+        .kpi-trend { font-size: 12px; line-height: 1; }
 
         /* ── Secondary chart tab bar ──────────────────────────────── */
         .secondary-tabs {
@@ -8961,6 +8977,8 @@ def index():
             const regime    = stats.regime || '—';
             const regimeCls = regime === 'Long Gamma' ? 'kpi-pos' : regime === 'Short Gamma' ? 'kpi-neg' : '';
             const netCls    = netGex == null ? '' : (netGex >= 0 ? 'kpi-pos' : 'kpi-neg');
+            const netArrow  = netGex == null ? '' : (netGex >= 0 ? '▲' : '▼');
+            const regimeArrow = regime === 'Long Gamma' ? '▲' : regime === 'Short Gamma' ? '▼' : '';
 
             const spot = stats.spot;
             const emMove = stats.em_move, emLo = stats.em_lower, emHi = stats.em_upper, emPct = stats.em_pct;
@@ -8979,12 +8997,12 @@ def index():
             strip.innerHTML = `
                 <div class="kpi-card">
                     <div class="kpi-label">Net GEX (window)</div>
-                    <div class="kpi-value ${netCls}">${fmtMoneyCompact(netGex)}</div>
+                    <div class="kpi-value ${netCls}">${netArrow ? `<span class="kpi-trend">${netArrow}</span>` : ''}${fmtMoneyCompact(netGex)}</div>
                     <div class="kpi-sub">per 1% move: ${fmtMoneyCompact(hedge)}</div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Regime</div>
-                    <div class="kpi-value ${regimeCls}">${regime}</div>
+                    <div class="kpi-value ${regimeCls}">${regimeArrow ? `<span class="kpi-trend">${regimeArrow}</span>` : ''}${regime}</div>
                     <div class="kpi-sub">gamma flip: ${flipTxt}</div>
                 </div>
                 <div class="kpi-card">

@@ -1,6 +1,6 @@
 # GEX Dashboard — UI Modernization Plan
 
-**Status:** In progress — 6 of 7 stages landed
+**Status:** Complete — 7 of 7 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/ui-modernization`
@@ -10,7 +10,7 @@
 
 ## 0. Where are we? (read this first)
 
-**Current state (as of 2026-04-18):** Stages 1–6 have landed on `feat/ui-modernization`. Next stage: **7** — KPI strip polish (restyle `.kpi-card` with tokens, trend arrows, tabular numerics; mount above candles). See §10 for per-stage progress notes and deviations from spec.
+**Current state (as of 2026-04-18):** All 7 stages have landed on `feat/ui-modernization`. Ready to open the merge PR per §6.4. See §10 for per-stage progress notes and deviations from spec.
 
 Line numbers throughout this doc are a snapshot as of commit `3d26533` (the commit that introduced the doc). **They drift as soon as Stage 1 lands.** Grep by anchor name — CSS class names (`.header`, `.secondary-tabs`, `.kpi-card`, `.gex-side-panel-wrap`), function names (`renderGexSidePanel`, `renderTraderStats`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `create_exposure_chart`), or element IDs (`#chart-grid`, `#trader-stats-strip`, `#gex-side-panel`) — rather than trusting the numbers.
 
@@ -252,6 +252,7 @@ Each stage is one commit on `feat/ui-modernization`. Every stage leaves the app 
    **Status:** ✅ Landed — see §10.6 for notes.
 7. **KPI strip polish.** Restyle `.kpi-card` with new tokens, add trend arrows (▲▼) using existing `.kpi-pos/.kpi-neg`, tabular-nums for every numeric. Mount above candles.
    Commit: `style(kpi): polish KPI cards with new tokens and tabular numerics`
+   **Status:** ✅ Landed — see §10.7 for notes.
 
 ---
 
@@ -467,3 +468,25 @@ Per CLAUDE.md's "no backwards-compat shims" rule, these are gone rather than lef
 - `_alertsSeenKeys` is held as module-level state alongside `_lastRailAlerts`, mirroring the `_lastGexPanelJson` pattern from Stage 5. No `localStorage` persistence for the seen set — reloading the page should legitimately re-surface the badge for any alerts that are still firing.
 
 **Verification:** AST parse clean. Grep for the removed tokens (`trader-alerts-strip`, `alert-chip`, `rail-placeholder`) returns zero hits across the file. All new ids (`right-rail-alerts`, `right-rail-alerts-badge`, `right-rail-levels`) have both initial-markup and rebuild-path instantiation. Browser smoke test deferred (user had the app running on :5001 during the commit run).
+
+### 10.7 Stage 7 — `style(kpi): polish KPI cards with new tokens and tabular numerics`
+
+**Landed:** 2026-04-18.
+
+`.kpi-card` / `.kpi-label` / `.kpi-value` / `.kpi-sub` swapped from hardcoded hex (`#2A2A2A`, `#888`, `#e5e5e5`, `#aaa`) and `4px` border-radius to the design tokens (`--border`, `--fg-2`, `--fg-0`, `--fg-1`, `--radius`). `.kpi-value` now uses `var(--font-mono)` and `font-variant-numeric: tabular-nums` so changing digits don't jitter the card width as values tick. `.kpi-sub` also picked up `tabular-nums`.
+
+`.kpi-value` became a `display: flex` / `align-items: baseline` row so the new `.kpi-trend` arrow sits flush-baseline with the value without affecting line height. Padding bumped from `8px 10px` → `9px 12px` and inter-row `gap` from `2px` → `3px` for a slightly less cramped card; strip `margin-bottom` from `8px` → `10px`.
+
+**Trend arrows.** §7 called for `▲▼` arrows tied to `.kpi-pos/.kpi-neg`. Applied to the two signed KPIs:
+
+- **Net GEX**: `▲` if `netGex >= 0`, `▼` otherwise. Inherits `.kpi-pos/.kpi-neg` color from the parent `.kpi-value` (the arrow `<span>` has no color override).
+- **Regime**: `▲` for "Long Gamma", `▼` for "Short Gamma", hidden otherwise. Regime is literally the sign of Net GEX categorized, so an arrow there is natural and matches the Net GEX card visually.
+
+EM and Walls cards got no arrow — both are magnitude / level readings with no inherent up/down direction. Adding one would be misleading.
+
+**Mount location.** §4 prescribed "Pull `.trader-stats-strip` out of header-adjacent flow; mount inside main column above candles." The strip already sits directly above `#chart-grid` (row 6375 in this commit), which is above candles. No mount-point change this stage — just restyled in place. The strip is a full-width sibling of `#chart-grid`, not a col-1-only grid child, which deviates from the §2 ASCII mockup that shows KPI aligned only with the candles column. Kept it full-width intentionally:
+
+- The strip's own `flex-wrap: wrap` + 170px min-width cards already handle responsive shrinkage without fighting the 2-col grid.
+- Moving the strip inside `#chart-grid` at row 0 col 1 would require either extending the grid to 3 rows (breaking the toolbar/rail-tabs same-height alignment from §10.5) or giving right-rail-tabs `grid-row: 1 / span 2`, both of which add fragility for a cosmetic gain.
+
+**Verification:** AST parse clean. Grep over `.kpi-` CSS rules shows zero remaining hex literals — only token references. Browser smoke test deferred.
