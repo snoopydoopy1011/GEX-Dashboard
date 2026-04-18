@@ -1586,10 +1586,25 @@ def get_net_colors(values, max_val, call_color, put_color, coloring_mode='Solid'
         
         else:  # Solid fallback
             colors.append(base)
-    
+
     return colors
 
-def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.02, show_calls=True, show_puts=True, show_net=True, coloring_mode='Solid', call_color='#00FF00', put_color='#FF0000', selected_expiries=None, horizontal=False, show_abs_gex_area=False, abs_gex_opacity=0.2, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+
+# Centralized Plotly theme — matches CSS tokens in the inline <style> :root block.
+# Chart builders unpack **PLOT_THEME so the dashboard and its charts stay in lockstep.
+PLOT_THEME = dict(
+    paper_bgcolor='#0B0E11',
+    plot_bgcolor='#0B0E11',
+    font=dict(family='Inter, -apple-system, sans-serif', color='#9CA3AF', size=11),
+    xaxis=dict(gridcolor='#1E242D', zerolinecolor='#2A313B'),
+    yaxis=dict(gridcolor='#1E242D', zerolinecolor='#2A313B'),
+    margin=dict(l=50, r=80, t=30, b=24),
+)
+CALL_COLOR = '#10B981'
+PUT_COLOR = '#EF4444'
+
+
+def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.02, show_calls=True, show_puts=True, show_net=True, coloring_mode='Solid', call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None, horizontal=False, show_abs_gex_area=False, abs_gex_opacity=0.2, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Ensure the exposure_type column exists
     if exposure_type not in calls.columns or exposure_type not in puts.columns:
         print(f"Warning: {exposure_type} not found in data")
@@ -1679,9 +1694,9 @@ def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.0
             print(f"Error adding Abs GEX area: {e}")
 
     # Define colors
-    grid_color = '#333333'
-    text_color = '#CCCCCC'
-    background_color = '#1E1E1E'
+    grid_color = PLOT_THEME['xaxis']['gridcolor']
+    text_color = PLOT_THEME['font']['color']
+    background_color = PLOT_THEME['paper_bgcolor']
     
     # Calculate max exposure for normalization across all data (calls, puts, net)
     max_exposure = 1.0
@@ -2016,7 +2031,7 @@ def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.0
 
     return fig.to_json()
 
-def create_volume_chart(call_volume, put_volume, use_itm=True, call_color='#00FF00', put_color='#FF0000', selected_expiries=None):
+def create_volume_chart(call_volume, put_volume, use_itm=True, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
     base_title = '% Range Call vs Put Volume Ratio' if use_itm else 'Call vs Put Volume Ratio'
     title = base_title
     if selected_expiries and len(selected_expiries) > 1:
@@ -2031,15 +2046,15 @@ def create_volume_chart(call_volume, put_volume, use_itm=True, call_color='#00FF
     fig.update_layout(
         title_text=title,
         showlegend=True,
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='white'),
         height=500
     )
     
     return fig.to_json()
 
-def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00', put_color='#FF0000', coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Filter strikes within range
     min_strike = S * (1 - strike_range)
     max_strike = S * (1 + strike_range)
@@ -2255,8 +2270,8 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color='#
         yaxis=yaxis_config,
         barmode='relative',
         hovermode='y unified' if horizontal else 'x unified',
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -2265,13 +2280,13 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color='#
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         bargap=0.1,
         bargroupgap=0.1,
         margin=dict(l=50, r=50, t=50, b=100),
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -2502,7 +2517,7 @@ def convert_to_heikin_ashi(candles):
     
     return ha_candles
 
-def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=[], exposure_levels_count=3, call_color='#00FF00', put_color='#FF0000', strike_range=0.02, use_heikin_ashi=False, highlight_max_level=False, max_level_color='#800080', coloring_mode='Linear Intensity'):
+def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=[], exposure_levels_count=3, call_color=CALL_COLOR, put_color=PUT_COLOR, strike_range=0.02, use_heikin_ashi=False, highlight_max_level=False, max_level_color='#800080', coloring_mode='Linear Intensity'):
     # Handle backward compatibility or empty default
     if isinstance(exposure_levels_types, str):
         if exposure_levels_types == 'None':
@@ -2707,8 +2722,8 @@ def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=
             automargin=True  # Enable automatic margin adjustment
         ),
 
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -2717,7 +2732,7 @@ def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         bargap=0.1,
         bargroupgap=0.1,
@@ -2739,7 +2754,7 @@ def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=
                     size=10,
                     color=current_price_color
                 ),
-                bgcolor='#1E1E1E',
+                bgcolor=PLOT_THEME['paper_bgcolor'],
                 bordercolor=current_price_color,
                 borderwidth=1,
                 borderpad=2,
@@ -3125,7 +3140,7 @@ def build_historical_levels_overlay(ticker, display_date, chart_times, latest_pr
 
 
 def create_gex_side_panel(calls, puts, S, strike_range=0.02,
-                          call_color='#00FF00', put_color='#FF0000',
+                          call_color=CALL_COLOR, put_color=PUT_COLOR,
                           selected_expiries=None):
     """Horizontal-bar GEX panel keyed to strike, intended to render in a sibling
     div next to the TradingView candle chart with a shared visible price range.
@@ -3137,7 +3152,7 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     """
     empty = go.Figure()
     empty.update_layout(
-        paper_bgcolor='#1E1E1E', plot_bgcolor='#1E1E1E',
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'], plot_bgcolor=PLOT_THEME['plot_bgcolor'],
         margin=dict(l=4, r=4, t=4, b=24),
         xaxis=dict(visible=False), yaxis=dict(visible=False),
     )
@@ -3202,8 +3217,8 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     fig.add_hline(y=S, line_color='#888', line_dash='dot', line_width=1)
 
     fig.update_layout(
-        paper_bgcolor='#1E1E1E',
-        plot_bgcolor='#1E1E1E',
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
         margin=dict(l=4, r=4, t=4, b=24),
         height=680,
         xaxis=dict(
@@ -3583,7 +3598,7 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     })
 
 
-def create_large_trades_table(calls, puts, S, strike_range, call_color='#00FF00', put_color='#FF0000', selected_expiries=None):
+def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
     """Create a sortable options chain table showing all options within the strike range"""
     # Calculate strike range boundaries
     min_strike = S * (1 - strike_range)
@@ -4030,8 +4045,8 @@ def create_historical_bubble_levels_chart(ticker, strike_range, call_color='#00F
             zeroline=True,
             zerolinecolor='#333333'
         ),
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -4040,14 +4055,14 @@ def create_historical_bubble_levels_chart(ticker, strike_range, call_color='#00F
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         margin=dict(l=50, r=50, t=50, b=20),
         showlegend=True,
         autosize=True,
         hovermode='closest',
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -4063,7 +4078,7 @@ def create_historical_bubble_levels_chart(ticker, strike_range, call_color='#00F
 
 
 
-def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00', put_color='#FF0000', coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Filter strikes within range
     min_strike = S * (1 - strike_range)
     max_strike = S * (1 + strike_range)
@@ -4269,8 +4284,8 @@ def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color='#0
         yaxis=yaxis_config,
         barmode='relative',
         hovermode='y unified' if horizontal else 'x unified',
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -4279,13 +4294,13 @@ def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color='#0
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         bargap=0.1,
         bargroupgap=0.1,
         margin=dict(l=50, r=50, t=50, b=100),
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -4343,7 +4358,7 @@ def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color='#0
 
     return fig.to_json()
 
-def create_premium_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00', put_color='#FF0000', coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+def create_premium_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Filter strikes within range
     min_strike = S * (1 - strike_range)
     max_strike = S * (1 + strike_range)
@@ -4559,8 +4574,8 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00'
         yaxis=yaxis_config,
         barmode='relative',
         hovermode='y unified' if horizontal else 'x unified',
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -4569,13 +4584,13 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00'
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         bargap=0.1,
         bargroupgap=0.1,
         margin=dict(l=50, r=50, t=40, b=20),
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
@@ -4635,7 +4650,7 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color='#00FF00'
 
     return fig.to_json()
 
-def create_centroid_chart(ticker, call_color='#00FF00', put_color='#FF0000', selected_expiries=None):
+def create_centroid_chart(ticker, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
     """Create a chart showing call and put centroids over time with price line"""
     est = pytz.timezone('US/Eastern')
     current_time_est = datetime.now(est)
@@ -4644,8 +4659,8 @@ def create_centroid_chart(ticker, call_color='#00FF00', put_color='#FF0000', sel
         fig = go.Figure()
         fig.update_layout(
             title=dict(text=title, font=dict(color='#CCCCCC', size=16), x=0.5, xanchor='center'),
-            plot_bgcolor='#1E1E1E',
-            paper_bgcolor='#1E1E1E',
+            plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+            paper_bgcolor=PLOT_THEME['paper_bgcolor'],
             font=dict(color='#CCCCCC'),
             xaxis=dict(title='Time', title_font=dict(color='#CCCCCC'), tickfont=dict(color='#CCCCCC')),
             yaxis=dict(title='Price/Strike', title_font=dict(color='#CCCCCC'), tickfont=dict(color='#CCCCCC')),
@@ -4769,8 +4784,8 @@ def create_centroid_chart(ticker, call_color='#00FF00', put_color='#FF0000', sel
             zeroline=True,
             zerolinecolor='#333333'
         ),
-        plot_bgcolor='#1E1E1E',
-        paper_bgcolor='#1E1E1E',
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
         font=dict(color='#CCCCCC'),
         legend=dict(
             orientation="h",
@@ -4779,14 +4794,14 @@ def create_centroid_chart(ticker, call_color='#00FF00', put_color='#FF0000', sel
             xanchor="right",
             x=1,
             font=dict(color='#CCCCCC'),
-            bgcolor='#1E1E1E'
+            bgcolor=PLOT_THEME['paper_bgcolor']
         ),
         margin=dict(l=50, r=50, t=50, b=20),
         showlegend=True,
         autosize=True,
         hovermode='x unified',
         hoverlabel=dict(
-            bgcolor='#1E1E1E',
+            bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
             font_family="Arial"
         ),
