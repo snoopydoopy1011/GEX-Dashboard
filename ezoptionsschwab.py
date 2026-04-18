@@ -3379,7 +3379,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
 
 
 def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_types=[],
-                              exposure_levels_count=3, call_color='#00FF00', put_color='#FF0000',
+                              exposure_levels_count=3, call_color=CALL_COLOR, put_color=PUT_COLOR,
                               strike_range=0.1, use_heikin_ashi=False,
                               highlight_max_level=False, max_level_color='#800080',
                               coloring_mode='Linear Intensity', ticker=None):
@@ -3744,7 +3744,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
             const span = header.querySelector('span');
             if (index === columnIndex) {
                 span.textContent = direction === 'asc' ? '▲' : '▼';
-                span.style.color = '#00FF00';
+                span.style.color = '#10B981';
             } else {
                 span.textContent = '▼▲';
                 span.style.color = '#666';
@@ -5692,7 +5692,7 @@ def index():
         }
         .tv-ohlc-tooltip .tt-time { color: #aaa; font-size: 10px; margin-bottom: 2px; }
         .tv-ohlc-tooltip .tt-up   { color: var(--call); }
-        .tv-ohlc-tooltip .tt-dn   { color: #FF4444; }
+        .tv-ohlc-tooltip .tt-dn   { color: var(--put); }
         /* Candle close timer */
         .candle-close-timer {
             font-size: 11px;
@@ -6371,11 +6371,11 @@ def index():
             </div>
             <div class="modal-row">
                 <label for="call_color">Call Color</label>
-                <input type="color" id="call_color" value="#00FF00">
+                <input type="color" id="call_color" value="#10B981">
             </div>
             <div class="modal-row">
                 <label for="put_color">Put Color</label>
-                <input type="color" id="put_color" value="#FF0000">
+                <input type="color" id="put_color" value="#EF4444">
             </div>
             <div class="modal-row">
                 <label for="max_level_color">Max Level Color</label>
@@ -6432,8 +6432,8 @@ def index():
         let charts = {};
         let updateInterval;
         let lastUpdateTime = 0;
-        let callColor = '#00FF00';
-        let putColor = '#FF0000';
+        let callColor = '#10B981';
+        let putColor = '#EF4444';
         let maxLevelColor = '#800080';
         let lastData = {}; // Store last received data
         let lastPriceData = null; // Price chart data stored separately (fetched via /update_price)
@@ -6881,8 +6881,8 @@ def index():
   .candle-close-timer { font-size:11px; font-family:'Courier New',monospace; padding:3px 7px; border-radius:4px; background:#2a2a2a; border:1px solid #444; color:#ccc; white-space:nowrap; user-select:none; letter-spacing:0.5px; }
   .tv-ohlc-tooltip { position:absolute; top:8px; left:8px; z-index:50; font-size:11px; font-family:'Courier New',monospace; color:#ccc; pointer-events:none; white-space:nowrap; width:max-content; display:none; line-height:1.6; }
   .tv-ohlc-tooltip .tt-time { color:#aaa; font-size:10px; margin-bottom:2px; }
-  .tv-ohlc-tooltip .tt-up { color:#00FF00; }
-  .tv-ohlc-tooltip .tt-dn { color:#FF4444; }
+  .tv-ohlc-tooltip .tt-up { color:#10B981; }
+  .tv-ohlc-tooltip .tt-dn { color:#EF4444; }
     .tv-historical-overlay { position:absolute; inset:0; z-index:4; pointer-events:none; overflow:hidden; }
     .tv-historical-bubble { position:absolute; border-radius:999px; transform:translate(-50%,-50%); box-shadow:0 0 0 1px rgba(0,0,0,0.25); opacity:0.95; pointer-events:auto; cursor:pointer; }
     .tv-historical-tooltip { position:absolute; z-index:55; display:none; width:auto !important; height:auto !important; min-width:0; max-width:min(240px,calc(100% - 16px)); padding:8px; border:1px solid rgba(255,255,255,0.08); border-radius:10px; background:linear-gradient(180deg,rgba(30,34,41,0.96),rgba(16,18,23,0.98)); color:#eef2f7; font-size:10px; line-height:1.25; pointer-events:none; box-shadow:0 14px 36px rgba(0,0,0,0.38); backdrop-filter:blur(10px); flex:none !important; align-self:flex-start; overflow:hidden; white-space:normal; }
@@ -7077,7 +7077,7 @@ def index():
   var isFirstRender=true;
   function renderPriceChart(priceData){
     var candles=priceData.candles||[];
-    var upColor=priceData.call_color||'#00FF00',downColor=priceData.put_color||'#FF0000';
+    var upColor=priceData.call_color||'#10B981',downColor=priceData.put_color||'#EF4444';
     popoutTimeframe=parseInt(priceData.timeframe)||1;
     lineStyleMap={dashed:LightweightCharts.LineStyle.Dashed,dotted:LightweightCharts.LineStyle.Dotted,large_dashed:LightweightCharts.LineStyle.LargeDashed};
     if(!tvChart){
@@ -8550,8 +8550,8 @@ def index():
             if (!container) return;
 
             tvLastPriceData = priceData;
-            const upColor   = priceData.call_color || '#00FF00';
-            const downColor = priceData.put_color  || '#FF0000';
+            const upColor   = priceData.call_color || '#10B981';
+            const downColor = priceData.put_color  || '#EF4444';
             const candles   = priceData.candles || [];
 
             const lineStyleMap = {
@@ -9098,8 +9098,8 @@ def index():
             }
             const spot = stats.spot;
             const rows = [
-                { label: 'Call Wall',  price: stats.call_wall,  color: '#00D084' },
-                { label: 'Put Wall',   price: stats.put_wall,   color: '#FF4D4D' },
+                { label: 'Call Wall',  price: stats.call_wall,  color: '#10B981' },
+                { label: 'Put Wall',   price: stats.put_wall,   color: '#EF4444' },
                 { label: 'Gamma Flip', price: stats.gamma_flip, color: '#FFC400' },
                 { label: '+1σ EM',     price: stats.em_upper,   color: '#9CA3AF' },
                 { label: '-1σ EM',     price: stats.em_lower,   color: '#9CA3AF' },
@@ -9199,8 +9199,8 @@ def index():
             clearKeyLevels();
             const LS = LightweightCharts.LineStyle;
             const defs = [
-                { key: 'call_wall',  title: 'Call Wall',  color: '#00D084', style: LS.Solid,  width: 2 },
-                { key: 'put_wall',   title: 'Put Wall',   color: '#FF4D4D', style: LS.Solid,  width: 2 },
+                { key: 'call_wall',  title: 'Call Wall',  color: '#10B981', style: LS.Solid,  width: 2 },
+                { key: 'put_wall',   title: 'Put Wall',   color: '#EF4444', style: LS.Solid,  width: 2 },
                 { key: 'gamma_flip', title: 'Gamma Flip', color: '#FFC400', style: LS.Dashed, width: 2 },
                 { key: 'em_upper',   title: '+1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
                 { key: 'em_lower',   title: '-1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
