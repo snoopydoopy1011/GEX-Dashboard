@@ -4851,10 +4851,21 @@ def index():
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
+        :root {
+            --bg-0:#0B0E11; --bg-1:#151A21; --bg-2:#1E242D; --bg-3:#262D38;
+            --border:#2A313B; --border-strong:#3A424F;
+            --fg-0:#E5E7EB; --fg-1:#9CA3AF; --fg-2:#6B7280;
+            --call:#10B981; --put:#EF4444; --accent:#3B82F6;
+            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981;
+            --radius:6px; --radius-lg:10px;
+            --font-ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
+            --font-mono:"SF Mono","JetBrains Mono",Menlo,monospace;
+        }
+        .num { font-variant-numeric: tabular-nums; }
         body {
-            background-color: #1E1E1E;
-            color: white;
-            font-family: Arial, sans-serif;
+            background-color: var(--bg-0);
+            color: var(--fg-0);
+            font-family: var(--font-ui);
             margin: 0;
             padding: 0;
             width: 100%;
@@ -4891,7 +4902,7 @@ def index():
         }
         .tm-btn {
             background: none;
-            border: 1px solid #444;
+            border: 1px solid var(--border);
             color: #777;
             border-radius: 4px;
             padding: 2px 7px;
@@ -4901,7 +4912,7 @@ def index():
         }
         .tm-btn:hover { color: #ccc; border-color: #777; }
         .tm-btn-del {
-            border-color: #444;
+            border-color: var(--border);
             color: #666;
         }
         .tm-btn-del:hover { background: #2a1010; border-color: #883333; color: #cc4444; }
@@ -4917,7 +4928,7 @@ def index():
             gap: 15px;
             margin-bottom: 20px;
             padding: 20px;
-            background-color: #2D2D2D;
+            background-color: var(--bg-1);
             border-radius: 10px;
             width: 100%;
             box-sizing: border-box;
@@ -4936,7 +4947,7 @@ def index():
             flex-wrap: wrap;
             gap: 15px;
             padding-top: 15px;
-            border-top: 1px solid #444;
+            border-top: 1px solid var(--border);
         }
         .controls {
             display: flex;
@@ -4948,7 +4959,7 @@ def index():
             display: flex;
             gap: 10px;
             align-items: center;
-            background-color: #333;
+            background-color: var(--bg-2);
             padding: 8px 12px;
             border-radius: 6px;
         }
@@ -4959,8 +4970,8 @@ def index():
         .expiry-display {
             padding: 8px 12px;
             border-radius: 6px;
-            border: 1px solid #444;
-            background-color: #333;
+            border: 1px solid var(--border);
+            background-color: var(--bg-2);
             color: white;
             cursor: pointer;
             display: flex;
@@ -4982,8 +4993,8 @@ def index():
             top: 100%;
             left: 0;
             right: 0;
-            background-color: #333;
-            border: 1px solid #444;
+            background-color: var(--bg-2);
+            border: 1px solid var(--border);
             border-radius: 6px;
             border-top: none;
             border-top-left-radius: 0;
@@ -5005,16 +5016,16 @@ def index():
             transition: background-color 0.2s;
         }
         .expiry-option:hover {
-            background-color: #444;
+            background-color: var(--bg-3);
         }
         .expiry-option input[type="checkbox"] {
             width: 16px;
             height: 16px;
-            accent-color: #00FF00;
+            accent-color: var(--call);
         }
         .expiry-buttons {
             padding: 6px 8px;
-            border-top: 1px solid #444;
+            border-top: 1px solid var(--border);
             display: flex;
             flex-wrap: wrap;
             gap: 5px;
@@ -5024,7 +5035,7 @@ def index():
             font-size: 10px;
             border-radius: 4px;
             border: 1px solid #555;
-            background-color: #444;
+            background-color: var(--border);
             color: white;
             cursor: pointer;
             flex: 1;
@@ -5055,8 +5066,8 @@ def index():
         .levels-display {
             padding: 8px 12px;
             border-radius: 6px;
-            border: 1px solid #444;
-            background-color: #333;
+            border: 1px solid var(--border);
+            background-color: var(--bg-2);
             color: white;
             cursor: pointer;
             display: flex;
@@ -5078,8 +5089,8 @@ def index():
             top: 100%;
             left: 0;
             right: 0;
-            background-color: #333;
-            border: 1px solid #444;
+            background-color: var(--bg-2);
+            border: 1px solid var(--border);
             border-radius: 6px;
             border-top: none;
             border-top-left-radius: 0;
@@ -5101,12 +5112,12 @@ def index():
             transition: background-color 0.2s;
         }
         .levels-option:hover {
-            background-color: #444;
+            background-color: var(--bg-3);
         }
         .levels-option input[type="checkbox"] {
             width: 16px;
             height: 16px;
-            accent-color: #00FF00;
+            accent-color: var(--call);
         }
         .control-group label {
             white-space: nowrap;
@@ -5114,8 +5125,8 @@ def index():
         input[type="text"], select {
             padding: 8px 12px;
             border-radius: 6px;
-            border: 1px solid #444;
-            background-color: #333;
+            border: 1px solid var(--border);
+            background-color: var(--bg-2);
             color: white;
             min-width: 120px;
         }
@@ -5123,7 +5134,7 @@ def index():
         input[type="range"] {
             width: 150px;
             height: 6px;
-            background: #444;
+            background: var(--border);
             border-radius: 3px;
             outline: none;
         }
@@ -5131,7 +5142,7 @@ def index():
             -webkit-appearance: none;
             width: 16px;
             height: 16px;
-            background: #00FF00;
+            background: var(--call);
             border-radius: 50%;
             cursor: pointer;
         }
@@ -5150,7 +5161,7 @@ def index():
             display: flex;
             align-items: center;
             gap: 5px;
-            background-color: #333;
+            background-color: var(--bg-2);
             padding: 6px 10px;
             border-radius: 6px;
         }
@@ -5180,7 +5191,7 @@ def index():
             width: 100%;
             min-width: 0;
             position: relative;
-            background-color: #2D2D2D;
+            background-color: var(--bg-1);
             border-radius: 10px;
             margin-bottom: 5px;
             display: flex;
@@ -5210,7 +5221,7 @@ def index():
         .price-chart-row > #price-chart { flex: 1 1 78%; min-width: 0; }
         .price-chart-row > .gex-side-panel-wrap { flex: 0 0 22%; min-width: 180px; max-width: 320px; }
         .gex-side-panel-wrap {
-            background: #1E1E1E;
+            background: var(--bg-0);
             border-radius: 0;
             height: 680px;
             display: flex;
@@ -5236,7 +5247,7 @@ def index():
         .kpi-card {
             flex: 1 1 0;
             min-width: 170px;
-            background: #1E1E1E;
+            background: var(--bg-1);
             border: 1px solid #2A2A2A;
             border-radius: 4px;
             padding: 8px 10px;
@@ -5252,8 +5263,8 @@ def index():
         }
         .kpi-value { font-size: 18px; font-weight: 600; color: #e5e5e5; }
         .kpi-sub   { font-size: 11px; color: #aaa; }
-        .kpi-pos   { color: #00D084; }
-        .kpi-neg   { color: #FF4D4D; }
+        .kpi-pos   { color: var(--call); }
+        .kpi-neg   { color: var(--put); }
 
         /* ── Alerts strip ─────────────────────────────────────────── */
         .trader-alerts-strip {
@@ -5266,7 +5277,7 @@ def index():
             padding: 3px 10px;
             border-radius: 12px;
             font-size: 11px;
-            background: #1E1E1E;
+            background: var(--bg-1);
             border: 1px solid #2A2A2A;
             color: #ccc;
         }
@@ -5305,7 +5316,7 @@ def index():
         .charts-grid .chart-container.tab-hidden { display: none !important; }
         #price-chart {
             padding: 0 !important;
-            background-color: #1E1E1E !important;
+            background-color: var(--bg-0) !important;
             height: 680px !important;
             border-radius: 0 0 0 0;
             overflow: hidden;
@@ -5429,7 +5440,7 @@ def index():
         /* Chart toolbar — sits ABOVE the canvas, normal document flow */
         .tv-toolbar-container {
             background: #1a1a1a;
-            border-bottom: 1px solid #333;
+            border-bottom: 1px solid var(--bg-2);
             border-radius: 10px 10px 0 0;
             padding: 4px 8px;
             display: flex;
@@ -5443,12 +5454,12 @@ def index():
         .tv-toolbar-sep {
             width: 1px;
             height: 20px;
-            background: #444;
+            background: var(--border);
             margin: 0 2px;
         }
         .tv-tb-btn {
             background: #2a2a2a;
-            border: 1px solid #444;
+            border: 1px solid var(--border);
             color: #ccc;
             border-radius: 4px;
             padding: 3px 7px;
@@ -5486,8 +5497,8 @@ def index():
         }
         /* RSI / MACD sub-panes */
         .tv-sub-pane {
-            background: #1E1E1E;
-            border-top: 1px solid #333;
+            background: var(--bg-0);
+            border-top: 1px solid var(--bg-2);
             position: relative;
             overflow: hidden;
         }
@@ -5522,7 +5533,7 @@ def index():
             line-height: 1.6;
         }
         .tv-ohlc-tooltip .tt-time { color: #aaa; font-size: 10px; margin-bottom: 2px; }
-        .tv-ohlc-tooltip .tt-up   { color: #00FF00; }
+        .tv-ohlc-tooltip .tt-up   { color: var(--call); }
         .tv-ohlc-tooltip .tt-dn   { color: #FF4444; }
         /* Candle close timer */
         .candle-close-timer {
@@ -5531,7 +5542,7 @@ def index():
             padding: 3px 7px;
             border-radius: 4px;
             background: #2a2a2a;
-            border: 1px solid #444;
+            border: 1px solid var(--border);
             color: #ccc;
             white-space: nowrap;
             user-select: none;
@@ -5546,16 +5557,16 @@ def index():
             width: 100%;
         }
         .green {
-            color: #00FF00;
+            color: var(--call);
         }
         .red {
-            color: #FF0000;
+            color: var(--put);
         }
         button {
             padding: 8px 16px;
             border-radius: 6px;
             border: none;
-            background-color: #444;
+            background-color: var(--border);
             color: white;
             cursor: pointer;
             transition: background-color 0.2s;
@@ -5837,7 +5848,7 @@ def index():
             border-radius: 0 !important;
             margin: 0 !important;
             padding: 10px !important;
-            background-color: #1E1E1E !important;
+            background-color: var(--bg-0) !important;
             box-sizing: border-box !important;
             overflow: visible !important;
         }
