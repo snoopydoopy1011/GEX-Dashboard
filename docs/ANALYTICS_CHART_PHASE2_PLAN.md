@@ -1,6 +1,6 @@
 # GEX Dashboard — Analytics + Chart Phase 2
 
-**Status:** In progress — 1 of 4 stages landed
+**Status:** In progress — 2 of 4 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/analytics-phase2`
@@ -11,7 +11,7 @@
 
 ## 0. Where are we? (read this first)
 
-**Current state (as of 2026-04-18):** branch `feat/analytics-phase2` live; Stage 1 landed with deviations (see §10). Next: Stage 2 — Dealer Hedge Impact panel.
+**Current state (as of 2026-04-18):** branch `feat/analytics-phase2` live; Stages 1–2 landed (Stage 1 with deviations, Stage 2 with a charm-unit fix — see §10). Next: Stage 3 — Scenario GEX table.
 
 Line numbers in this doc are a snapshot as of `main` @ `e276e63`. They drift as soon as Stage 1 lands. **Grep by anchor name** (function names, CSS class names, element IDs) instead of trusting line numbers. Stable anchors used throughout this doc:
 
@@ -627,6 +627,6 @@ _(populate as stages land — one bullet each with commit SHA, notes on any devi
   - `filter_market_hours` was **changed**, not left alone. Spec said "extended-hours bars stay excluded," but on review the ETH bars carry useful context (overnight gap detection, pre-market gappers). New behavior: keep 04:00–20:00 ET; still drops weekends + overnight (20:00–04:00). ETH bars are visually dimmed via a new `.tv-eth-overlay` canvas (`drawTVEthOverlay()`), so RTH still reads as the dominant session.
   - `prepare_price_chart_data` was changed to display the **full multi-day window** by default (both Heikin-Ashi and regular paths). Previously it sliced to `current_day_candles` only — that slice made the "one day only" complaint persist even after the backend fix, so it had to go. The `current_day_candles` variable is preserved because daily VWAP anchoring still depends on it.
   - `tickMarkFormatter` upgraded to switch on `tickMarkType` and render date labels ("Apr 15") at day/month/year boundaries — without this the multi-day x-axis was unreadable (only HH:MM labels, no date context).
-- Stage 2 — not started
+- **Stage 2 — landed.** Commit: (this commit). `_window_sum` generalized to `(df, col='GEX')`. `compute_trader_stats` emits `hedge_on_up_1pct`, `hedge_on_down_1pct`, `vanna_delta_shift_per_1volpt`, `charm_by_close`. New `.dealer-impact` block renders above the GEX Plotly panel with `fmtMoneyCompact` reuse. §7 Stage 2 deviation: the spec's `hours_left / 6.5` was replaced with `hours_left / 24.0` — the per-row `Charm` column is pre-divided by 365 at `:1412`, so it is per *calendar day*, not per trading session. Using `/6.5` would have over-reported charm-by-close by ~3.7×. This resolves §9 open question "Charm-by-close unit convention." VEX carries `*0.01` (per 1 vol point) at `:1408` — no extra scaling needed (§9 VEX open question also confirmed).
 - Stage 3 — not started
 - Stage 4 — not started

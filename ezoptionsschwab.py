@@ -3335,6 +3335,11 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'call_wall': None, 'put_wall': None, 'gamma_flip': None,
         'spot': float(S) if S is not None else None,
         'alerts': [],
+        # Stage 2 — dealer hedge impact block
+        'hedge_on_up_1pct':   None,
+        'hedge_on_down_1pct': None,
+        'vanna_delta_shift_per_1volpt': None,
+        'charm_by_close':     None,
     }
     if S is None:
         return out
@@ -3350,14 +3355,14 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     if out['em_move'] is not None and S:
         out['em_pct'] = round(out['em_move'] / S * 100, 2)
 
-    def _window_sum(df):
-        if df is None or df.empty or 'GEX' not in df.columns:
+    def _window_sum(df, col='GEX'):
+        if df is None or df.empty or col not in df.columns:
             return 0.0
         if selected_expiries and 'expiration_date' in df.columns:
             df = df[df['expiration_date'].isin(selected_expiries)]
         lo = S * (1 - strike_range); hi = S * (1 + strike_range)
         f = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
-        return float(f['GEX'].sum()) if not f.empty else 0.0
+        return float(f[col].sum()) if not f.empty else 0.0
 
     call_gex = _window_sum(calls)
     put_gex  = _window_sum(puts)
@@ -3367,6 +3372,31 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     # notional; this is the standard back-of-envelope number UW and gammalab
     # display as "Hedging Impact per 1%".
     out['hedge_per_1pct'] = 0.01 * net_gex
+
+    # Dealer Hedge Impact block (Stage 2)
+    # Spot ±1%: same 1% hedge number, signed so ± sides render independently.
+    out['hedge_on_up_1pct']   = +0.01 * net_gex
+    out['hedge_on_down_1pct'] = -0.01 * net_gex
+
+    # Vanna delta-shift per +1 vol point. VEX row values already carry the *0.01
+    # factor (see compute_greek_exposures :1408), so the window sum is directly
+    # "Δ$ per +1 vol point". Negate on the frontend for the -1 vol side.
+    vex_call = _window_sum(calls, col='VEX')
+    vex_put  = _window_sum(puts,  col='VEX')
+    out['vanna_delta_shift_per_1volpt'] = vex_call + vex_put
+
+    # Charm-by-close. Row Charm carries /365 (see :1412) → per *calendar day*.
+    # Fraction of calendar day from now to 16:00 ET is hours_left / 24
+    # (not /6.5 — that would conflate calendar-day and session-day units).
+    try:
+        now_et = datetime.now(pytz.timezone('US/Eastern'))
+        close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        hours_left = max(0.0, (close_et - now_et).total_seconds() / 3600.0)
+        charm_call = _window_sum(calls, col='Charm')
+        charm_put  = _window_sum(puts,  col='Charm')
+        out['charm_by_close'] = (charm_call + charm_put) * (hours_left / 24.0)
+    except Exception:
+        out['charm_by_close'] = None
 
     if out['gamma_flip'] is not None:
         out['regime'] = 'Long Gamma' if S >= out['gamma_flip'] else 'Short Gamma'
@@ -5302,6 +5332,27 @@ def index():
         }
         .right-rail-tab .tab-badge.visible { display: inline-block; }
 
+        /* Dealer Hedge Impact block (lives above the GEX chart inside the GEX rail panel) */
+        .dealer-impact {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 4px 12px;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            flex: 0 0 auto;
+        }
+        .dealer-impact .label { color: var(--fg-1); line-height: 1.25; }
+        .dealer-impact .sub   { color: var(--fg-2); font-size: 11px; margin-top: -1px; }
+        .dealer-impact .val   {
+            font-variant-numeric: tabular-nums;
+            text-align: right;
+            align-self: center;
+            color: var(--fg-0);
+        }
+        .dealer-impact .val.pos { color: var(--call); }
+        .dealer-impact .val.neg { color: var(--put); }
+
         /* Alerts panel */
         .rail-alerts-list {
             flex: 1;
@@ -5402,7 +5453,7 @@ def index():
         .gex-side-panel-wrap {
             background: var(--bg-0);
             border-radius: 0;
-            height: 100%;
+            flex: 1 1 auto;   /* shares rail panel height with .dealer-impact sibling */
             display: flex;
             flex-direction: column;
             min-height: 0;
@@ -6428,6 +6479,13 @@ def index():
             </div>
             <div class="right-rail-panels" id="right-rail-panels">
                 <div class="right-rail-panel active" data-rail-panel="gex">
+                    <div class="dealer-impact" id="dealer-impact">
+                        <div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>
+                        <div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>
+                        <div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>
+                        <div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>
+                        <div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>
+                    </div>
                     <div class="gex-side-panel-wrap">
                         <div id="gex-side-panel"></div>
                     </div>
@@ -8902,6 +8960,13 @@ def index():
                 railPanels.id = 'right-rail-panels';
                 railPanels.innerHTML =
                     '<div class="right-rail-panel active" data-rail-panel="gex">' +
+                        '<div class="dealer-impact" id="dealer-impact">' +
+                            '<div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>' +
+                            '<div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>' +
+                            '<div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>' +
+                            '<div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>' +
+                            '<div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>' +
+                        '</div>' +
                         '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
                     '</div>' +
                     '<div class="right-rail-panel" data-rail-panel="alerts">' +
@@ -9069,6 +9134,7 @@ def index():
                 strip.style.display = 'none';
                 renderRailAlerts([]);
                 renderRailKeyLevels(null);
+                renderDealerImpact(null);
                 return;
             }
 
@@ -9120,6 +9186,38 @@ def index():
 
             renderRailAlerts(Array.isArray(stats.alerts) ? stats.alerts : []);
             renderRailKeyLevels(stats);
+            renderDealerImpact(stats);
+        }
+
+        // Dealer Hedge Impact block renderer (above GEX chart in the GEX rail tab).
+        // Values are signed $-flows/shifts; pos/neg class drives the color token.
+        function renderDealerImpact(stats) {
+            const el = document.getElementById('dealer-impact');
+            if (!el) return;
+            const set = (key, v) => {
+                const n = el.querySelector('[data-di="' + key + '"]');
+                if (!n) return;
+                if (v == null || !isFinite(v)) {
+                    n.textContent = '—';
+                    n.classList.remove('pos', 'neg');
+                    return;
+                }
+                const sign = v > 0 ? '+' : '';
+                n.textContent = sign + fmtMoneyCompact(v);
+                n.classList.remove('pos', 'neg');
+                if (v !== 0) n.classList.add(v > 0 ? 'pos' : 'neg');
+            };
+            if (!stats) {
+                ['hedge_on_up_1pct','hedge_on_down_1pct','vanna_up_1','vanna_down_1','charm_by_close']
+                    .forEach(k => set(k, null));
+                return;
+            }
+            set('hedge_on_up_1pct',   stats.hedge_on_up_1pct);
+            set('hedge_on_down_1pct', stats.hedge_on_down_1pct);
+            set('vanna_up_1',         stats.vanna_delta_shift_per_1volpt);
+            set('vanna_down_1',       stats.vanna_delta_shift_per_1volpt == null
+                                        ? null : -stats.vanna_delta_shift_per_1volpt);
+            set('charm_by_close',     stats.charm_by_close);
         }
 
         // ── Right-rail alerts panel ──────────────────────────────────────
