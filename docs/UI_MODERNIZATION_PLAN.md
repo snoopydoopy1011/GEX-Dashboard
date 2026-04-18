@@ -8,6 +8,21 @@
 
 ---
 
+## 0. Where are we? (read this first)
+
+Line numbers throughout this doc are a snapshot as of commit `3d26533` (the commit that introduced the doc). **They drift as soon as Stage 1 lands.** Grep by anchor name — CSS class names (`.header`, `.secondary-tabs`, `.kpi-card`, `.gex-side-panel-wrap`), function names (`renderGexSidePanel`, `renderTraderStats`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `create_exposure_chart`), or element IDs (`#chart-grid`, `#trader-stats-strip`, `#gex-side-panel`) — rather than trusting the numbers.
+
+To determine which stage is next:
+
+```bash
+git branch -a                              # does feat/ui-modernization exist?
+git log --oneline main..feat/ui-modernization   # what's landed?
+```
+
+Match commit subjects against the 7 stages in §7. Subjects follow §6.2 exactly, so stage N's commit subject is stable. If the branch doesn't exist yet, cut it from `main` and start at Stage 1. If N stages have landed, start at N+1.
+
+---
+
 ## 1. Context
 
 `ezoptionsschwab.py` is a single-file Flask + Plotly + TradingView-Lightweight-Charts app (10,156 lines) that pulls live options data from the Schwab API and renders GEX/DEX/Vanna/Charm exposures, intraday candles with on-chart levels, a strike-aligned GEX side panel, a KPI strip, alerts, and a tabbed secondary-chart area.
