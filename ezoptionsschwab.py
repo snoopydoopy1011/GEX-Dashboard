@@ -3274,6 +3274,8 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     out = {
         'call_wall': None, 'put_wall': None, 'gamma_flip': None,
         'em_upper': None, 'em_lower': None,
+        'call_wall_2': None, 'put_wall_2': None, 'hvl': None,
+        'em_upper_2': None, 'em_lower_2': None,
     }
     if S is None:
         return out
@@ -3294,14 +3296,26 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     if strikes:
         net = {s: call_map.get(s, 0) - put_map.get(s, 0) for s in strikes}
 
-        pos_strikes = [(s, v) for s, v in net.items() if v > 0]
-        neg_strikes = [(s, v) for s, v in net.items() if v < 0]
+        pos_strikes = sorted(
+            [(s, v) for s, v in net.items() if v > 0],
+            key=lambda kv: kv[1], reverse=True,
+        )
+        neg_strikes = sorted(
+            [(s, v) for s, v in net.items() if v < 0],
+            key=lambda kv: kv[1],
+        )
         if pos_strikes:
-            cw_strike, cw_val = max(pos_strikes, key=lambda kv: kv[1])
+            cw_strike, cw_val = pos_strikes[0]
             out['call_wall'] = {'price': float(cw_strike), 'gex': float(cw_val)}
+            if len(pos_strikes) > 1:
+                cw2_strike, cw2_val = pos_strikes[1]
+                out['call_wall_2'] = {'price': float(cw2_strike), 'gex': float(cw2_val)}
         if neg_strikes:
-            pw_strike, pw_val = min(neg_strikes, key=lambda kv: kv[1])
+            pw_strike, pw_val = neg_strikes[0]
             out['put_wall'] = {'price': float(pw_strike), 'gex': float(pw_val)}
+            if len(neg_strikes) > 1:
+                pw2_strike, pw2_val = neg_strikes[1]
+                out['put_wall_2'] = {'price': float(pw2_strike), 'gex': float(pw2_val)}
 
         # Gamma flip: cumulative net GEX from lowest strike up; find first
         # sign change. Interpolate between the bracketing strikes for a
@@ -3323,6 +3337,35 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     if em:
         out['em_upper'] = {'price': float(em['upper']), 'move': float(em['move'])}
         out['em_lower'] = {'price': float(em['lower']), 'move': float(em['move'])}
+        out['em_upper_2'] = {'price': float(S + 2 * em['move']), 'move': float(em['move'])}
+        out['em_lower_2'] = {'price': float(S - 2 * em['move']), 'move': float(em['move'])}
+
+    # HVL — highest-volume strike (fallback to openInterest for illiquid names).
+    try:
+        parts = []
+        for df in (c, p):
+            if df is None or df.empty:
+                continue
+            col = 'volume' if 'volume' in df.columns else ('openInterest' if 'openInterest' in df.columns else None)
+            if col:
+                parts.append(df[['strike', col]].rename(columns={col: '_w'}))
+        if parts:
+            combined = pd.concat(parts, ignore_index=True)
+            combined['_w'] = pd.to_numeric(combined['_w'], errors='coerce').fillna(0.0)
+            if combined['_w'].sum() <= 0:
+                # fallback to openInterest if volume was all zero
+                oi_parts = []
+                for df in (c, p):
+                    if df is not None and not df.empty and 'openInterest' in df.columns:
+                        oi_parts.append(df[['strike', 'openInterest']].rename(columns={'openInterest': '_w'}))
+                if oi_parts:
+                    combined = pd.concat(oi_parts, ignore_index=True)
+                    combined['_w'] = pd.to_numeric(combined['_w'], errors='coerce').fillna(0.0)
+            grouped = combined.groupby('strike')['_w'].sum()
+            if not grouped.empty and grouped.max() > 0:
+                out['hvl'] = {'price': float(grouped.idxmax()), 'weight': float(grouped.max())}
+    except Exception:
+        pass
 
     return out
 
@@ -6203,6 +6246,16 @@ def index():
             cursor: pointer;
         }
         .visibility-toggle input { accent-color: var(--accent); }
+        .visibility-group-sep {
+            grid-column: 1 / -1;
+            margin-top: 4px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--fg-2);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
         /* Settings modal (gear icon) — color pickers and coloring mode */
         .settings-modal {
             border: 1px solid var(--border);
@@ -6791,6 +6844,7 @@ def index():
         let tvExposurePriceLines = [];
         let tvExpectedMovePriceLines = [];
         let tvKeyLevelLines = [];
+        let _lastKeyLevels = null;
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
         let tvHistoricalOverlayPending = false;
@@ -6823,11 +6877,15 @@ def index():
             'price','gamma','delta','vanna','charm','speed','vomma','color',
             'options_volume','open_interest','volume','large_trades','premium','centroid'
         ];
+        // Price-line overlays on the TV candle chart (not Plotly containers).
+        // Share the chart-visibility store but render under a separate drawer group.
+        const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2'];
         const CHART_VISIBILITY_DEFAULTS = {
             price: true, gamma: true, delta: true, vanna: true, charm: true,
             speed: false, vomma: false, color: false,
             options_volume: true, open_interest: false, volume: true,
-            large_trades: true, premium: true, centroid: true
+            large_trades: true, premium: true, centroid: true,
+            hvl: true, em_2s: true, walls_2: true
         };
         const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
         const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
@@ -6835,7 +6893,7 @@ def index():
             let stored = {};
             try { stored = JSON.parse(localStorage.getItem(CHART_VISIBILITY_KEY) || '{}'); } catch(e) {}
             const out = {};
-            CHART_IDS.forEach(id => {
+            CHART_IDS.concat(LINE_OVERLAY_IDS).forEach(id => {
                 out[id] = (id in stored) ? !!stored[id] : CHART_VISIBILITY_DEFAULTS[id];
             });
             return out;
@@ -6843,7 +6901,7 @@ def index():
         function setAllChartVisibility(map) {
             const merged = getChartVisibility();
             Object.keys(map || {}).forEach(k => {
-                if (CHART_IDS.includes(k)) merged[k] = !!map[k];
+                if (CHART_IDS.includes(k) || LINE_OVERLAY_IDS.includes(k)) merged[k] = !!map[k];
             });
             try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
         }
@@ -9744,14 +9802,24 @@ def index():
             if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
             clearKeyLevels();
             const LS = LightweightCharts.LineStyle;
+            const vis = getChartVisibility();
+            const showWalls2 = vis.walls_2 !== false;
+            const showHvl    = vis.hvl     !== false;
+            const showEm2    = vis.em_2s   !== false;
             const defs = [
-                { key: 'call_wall',  title: 'Call Wall',  color: '#10B981', style: LS.Solid,  width: 2 },
-                { key: 'put_wall',   title: 'Put Wall',   color: '#EF4444', style: LS.Solid,  width: 2 },
-                { key: 'gamma_flip', title: 'Gamma Flip', color: '#FFC400', style: LS.Dashed, width: 2 },
-                { key: 'em_upper',   title: '+1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
-                { key: 'em_lower',   title: '-1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
+                { key: 'call_wall',   title: 'Call Wall',   color: '#10B981', style: LS.Solid,  width: 2 },
+                { key: 'put_wall',    title: 'Put Wall',    color: '#EF4444', style: LS.Solid,  width: 2 },
+                { key: 'gamma_flip',  title: 'Gamma Flip',  color: '#FFC400', style: LS.Dashed, width: 2 },
+                { key: 'em_upper',    title: '+1σ EM',      color: '#9CA3AF', style: LS.Dotted, width: 1 },
+                { key: 'em_lower',    title: '-1σ EM',      color: '#9CA3AF', style: LS.Dotted, width: 1 },
+                { key: 'call_wall_2', title: 'Call Wall 2', color: 'rgba(16,185,129,0.55)',  style: LS.Dashed, width: 1, show: showWalls2 },
+                { key: 'put_wall_2',  title: 'Put Wall 2',  color: 'rgba(239,68,68,0.55)',   style: LS.Dashed, width: 1, show: showWalls2 },
+                { key: 'hvl',         title: 'HVL',         color: 'rgba(156,163,175,0.8)',  style: LS.Dotted, width: 1, show: showHvl },
+                { key: 'em_upper_2',  title: '+2σ EM',      color: 'rgba(156,163,175,0.45)', style: LS.Dotted, width: 1, show: showEm2 },
+                { key: 'em_lower_2',  title: '-2σ EM',      color: 'rgba(156,163,175,0.45)', style: LS.Dotted, width: 1, show: showEm2 },
             ];
             defs.forEach(def => {
+                if (def.show === false) return;
                 const entry = levels[def.key];
                 if (!entry || entry.price == null || !isFinite(entry.price)) return;
                 try {
@@ -9820,6 +9888,7 @@ def index():
                     renderGexSidePanel(priceResp.gex_panel);
                 }
                 if (priceResp && priceResp.key_levels) {
+                    _lastKeyLevels = priceResp.key_levels;
                     renderKeyLevels(priceResp.key_levels);
                 }
                 if (priceResp && priceResp.trader_stats) {
@@ -10474,22 +10543,32 @@ def index():
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
             volume: 'Volume Ratio', large_trades: 'Options Chain',
-            premium: 'Premium', centroid: 'Centroid'
+            premium: 'Premium', centroid: 'Centroid',
+            hvl: 'HVL line', em_2s: '±2σ EM lines', walls_2: 'Secondary walls'
         };
         function renderChartVisibilitySection() {
             const list = document.getElementById('chart-visibility-list');
             if (!list) return;
             const vis = getChartVisibility();
-            list.innerHTML = CHART_IDS.map(id => `
+            const mkToggle = id => `
                 <label class="visibility-toggle">
                     <input type="checkbox" data-chart-id="${id}" ${vis[id] ? 'checked' : ''}>
                     <span>${CHART_LABELS[id] || id}</span>
-                </label>
-            `).join('');
+                </label>`;
+            list.innerHTML =
+                CHART_IDS.map(mkToggle).join('') +
+                `<div class="visibility-group-sep">Chart overlays</div>` +
+                LINE_OVERLAY_IDS.map(mkToggle).join('');
             list.querySelectorAll('input[data-chart-id]').forEach(cb => {
                 cb.addEventListener('change', () => {
-                    setAllChartVisibility({ [cb.dataset.chartId]: cb.checked });
-                    updateData();
+                    const id = cb.dataset.chartId;
+                    setAllChartVisibility({ [id]: cb.checked });
+                    if (LINE_OVERLAY_IDS.includes(id)) {
+                        // Line overlays just need a redraw against cached levels — no refetch.
+                        if (_lastKeyLevels) renderKeyLevels(_lastKeyLevels);
+                    } else {
+                        updateData();
+                    }
                 });
             });
         }

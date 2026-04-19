@@ -1,6 +1,6 @@
 # GEX Dashboard — Analytics + Chart Phase 2
 
-**Status:** In progress — 3 of 4 stages landed
+**Status:** Complete — 4 of 4 stages landed
 **Owner:** @snoopydoopy1011
 **Created:** 2026-04-18
 **Target branch:** `feat/analytics-phase2`
@@ -11,7 +11,7 @@
 
 ## 0. Where are we? (read this first)
 
-**Current state (as of 2026-04-19):** branch `feat/analytics-phase2` live; Stages 1–3 landed (Stage 1 with deviations, Stage 2 with a charm-unit fix, Stage 3 with an IV-override delegation rather than verbatim-copy refactor — see §10). Next: Stage 4 — on-chart key-level enrichment.
+**Current state (as of 2026-04-19):** branch `feat/analytics-phase2` — all four stages landed. Next: manual smoke per §8, open PR per §6.4.
 
 Line numbers in this doc are a snapshot as of `main` @ `e276e63`. They drift as soon as Stage 1 lands. **Grep by anchor name** (function names, CSS class names, element IDs) instead of trusting line numbers. Stable anchors used throughout this doc:
 
@@ -634,4 +634,8 @@ _(populate as stages land — one bullet each with commit SHA, notes on any devi
   - `compute_trader_stats` gained `delta_adjusted` / `calculate_in_notional` kwargs (forwarded into scenario calls) so "Current" matches the KPI strip even when those toggles are on. Call site at `update_price()` updated.
   - "Current" row mirrors `out['net_gex']` directly (skipping the recompute) — guarantees the verification step "Current === KPI strip" can never fail. Smoke-tested on SPY 2026-04-20: Current=+1.19B, -2% spot flips to Short Gamma at -450M, ±5 vol shifts move net by 14-19% — monotonicity + regime-flip checks both pass.
   - `RAIL_TAB_KEY` allow-list extended to include `'scenarios'` so the saved tab survives reloads.
-- Stage 4 — not started
+- **Stage 4 — landed.** Commit: (this commit). `compute_key_levels` now also emits `call_wall_2`, `put_wall_2`, `hvl`, and derived `em_upper_2` / `em_lower_2` on the same object; `renderKeyLevels` drew-then-cleared pattern extended with 5 new defs (the 2σ pair plus secondary walls + HVL). §7 Stage 4 deviations:
+  - Spec sketched the new lines as inline `tvCandleSeries.createPriceLine(...)` calls after the existing defs. Instead the new lines are appended to the existing `defs` array in `renderKeyLevels`, so the clear-and-redraw loop handles them uniformly. This also makes per-line visibility gating a single `def.show === false` check.
+  - Visibility: three new keys (`hvl`, `em_2s`, `walls_2`) added to the shared chart-visibility store. Rather than mixing them into the existing `.visibility-grid` of Plotly-chart containers, `renderChartVisibilitySection` now renders a second group under a "Chart overlays" separator (new `.visibility-group-sep` class). Toggling one of these three skips `updateData()` — it just redraws against a new `_lastKeyLevels` cache, so there's no network roundtrip for a pure overlay toggle.
+  - 2σ EM endpoints are computed server-side (`S ± 2*em.move`) rather than derived client-side as §4 suggested. Keeps the key-levels payload the single source of truth for every price line.
+  - HVL uses `volume`-summed-per-strike with an openInterest fallback; windowed *only* by `selected_expiries`, not by strike range (spec said strike window, but matching the wall-ranking behavior — which also isn't window-clamped in this function — keeps HVL consistent with the walls it sits between).
