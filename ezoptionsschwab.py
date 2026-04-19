@@ -6,6 +6,7 @@ from bisect import bisect_left
 from datetime import datetime, timedelta
 import math
 import time
+import collections
 import os
 
 # python.org Python on macOS ships without a default CA bundle unless
@@ -3475,6 +3476,163 @@ def _compute_session_deltas(ticker, net_gex, net_dex):
     }
 
 
+# Phase 3 Stage 3 — Live flow alerts engine
+# Module-level state; intentionally module-scoped so it survives across ticks.
+_ALERT_COOLDOWNS = {}   # (ticker, alert_id) -> float unix ts of last fire
+_IV_BUFFER = collections.defaultdict(lambda: collections.deque(maxlen=30))  # (ticker, strike) -> deque[float]
+_LAST_WALLS = {}        # ticker -> {'call_wall': float|None, 'put_wall': float|None}
+_VOL_SPIKE_CACHE = {}   # ticker -> {'ts': float, 'data': {strike: {'avg20', 'curr'}}}
+
+
+def _alert_cooldown_ok(ticker, alert_id, seconds):
+    key = (ticker, alert_id)
+    last = _ALERT_COOLDOWNS.get(key, 0.0)
+    now_ts = time.time()
+    if now_ts - last >= seconds:
+        _ALERT_COOLDOWNS[key] = now_ts
+        return True
+    return False
+
+
+def _fetch_vol_spike_data(ticker, S, strike_range):
+    """Batch-load last-20-min per-strike volume from interval_data, cached 30 s."""
+    now_ts = time.time()
+    cached = _VOL_SPIKE_CACHE.get(ticker)
+    if cached and now_ts - cached['ts'] < 30:
+        return cached['data']
+    cutoff_ts = int(now_ts) - 20 * 60
+    today = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
+    lo = S * (1 - strike_range)
+    hi = S * (1 + strike_range)
+    try:
+        with closing(sqlite3.connect('options_data.db')) as conn:
+            with closing(conn.cursor()) as cursor:
+                cursor.execute('''
+                    SELECT strike, timestamp, net_volume
+                    FROM interval_data
+                    WHERE ticker = ? AND date = ? AND timestamp >= ?
+                      AND strike >= ? AND strike <= ?
+                    ORDER BY strike, timestamp
+                ''', (ticker, today, cutoff_ts, lo, hi))
+                rows = cursor.fetchall()
+    except Exception:
+        rows = []
+    by_strike = {}
+    for s_raw, _ts, nvol in rows:
+        by_strike.setdefault(float(s_raw), []).append(float(nvol) if nvol is not None else 0.0)
+    result = {}
+    for strike, vols in by_strike.items():
+        avols = [abs(v) for v in vols]
+        curr = avols[-1] if avols else 0.0
+        avg20 = (sum(avols[:-1]) / len(avols[:-1])) if len(avols) > 1 else 0.0
+        result[strike] = {'avg20': avg20, 'curr': curr}
+    _VOL_SPIKE_CACHE[ticker] = {'ts': now_ts, 'data': result}
+    return result
+
+
+def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
+                        call_wall=None, put_wall=None):
+    """Return list of flow-level alert dicts. Called from compute_trader_stats."""
+    if not ticker or S is None:
+        return []
+    alerts = []
+
+    # 1. Wall shift
+    prev_walls = _LAST_WALLS.get(ticker, {})
+    _LAST_WALLS[ticker] = {'call_wall': call_wall, 'put_wall': put_wall}
+    for wtype, label in (('call_wall', 'Call Wall'), ('put_wall', 'Put Wall')):
+        prev = prev_walls.get(wtype)
+        curr = {'call_wall': call_wall, 'put_wall': put_wall}[wtype]
+        if prev is not None and curr is not None and prev != curr:
+            aid = f'wall_shift:{wtype}'
+            if _alert_cooldown_ok(ticker, aid, 120):
+                alerts.append({
+                    'id': aid, 'level': 'flow',
+                    'text': f'{label} {prev:.0f} → {curr:.0f}',
+                    'strike': curr, 'ts': now_iso, 'detail': None,
+                })
+
+    # 2. Volume spike (SQLite rolling 20-min baseline)
+    try:
+        vol_data = _fetch_vol_spike_data(ticker, S, strike_range)
+        for strike, d in vol_data.items():
+            curr_v, avg20 = d['curr'], d['avg20']
+            if curr_v >= max(500.0, 3.0 * avg20):
+                aid = f'vol_spike:{strike:.0f}'
+                ratio = (curr_v / avg20) if avg20 > 0 else 99.0
+                if _alert_cooldown_ok(ticker, aid, 300):
+                    alerts.append({
+                        'id': aid, 'level': 'flow',
+                        'text': f'Vol spike @ {strike:.0f} ({ratio:.1f}× avg)',
+                        'strike': float(strike), 'ts': now_iso, 'detail': None,
+                    })
+    except Exception as e:
+        print(f'[compute_flow_alerts] vol_spike: {e}')
+
+    # 3. Volume / OI ratio unusual (live chain)
+    try:
+        lo = S * (1 - strike_range)
+        hi = S * (1 + strike_range)
+        for df in (calls, puts):
+            if df is None or getattr(df, 'empty', True):
+                continue
+            window = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
+            for _, row in window.iterrows():
+                strike = float(row['strike'])
+                oi  = float(row.get('openInterest', 0) or 0)
+                vol = float(row.get('volume', 0) or 0)
+                if oi < 100 or vol / oi <= 0.25:
+                    continue
+                aid = f'voi_ratio:{strike:.0f}'
+                if _alert_cooldown_ok(ticker, aid, 600):
+                    alerts.append({
+                        'id': aid, 'level': 'flow',
+                        'text': f'Heavy vol/OI @ {strike:.0f} ({vol/oi:.2f})',
+                        'strike': strike, 'ts': now_iso, 'detail': None,
+                    })
+    except Exception as e:
+        print(f'[compute_flow_alerts] voi_ratio: {e}')
+
+    # 4. IV surge (in-process ring buffer; resets on restart — acceptable)
+    try:
+        lo = S * (1 - strike_range)
+        hi = S * (1 + strike_range)
+        seen_strikes = set()
+        for df in (calls, puts):
+            if df is None or getattr(df, 'empty', True):
+                continue
+            window = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
+            for _, row in window.iterrows():
+                strike = float(row['strike'])
+                if strike in seen_strikes:
+                    continue
+                seen_strikes.add(strike)
+                curr_iv = float(row.get('impliedVolatility', 0) or 0)
+                if curr_iv <= 0:
+                    continue
+                buf = _IV_BUFFER[(ticker, strike)]
+                buf.append(curr_iv)
+                if len(buf) < 5:
+                    continue
+                mu  = sum(buf) / len(buf)
+                std = (sum((x - mu) ** 2 for x in buf) / len(buf)) ** 0.5
+                if std < 0.001:
+                    continue
+                z = (curr_iv - mu) / std
+                if z > 2.0:
+                    aid = f'iv_surge:{strike:.0f}'
+                    if _alert_cooldown_ok(ticker, aid, 600):
+                        alerts.append({
+                            'id': aid, 'level': 'flow',
+                            'text': f'IV surge @ {strike:.0f} (+{z:.1f}σ)',
+                            'strike': strike, 'ts': now_iso, 'detail': None,
+                        })
+    except Exception as e:
+        print(f'[compute_flow_alerts] iv_surge: {e}')
+
+    return alerts
+
+
 def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None,
                          delta_adjusted: bool = False, calculate_in_notional: bool = True,
                          ticker: str = None):
@@ -3668,6 +3826,25 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         alerts.append({'level': 'warn', 'text': 'Short-gamma regime — moves may accelerate'})
     elif out['regime'] == 'Long Gamma':
         alerts.append({'level': 'info', 'text': 'Long-gamma regime — dealer hedging dampens moves'})
+
+    # Stamp existing rule-based alerts with id + ts (backwards-compatible)
+    now_iso = datetime.utcnow().isoformat() + 'Z'
+    for a in alerts:
+        a.setdefault('id', f"{a['level']}:{hash(a['text']) & 0xffff}")
+        a.setdefault('ts', now_iso)
+
+    # Append live flow alerts
+    try:
+        flow = compute_flow_alerts(
+            ticker, calls, puts, now_iso, S,
+            strike_range=strike_range,
+            call_wall=out.get('call_wall'),
+            put_wall=out.get('put_wall'),
+        )
+        alerts.extend(flow)
+    except Exception as e:
+        print(f'[compute_trader_stats] compute_flow_alerts failed: {e}')
+
     out['alerts'] = alerts
     return out
 
@@ -9952,18 +10129,34 @@ def index():
             _updateAlertsBadge();
         }
 
+        function _relTime(iso) {
+            if (!iso) return '';
+            const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+            if (mins < 1) return 'now';
+            if (mins < 60) return mins + 'm';
+            return Math.floor(mins / 60) + 'h';
+        }
+
         function renderRailAlerts(list) {
-            _lastRailAlerts = Array.isArray(list) ? list.slice() : [];
+            const MAX_AGE_MIN = 15;
+            const now = Date.now();
+            const filtered = (Array.isArray(list) ? list : []).filter(a => {
+                if (!a.ts) return true;
+                return (now - new Date(a.ts).getTime()) / 60000 <= MAX_AGE_MIN;
+            });
+            _lastRailAlerts = filtered;
             const target = document.getElementById('right-rail-alerts');
             if (target) {
-                if (!_lastRailAlerts.length) {
+                if (!filtered.length) {
                     target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
                 } else {
-                    target.innerHTML = _lastRailAlerts.map(a => {
-                        const cls = a.level === 'warn' ? 'warn' : 'info';
-                        return '<div class="rail-alert-item ' + cls + '">' +
+                    target.innerHTML = filtered.map(a => {
+                        const lvl = ['warn', 'info', 'flow'].includes(a.level) ? a.level : 'info';
+                        const ago = _relTime(a.ts);
+                        return '<div class="rail-alert-item ' + lvl + '">' +
                                    '<span class="rail-alert-dot"></span>' +
                                    '<span class="rail-alert-text">' + _escapeHtml(a.text) + '</span>' +
+                                   (ago ? '<span class="rail-alert-ago">' + ago + '</span>' : '') +
                                '</div>';
                     }).join('');
                 }
