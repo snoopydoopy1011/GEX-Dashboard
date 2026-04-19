@@ -5775,14 +5775,21 @@ def index():
             user-select: none;
             letter-spacing: 0.5px;
         }
+        /* Lives inside the Alerts rail panel (above .dealer-impact). Narrow column
+           context — stack rows vertically rather than the old full-width strip. */
         .price-info {
             display: flex;
-            gap: 15px;
-            align-items: center;
-            font-size: 1.2em;
-            flex-wrap: wrap;
-            width: 100%;
+            flex-direction: column;
+            gap: 2px;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            color: var(--fg-0);
+            font-variant-numeric: tabular-nums;
+            flex: 0 0 auto;
         }
+        .price-info > div { line-height: 1.35; }
+        .price-info [data-live-price] { font-size: 13px; color: var(--fg-0); }
         .green {
             color: var(--call);
         }
@@ -6122,11 +6129,7 @@ def index():
                 grid-template-columns: 1fr;
             }
             .chart-container { height: 350px; }
-            .price-info {
-                flex-direction: column;
-                align-items: flex-start;
-                font-size: 1em;
-            }
+            /* .price-info is already a vertical column in the rail; no override needed. */
             .stream-pill, .btn-ghost { min-height: 36px; }
             .btn-icon { min-height: 36px; }
             button { min-height: 44px; }
@@ -6455,8 +6458,6 @@ def index():
             </div>
         </dialog>
         
-        <div class="price-info" id="price-info"></div>
-
         <div id="trader-stats-strip" class="trader-stats-strip" style="display:none"></div>
 
         <div class="chart-grid" id="chart-grid">
@@ -6484,6 +6485,7 @@ def index():
                     </div>
                 </div>
                 <div class="right-rail-panel" data-rail-panel="alerts">
+                    <div class="price-info" id="price-info"></div>
                     <div class="dealer-impact" id="dealer-impact">
                         <div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>
                         <div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>
@@ -8963,6 +8965,7 @@ def index():
                         '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
                     '</div>' +
                     '<div class="right-rail-panel" data-rail-panel="alerts">' +
+                        '<div class="price-info" id="price-info"></div>' +
                         '<div class="dealer-impact" id="dealer-impact">' +
                             '<div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>' +
                             '<div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>' +
