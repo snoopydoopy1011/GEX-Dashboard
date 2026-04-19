@@ -1225,7 +1225,8 @@ def fetch_options_for_date(ticker, date, exposure_metric="Open Interest", delta_
                 weight = option_data['openInterest'] + option_data['volume']
             else: # Open Interest
                 weight = option_data['openInterest']
-                
+
+            option_data['_weight'] = weight
             exposures = calculate_greek_exposures(option_data, S, weight, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
             option_data.update(exposures)
 
@@ -1243,7 +1244,8 @@ def fetch_options_for_date(ticker, date, exposure_metric="Open Interest", delta_
                 weight = option_data['openInterest'] + option_data['volume']
             else: # Open Interest
                 weight = option_data['openInterest']
-                
+
+            option_data['_weight'] = weight
             exposures = calculate_greek_exposures(option_data, S, weight, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
             option_data.update(exposures)
 
@@ -1363,12 +1365,16 @@ def calculate_color(flag, S, K, t, sigma, r=0.02, q=0):
     except:
         return 0
 
-def calculate_greek_exposures(option, S, weight, delta_adjusted: bool = False, calculate_in_notional: bool = True):
-    """Calculate accurate Greek exposures per $1 move, weighted by the provided weight."""
+def calculate_greek_exposures(option, S, weight, delta_adjusted: bool = False, calculate_in_notional: bool = True, iv_override=None):
+    """Calculate accurate Greek exposures per $1 move, weighted by the provided weight.
+
+    iv_override lets scenario callers re-run the same formula at a shifted IV
+    without mutating the source option dict.
+    """
     contract_size = 100
-    
+
     # Recalculate Greeks to ensure consistency with S and t
-    vol = option['impliedVolatility']
+    vol = option['impliedVolatility'] if iv_override is None else iv_override
     
     # Calculate time to expiration in years
     expiry_date = option['expiration']
@@ -2400,20 +2406,31 @@ def get_price_history(ticker, timeframe=1):
         # Get current time in EST
         est = datetime.now(pytz.timezone('US/Eastern'))
         current_date = est.date()
-        
-        # Calculate start date (5 days ago to ensure we get previous trading day)
-        start_date = datetime.combine(current_date - timedelta(days=5), datetime.min.time())
+
+        # Map timeframe (minutes) -> trading-day lookback. Finer timeframes get less
+        # history to keep payload size bounded; coarser timeframes stretch further back
+        # so the chart shows meaningful structure without wasting bandwidth on 1-min bars.
+        PERIOD_BY_TF = {1: 5, 5: 20, 15: 30, 30: 30, 60: 90}
+        period_days = PERIOD_BY_TF.get(timeframe, 20)
+
+        # +5 calendar-day cushion covers weekends/holidays that filter_market_hours() drops.
+        start_date = datetime.combine(current_date - timedelta(days=period_days + 5), datetime.min.time())
         end_date = datetime.combine(current_date + timedelta(days=1), datetime.min.time())
-        
+
         # Schwab API only supports minute frequencies: 1, 5, 10, 15, 30.
         # For 60-min (hourly), fetch 30-min candles and aggregate after.
         api_frequency = 30 if timeframe == 60 else timeframe
+
+        # Schwab's `period` param strict-validates to {1,2,3,4,5,10} for periodType="day".
+        # startDate/endDate drive the actual fetch window, so cap `period` at 10 to stay
+        # within the enum while letting `period_days` control lookback above.
+        api_period = min(period_days, 10)
 
         # Convert dates to milliseconds since epoch
         response = client.price_history(
             symbol=ticker,
             periodType="day",
-            period=5,  # Get 5 days of data
+            period=api_period,
             frequencyType="minute",
             frequency=api_frequency,
             startDate=int(start_date.timestamp() * 1000),
@@ -2462,17 +2479,18 @@ def get_price_history(ticker, timeframe=1):
         raise Exception(msg)
 
 def filter_market_hours(candles):
-    """Filter candles to only include regular market hours (9:30 AM - 4:00 PM ET)"""
+    """Filter candles to trading-day hours: pre-market 04:00 ET through after-hours 20:00 ET.
+    Overnight gap (20:00-04:00) is excluded because Schwab priceHistory returns no bars there."""
     filtered_candles = []
     for candle in candles:
         dt = datetime.fromtimestamp(candle['datetime']/1000)
         # Convert to Eastern Time
         et = dt.astimezone(pytz.timezone('US/Eastern'))
-        # Check if it's a weekday and within market hours
+        # Check if it's a weekday and within extended trading hours
         if et.weekday() < 5:  # 0-4 is Monday-Friday
-            market_open = et.replace(hour=9, minute=30, second=0, microsecond=0)
-            market_close = et.replace(hour=16, minute=0, second=0, microsecond=0)
-            if market_open <= et <= market_close:
+            session_open  = et.replace(hour=4,  minute=0, second=0, microsecond=0)
+            session_close = et.replace(hour=20, minute=0, second=0, microsecond=0)
+            if session_open <= et <= session_close:
                 filtered_candles.append(candle)
     return filtered_candles
 
@@ -3256,6 +3274,8 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     out = {
         'call_wall': None, 'put_wall': None, 'gamma_flip': None,
         'em_upper': None, 'em_lower': None,
+        'call_wall_2': None, 'put_wall_2': None, 'hvl': None,
+        'em_upper_2': None, 'em_lower_2': None,
     }
     if S is None:
         return out
@@ -3276,14 +3296,26 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     if strikes:
         net = {s: call_map.get(s, 0) - put_map.get(s, 0) for s in strikes}
 
-        pos_strikes = [(s, v) for s, v in net.items() if v > 0]
-        neg_strikes = [(s, v) for s, v in net.items() if v < 0]
+        pos_strikes = sorted(
+            [(s, v) for s, v in net.items() if v > 0],
+            key=lambda kv: kv[1], reverse=True,
+        )
+        neg_strikes = sorted(
+            [(s, v) for s, v in net.items() if v < 0],
+            key=lambda kv: kv[1],
+        )
         if pos_strikes:
-            cw_strike, cw_val = max(pos_strikes, key=lambda kv: kv[1])
+            cw_strike, cw_val = pos_strikes[0]
             out['call_wall'] = {'price': float(cw_strike), 'gex': float(cw_val)}
+            if len(pos_strikes) > 1:
+                cw2_strike, cw2_val = pos_strikes[1]
+                out['call_wall_2'] = {'price': float(cw2_strike), 'gex': float(cw2_val)}
         if neg_strikes:
-            pw_strike, pw_val = min(neg_strikes, key=lambda kv: kv[1])
+            pw_strike, pw_val = neg_strikes[0]
             out['put_wall'] = {'price': float(pw_strike), 'gex': float(pw_val)}
+            if len(neg_strikes) > 1:
+                pw2_strike, pw2_val = neg_strikes[1]
+                out['put_wall_2'] = {'price': float(pw2_strike), 'gex': float(pw2_val)}
 
         # Gamma flip: cumulative net GEX from lowest strike up; find first
         # sign change. Interpolate between the bracketing strikes for a
@@ -3305,11 +3337,110 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     if em:
         out['em_upper'] = {'price': float(em['upper']), 'move': float(em['move'])}
         out['em_lower'] = {'price': float(em['lower']), 'move': float(em['move'])}
+        out['em_upper_2'] = {'price': float(S + 2 * em['move']), 'move': float(em['move'])}
+        out['em_lower_2'] = {'price': float(S - 2 * em['move']), 'move': float(em['move'])}
+
+    # HVL — highest-volume strike (fallback to openInterest for illiquid names).
+    try:
+        parts = []
+        for df in (c, p):
+            if df is None or df.empty:
+                continue
+            col = 'volume' if 'volume' in df.columns else ('openInterest' if 'openInterest' in df.columns else None)
+            if col:
+                parts.append(df[['strike', col]].rename(columns={col: '_w'}))
+        if parts:
+            combined = pd.concat(parts, ignore_index=True)
+            combined['_w'] = pd.to_numeric(combined['_w'], errors='coerce').fillna(0.0)
+            if combined['_w'].sum() <= 0:
+                # fallback to openInterest if volume was all zero
+                oi_parts = []
+                for df in (c, p):
+                    if df is not None and not df.empty and 'openInterest' in df.columns:
+                        oi_parts.append(df[['strike', 'openInterest']].rename(columns={'openInterest': '_w'}))
+                if oi_parts:
+                    combined = pd.concat(oi_parts, ignore_index=True)
+                    combined['_w'] = pd.to_numeric(combined['_w'], errors='coerce').fillna(0.0)
+            grouped = combined.groupby('strike')['_w'].sum()
+            if not grouped.empty and grouped.max() > 0:
+                out['hvl'] = {'price': float(grouped.idxmax()), 'weight': float(grouped.max())}
+    except Exception:
+        pass
 
     return out
 
 
-def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None):
+def _recompute_gex_row(row, S, iv_override=None,
+                       delta_adjusted: bool = False, calculate_in_notional: bool = True):
+    """Return GEX for a single option row at spot S, optionally with a shifted IV.
+
+    Delegates to calculate_greek_exposures so the formula can never drift from the
+    one used at chain-fetch time. Requires the row to carry '_weight' (set by the
+    chain fetcher) — falls back to openInterest if the row pre-dates that change.
+    """
+    try:
+        weight = row.get('_weight')
+        if weight is None:
+            weight = row.get('openInterest', 0) or 0
+        opt = {
+            'contractSymbol': row.get('contractSymbol', ''),
+            'strike': float(row['strike']),
+            'impliedVolatility': float(row.get('impliedVolatility', 0.0) or 0.0),
+            'expiration': row['expiration'],
+        }
+        return float(calculate_greek_exposures(
+            opt, S, weight,
+            delta_adjusted=delta_adjusted,
+            calculate_in_notional=calculate_in_notional,
+            iv_override=iv_override,
+        )['GEX'])
+    except Exception:
+        return 0.0
+
+
+def compute_scenario_gex(calls, puts, S, spot_shift=0.0, iv_shift=0.0,
+                         strike_range=0.02, selected_expiries=None,
+                         delta_adjusted: bool = False, calculate_in_notional: bool = True):
+    """Re-sum net GEX under a spot and/or IV shift.
+
+    No new math — every row is fed back through calculate_greek_exposures with
+    the shifted spot/IV. Strike window is anchored at the *shifted* spot so the
+    sample of strikes tracks the dealer's effective book under the scenario.
+    """
+    S_new = float(S) * (1.0 + float(spot_shift))
+    if S_new <= 0:
+        return {'net_gex': 0.0, 'regime': 'Long Gamma'}
+    lo, hi = S_new * (1.0 - strike_range), S_new * (1.0 + strike_range)
+
+    def _sum(df):
+        if df is None or df.empty:
+            return 0.0
+        f = df
+        if selected_expiries and 'expiration_date' in f.columns:
+            f = f[f['expiration_date'].isin(selected_expiries)]
+        f = f[(f['strike'] >= lo) & (f['strike'] <= hi)]
+        if f.empty:
+            return 0.0
+        total = 0.0
+        for _, r in f.iterrows():
+            iv_base = float(r.get('impliedVolatility', 0.0) or 0.0)
+            iv_new = max(0.0, iv_base + float(iv_shift)) if iv_base > 0 else iv_base
+            total += _recompute_gex_row(
+                r, S_new,
+                iv_override=(iv_new if iv_shift else None),
+                delta_adjusted=delta_adjusted,
+                calculate_in_notional=calculate_in_notional,
+            )
+        return total
+
+    call_gex = _sum(calls)
+    put_gex  = _sum(puts)
+    net = call_gex - put_gex
+    return {'net_gex': float(net), 'regime': 'Long Gamma' if net >= 0 else 'Short Gamma'}
+
+
+def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None,
+                         delta_adjusted: bool = False, calculate_in_notional: bool = True):
     """High-level trader KPIs + a short alerts list, for the header strip.
 
     Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
@@ -3323,6 +3454,13 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'call_wall': None, 'put_wall': None, 'gamma_flip': None,
         'spot': float(S) if S is not None else None,
         'alerts': [],
+        # Stage 2 — dealer hedge impact block
+        'hedge_on_up_1pct':   None,
+        'hedge_on_down_1pct': None,
+        'vanna_delta_shift_per_1volpt': None,
+        'charm_by_close':     None,
+        # Stage 3 — scenario stress table
+        'scenarios': [],
     }
     if S is None:
         return out
@@ -3338,14 +3476,14 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     if out['em_move'] is not None and S:
         out['em_pct'] = round(out['em_move'] / S * 100, 2)
 
-    def _window_sum(df):
-        if df is None or df.empty or 'GEX' not in df.columns:
+    def _window_sum(df, col='GEX'):
+        if df is None or df.empty or col not in df.columns:
             return 0.0
         if selected_expiries and 'expiration_date' in df.columns:
             df = df[df['expiration_date'].isin(selected_expiries)]
         lo = S * (1 - strike_range); hi = S * (1 + strike_range)
         f = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
-        return float(f['GEX'].sum()) if not f.empty else 0.0
+        return float(f[col].sum()) if not f.empty else 0.0
 
     call_gex = _window_sum(calls)
     put_gex  = _window_sum(puts)
@@ -3356,10 +3494,82 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     # display as "Hedging Impact per 1%".
     out['hedge_per_1pct'] = 0.01 * net_gex
 
+    # Dealer Hedge Impact block (Stage 2)
+    # Spot ±1%: same 1% hedge number, signed so ± sides render independently.
+    out['hedge_on_up_1pct']   = +0.01 * net_gex
+    out['hedge_on_down_1pct'] = -0.01 * net_gex
+
+    # Vanna delta-shift per +1 vol point. VEX row values already carry the *0.01
+    # factor (see compute_greek_exposures :1408), so the window sum is directly
+    # "Δ$ per +1 vol point". Negate on the frontend for the -1 vol side.
+    vex_call = _window_sum(calls, col='VEX')
+    vex_put  = _window_sum(puts,  col='VEX')
+    out['vanna_delta_shift_per_1volpt'] = vex_call + vex_put
+
+    # Charm-by-close. Row Charm carries /365 (see :1412) → per *calendar day*.
+    # Fraction of calendar day from now to 16:00 ET is hours_left / 24
+    # (not /6.5 — that would conflate calendar-day and session-day units).
+    try:
+        now_et = datetime.now(pytz.timezone('US/Eastern'))
+        close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        hours_left = max(0.0, (close_et - now_et).total_seconds() / 3600.0)
+        charm_call = _window_sum(calls, col='Charm')
+        charm_put  = _window_sum(puts,  col='Charm')
+        out['charm_by_close'] = (charm_call + charm_put) * (hours_left / 24.0)
+    except Exception:
+        out['charm_by_close'] = None
+
     if out['gamma_flip'] is not None:
         out['regime'] = 'Long Gamma' if S >= out['gamma_flip'] else 'Short Gamma'
     else:
         out['regime'] = 'Long Gamma' if net_gex >= 0 else 'Short Gamma'
+
+    # Scenario GEX table (Stage 3). Seven rows: current + ±2% spot + ±5 vol pts
+    # + two diagonals. "Current" mirrors out['net_gex'] exactly so the table can't
+    # disagree with the KPI strip; the other 6 re-sum row-by-row at shifted
+    # spot/IV via _recompute_gex_row.
+    try:
+        base_abs = abs(out['net_gex']) if out['net_gex'] else 1.0
+        def _mag(v):
+            if v is None or not base_abs:
+                return 'low'
+            r = abs(v) / max(base_abs, 1.0)
+            return 'high' if r >= 0.75 else ('med' if r >= 0.35 else 'low')
+        scenarios_spec = [
+            ('Current',      0.0,    0.0),
+            ('+2% spot',    +0.02,   0.0),
+            ('-2% spot',    -0.02,   0.0),
+            ('+5 vol',       0.0,   +0.05),
+            ('-5 vol',       0.0,   -0.05),
+            ('+2%/-5 vol',  +0.02, -0.05),
+            ('-2%/+5 vol',  -0.02, +0.05),
+        ]
+        rows = []
+        for label, ss, ivs in scenarios_spec:
+            if ss == 0.0 and ivs == 0.0:
+                net = out['net_gex']
+                regime = out['regime']
+            else:
+                r = compute_scenario_gex(
+                    calls, puts, S,
+                    spot_shift=ss, iv_shift=ivs,
+                    strike_range=strike_range,
+                    selected_expiries=selected_expiries,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
+                )
+                net = r['net_gex']
+                regime = r['regime']
+            rows.append({
+                'label': label,
+                'net_gex': net,
+                'regime': regime,
+                'magnitude': _mag(net),
+            })
+        out['scenarios'] = rows
+    except Exception as e:
+        print(f"[compute_trader_stats] scenarios build failed: {e}")
+        out['scenarios'] = []
 
     alerts = []
     def _near(a, b, pct):
@@ -3421,13 +3631,13 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         current_day_candles = [c for c in sorted_candles
                                if datetime.fromtimestamp(c['datetime'] / 1000, est).date() == most_recent_date]
 
-    # Apply Heikin-Ashi using all candles as seed, then slice to current day
+    # Display the full multi-day window so the chart shows ~20+ RTH sessions.
+    # current_day_candles is still computed above because current_day_start_time
+    # (daily VWAP anchor) depends on it.
     if use_heikin_ashi:
-        all_ha = convert_to_heikin_ashi(sorted_candles)
-        day_start_idx = len(sorted_candles) - len(current_day_candles)
-        display_candles = all_ha[day_start_idx:]
+        display_candles = convert_to_heikin_ashi(sorted_candles)
     else:
-        display_candles = current_day_candles
+        display_candles = sorted_candles
 
     # Previous day close
     previous_day_close = None
@@ -5187,19 +5397,22 @@ def index():
         }
         .chart-grid {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) 300px;
+            grid-template-columns: minmax(0, 1fr) var(--gex-col-w, 300px) 320px;
             column-gap: 4px;
             row-gap: 5px;
             width: 100%;
             align-items: stretch;
         }
-        /* Row 1: toolbar (col 1) + right-rail tabs (col 2) — same grid row, so both stretch to the row's max height. */
+        .chart-grid.gex-collapsed { --gex-col-w: 28px; }
+        /* Row 1: toolbar (col 1) + GEX column header (col 2) + rail tabs (col 3). */
         .chart-grid > .tv-toolbar-container { grid-column: 1; }
-        .chart-grid > .right-rail-tabs      { grid-column: 2; }
-        /* Row 2: price chart (col 1) + right-rail panels (col 2). Same row → same height. */
+        .chart-grid > .gex-col-header       { grid-column: 2; }
+        .chart-grid > .right-rail-tabs      { grid-column: 3; }
+        /* Row 2: price chart (col 1) + GEX column (col 2) + rail panels (col 3). */
         .chart-grid > .price-chart-container { grid-column: 1; }
-        .chart-grid > .right-rail-panels     { grid-column: 2; }
-        /* Remaining rows span both columns. */
+        .chart-grid > .gex-column            { grid-column: 2; }
+        .chart-grid > .right-rail-panels     { grid-column: 3; }
+        /* Remaining rows span all columns. */
         .chart-grid > #secondary-tabs { grid-column: 1 / -1; }
         .chart-grid > .charts-grid    { grid-column: 1 / -1; }
 
@@ -5289,6 +5502,27 @@ def index():
             vertical-align: middle;
         }
         .right-rail-tab .tab-badge.visible { display: inline-block; }
+
+        /* Dealer Hedge Impact block (lives above the GEX chart inside the GEX rail panel) */
+        .dealer-impact {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 4px 12px;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            flex: 0 0 auto;
+        }
+        .dealer-impact .label { color: var(--fg-1); line-height: 1.25; }
+        .dealer-impact .sub   { color: var(--fg-2); font-size: 11px; margin-top: -1px; }
+        .dealer-impact .val   {
+            font-variant-numeric: tabular-nums;
+            text-align: right;
+            align-self: center;
+            color: var(--fg-0);
+        }
+        .dealer-impact .val.pos { color: var(--call); }
+        .dealer-impact .val.neg { color: var(--put); }
 
         /* Alerts panel */
         .rail-alerts-list {
@@ -5387,6 +5621,53 @@ def index():
             font-size: 11px;
         }
 
+        /* Scenario GEX table (Stage 3) */
+        .scenario-table-wrap {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            min-height: 0;
+        }
+        .scenario-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+        }
+        .scenario-table th {
+            color: var(--fg-2);
+            font-weight: 500;
+            text-align: left;
+            padding: 6px 4px;
+            border-bottom: 1px solid var(--border);
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            font-size: 10px;
+        }
+        .scenario-table th.num { text-align: right; }
+        .scenario-table td {
+            padding: 8px 4px;
+            border-bottom: 1px solid var(--bg-2);
+            color: var(--fg-0);
+        }
+        .scenario-table td.num { text-align: right; }
+        .scenario-table td.num.pos { color: var(--call); }
+        .scenario-table td.num.neg { color: var(--put); }
+        .scenario-table td .mag {
+            color: var(--fg-2);
+            font-size: 10px;
+            margin-left: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .scenario-table tr.current td { background: var(--bg-1); }
+        .scenario-table .scn-empty {
+            color: var(--fg-2);
+            text-align: center;
+            padding: 16px 4px;
+            font-size: 11px;
+        }
+
         .gex-side-panel-wrap {
             background: var(--bg-0);
             border-radius: 0;
@@ -5396,6 +5677,55 @@ def index():
             min-height: 0;
         }
         #gex-side-panel { flex: 1; min-height: 0; }
+
+        /* GEX column (always-on, collapsible) — lives between chart and rail */
+        .gex-col-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: #1a1a1a;
+            border-bottom: 1px solid var(--bg-2);
+            border-radius: 10px 10px 0 0;
+            padding: 0 8px;
+            overflow: hidden;
+            min-width: 0;
+        }
+        .gex-col-header .gex-col-title {
+            flex: 1;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--fg-0);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .gex-col-toggle {
+            background: transparent;
+            color: var(--fg-1);
+            border: none;
+            padding: 4px 6px;
+            font-size: 13px;
+            line-height: 1;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .gex-col-toggle:hover { color: var(--fg-0); background: var(--bg-2); }
+        .gex-column {
+            position: relative;
+            background: var(--bg-0);
+            height: 680px;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            overflow: hidden;
+        }
+        .chart-grid.gex-collapsed .gex-col-header .gex-col-title,
+        .chart-grid.gex-collapsed .gex-column > .gex-side-panel-wrap {
+            display: none;
+        }
+        .chart-grid.gex-collapsed .gex-col-header { padding: 0 2px; justify-content: center; }
 
         /* ── Trader stats KPI strip ────────────────────────────────── */
         .trader-stats-strip {
@@ -5487,6 +5817,12 @@ def index():
             z-index: 4;
             pointer-events: none;
             overflow: hidden;
+        }
+        .tv-eth-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+            pointer-events: none;
         }
         .tv-historical-bubble {
             position: absolute;
@@ -5706,14 +6042,21 @@ def index():
             user-select: none;
             letter-spacing: 0.5px;
         }
+        /* Lives inside the Alerts rail panel (above .dealer-impact). Narrow column
+           context — stack rows vertically rather than the old full-width strip. */
         .price-info {
             display: flex;
-            gap: 15px;
-            align-items: center;
-            font-size: 1.2em;
-            flex-wrap: wrap;
-            width: 100%;
+            flex-direction: column;
+            gap: 2px;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            color: var(--fg-0);
+            font-variant-numeric: tabular-nums;
+            flex: 0 0 auto;
         }
+        .price-info > div { line-height: 1.35; }
+        .price-info [data-live-price] { font-size: 13px; color: var(--fg-0); }
         .green {
             color: var(--call);
         }
@@ -5903,6 +6246,16 @@ def index():
             cursor: pointer;
         }
         .visibility-toggle input { accent-color: var(--accent); }
+        .visibility-group-sep {
+            grid-column: 1 / -1;
+            margin-top: 4px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--fg-2);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
         /* Settings modal (gear icon) — color pickers and coloring mode */
         .settings-modal {
             border: 1px solid var(--border);
@@ -5998,13 +6351,16 @@ def index():
                 grid-template-columns: 1fr;
             }
             .chart-grid > .tv-toolbar-container,
+            .chart-grid > .gex-col-header,
             .chart-grid > .right-rail-tabs,
             .chart-grid > .price-chart-container,
+            .chart-grid > .gex-column,
             .chart-grid > .right-rail-panels,
             .chart-grid > #secondary-tabs,
             .chart-grid > .charts-grid {
                 grid-column: 1;
             }
+            .gex-column { height: 420px; }
             .right-rail-panels { height: 420px; }
         }
 
@@ -6053,11 +6409,7 @@ def index():
                 grid-template-columns: 1fr;
             }
             .chart-container { height: 350px; }
-            .price-info {
-                flex-direction: column;
-                align-items: flex-start;
-                font-size: 1em;
-            }
+            /* .price-info is already a vertical column in the rail; no override needed. */
             .stream-pill, .btn-ghost { min-height: 36px; }
             .btn-icon { min-height: 36px; }
             button { min-height: 44px; }
@@ -6386,16 +6738,18 @@ def index():
             </div>
         </dialog>
         
-        <div class="price-info" id="price-info"></div>
-
         <div id="trader-stats-strip" class="trader-stats-strip" style="display:none"></div>
 
         <div class="chart-grid" id="chart-grid">
             <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
+            <div class="gex-col-header" id="gex-col-header">
+                <div class="gex-col-title">GEX</div>
+                <button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>
+            </div>
             <div class="right-rail-tabs" id="right-rail-tabs">
-                <button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>
-                <button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
+                <button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
+                <button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>
             </div>
             <div class="price-chart-container">
                 <div class="chart-container" id="price-chart"></div>
@@ -6408,13 +6762,21 @@ def index():
                     <div id="macd-chart" style="height:120px"></div>
                 </div>
             </div>
-            <div class="right-rail-panels" id="right-rail-panels">
-                <div class="right-rail-panel active" data-rail-panel="gex">
-                    <div class="gex-side-panel-wrap">
-                        <div id="gex-side-panel"></div>
-                    </div>
+            <div class="gex-column" id="gex-column">
+                <div class="gex-side-panel-wrap">
+                    <div id="gex-side-panel"></div>
                 </div>
-                <div class="right-rail-panel" data-rail-panel="alerts">
+            </div>
+            <div class="right-rail-panels" id="right-rail-panels">
+                <div class="right-rail-panel active" data-rail-panel="alerts">
+                    <div class="price-info" id="price-info"></div>
+                    <div class="dealer-impact" id="dealer-impact">
+                        <div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>
+                        <div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>
+                        <div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>
+                        <div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>
+                        <div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>
+                    </div>
                     <div class="rail-alerts-list" id="right-rail-alerts">
                         <div class="rail-alerts-empty">No active alerts.</div>
                     </div>
@@ -6422,6 +6784,14 @@ def index():
                 <div class="right-rail-panel" data-rail-panel="levels">
                     <div class="rail-levels-table" id="right-rail-levels">
                         <div class="lvl-empty">Key levels load with stream data.</div>
+                    </div>
+                </div>
+                <div class="right-rail-panel" data-rail-panel="scenarios">
+                    <div class="scenario-table-wrap">
+                        <table class="scenario-table" id="scenario-table">
+                            <thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>
+                            <tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -6474,6 +6844,7 @@ def index():
         let tvExposurePriceLines = [];
         let tvExpectedMovePriceLines = [];
         let tvKeyLevelLines = [];
+        let _lastKeyLevels = null;
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
         let tvHistoricalOverlayPending = false;
@@ -6506,11 +6877,15 @@ def index():
             'price','gamma','delta','vanna','charm','speed','vomma','color',
             'options_volume','open_interest','volume','large_trades','premium','centroid'
         ];
+        // Price-line overlays on the TV candle chart (not Plotly containers).
+        // Share the chart-visibility store but render under a separate drawer group.
+        const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2'];
         const CHART_VISIBILITY_DEFAULTS = {
             price: true, gamma: true, delta: true, vanna: true, charm: true,
             speed: false, vomma: false, color: false,
             options_volume: true, open_interest: false, volume: true,
-            large_trades: true, premium: true, centroid: true
+            large_trades: true, premium: true, centroid: true,
+            hvl: true, em_2s: true, walls_2: true
         };
         const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
         const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
@@ -6518,7 +6893,7 @@ def index():
             let stored = {};
             try { stored = JSON.parse(localStorage.getItem(CHART_VISIBILITY_KEY) || '{}'); } catch(e) {}
             const out = {};
-            CHART_IDS.forEach(id => {
+            CHART_IDS.concat(LINE_OVERLAY_IDS).forEach(id => {
                 out[id] = (id in stored) ? !!stored[id] : CHART_VISIBILITY_DEFAULTS[id];
             });
             return out;
@@ -6526,7 +6901,7 @@ def index():
         function setAllChartVisibility(map) {
             const merged = getChartVisibility();
             Object.keys(map || {}).forEach(k => {
-                if (CHART_IDS.includes(k)) merged[k] = !!map[k];
+                if (CHART_IDS.includes(k) || LINE_OVERLAY_IDS.includes(k)) merged[k] = !!map[k];
             });
             try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
         }
@@ -8541,8 +8916,81 @@ def index():
             tvHistoricalOverlayPending = true;
             requestAnimationFrame(() => {
                 tvHistoricalOverlayPending = false;
+                drawTVEthOverlay();
                 drawTVHistoricalOverlay();
             });
+        }
+
+        function ensureTVEthOverlay() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let canvas = container.querySelector('.tv-eth-overlay');
+            if (!canvas) {
+                canvas = document.createElement('canvas');
+                canvas.className = 'tv-eth-overlay';
+                container.appendChild(canvas);
+            }
+            return canvas;
+        }
+
+        // Cached ET-hour/minute formatter — creation is expensive vs. per-tick redraws.
+        const _tvEthFmt = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            hour: '2-digit', minute: '2-digit', hour12: false
+        });
+        function _tvIsEth(unixSec) {
+            const parts = _tvEthFmt.formatToParts(new Date(unixSec * 1000));
+            let h = +parts.find(p => p.type === 'hour').value;
+            const m = +parts.find(p => p.type === 'minute').value;
+            if (h === 24) h = 0;  // Safari/older Intl quirk
+            return h < 9 || (h === 9 && m < 30) || h >= 16;
+        }
+
+        function drawTVEthOverlay() {
+            const canvas = ensureTVEthOverlay();
+            const container = document.getElementById('price-chart');
+            if (!canvas || !container || !tvPriceChart || !tvLastCandles.length) return;
+            const bounds = container.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            if (canvas.width !== bounds.width * dpr || canvas.height !== bounds.height * dpr) {
+                canvas.width = bounds.width * dpr;
+                canvas.height = bounds.height * dpr;
+                canvas.style.width = bounds.width + 'px';
+                canvas.style.height = bounds.height + 'px';
+            }
+            const ctx = canvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, bounds.width, bounds.height);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.035)';
+
+            const ts = tvPriceChart.timeScale();
+            // Group contiguous ETH candles into runs; paint one rect per run.
+            let runStart = null, runEnd = null;
+            const flush = () => {
+                if (runStart === null) return;
+                const xs = ts.timeToCoordinate(runStart);
+                const xe = ts.timeToCoordinate(runEnd);
+                if (xs !== null && xe !== null) {
+                    const candleSpan = tvLastCandles.length > 1
+                        ? tvLastCandles[1].time - tvLastCandles[0].time
+                        : 300;
+                    const xeEnd = ts.timeToCoordinate(runEnd + candleSpan);
+                    const right = (xeEnd !== null) ? xeEnd : (xe + 2);
+                    ctx.fillRect(xs, 0, right - xs, bounds.height);
+                }
+                runStart = null;
+                runEnd = null;
+            };
+            for (let i = 0; i < tvLastCandles.length; i++) {
+                const c = tvLastCandles[i];
+                if (_tvIsEth(c.time)) {
+                    if (runStart === null) runStart = c.time;
+                    runEnd = c.time;
+                } else {
+                    flush();
+                }
+            }
+            flush();
         }
 
         function renderTVPriceChart(priceData) {
@@ -8602,8 +9050,17 @@ def index():
                         secondsVisible:   false,
                         fixLeftEdge:      false,
                         fixRightEdge:     false,
-                        tickMarkFormatter: (time) => {
+                        // TickMarkType: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds.
+                        // Show dates ("Apr 15") at day/month/year boundaries so multi-day views
+                        // are readable without vertical separators.
+                        tickMarkFormatter: (time, tickMarkType) => {
                             const d = new Date(time * 1000);
+                            if (tickMarkType === 0 || tickMarkType === 1 || tickMarkType === 2) {
+                                return d.toLocaleDateString('en-US', {
+                                    month: 'short', day: 'numeric',
+                                    timeZone: 'America/New_York'
+                                });
+                            }
                             return d.toLocaleTimeString('en-US', {
                                 hour: '2-digit', minute: '2-digit',
                                 hour12: false, timeZone: 'America/New_York'
@@ -8767,15 +9224,26 @@ def index():
                 toolbar.id = 'tv-toolbar-container';
                 grid.appendChild(toolbar);
             }
+            let gexHeader = grid.querySelector('.gex-col-header');
+            if (!gexHeader) {
+                gexHeader = document.createElement('div');
+                gexHeader.className = 'gex-col-header';
+                gexHeader.id = 'gex-col-header';
+                gexHeader.innerHTML =
+                    '<div class="gex-col-title">GEX</div>' +
+                    '<button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>';
+                grid.appendChild(gexHeader);
+                wireGexColumnToggle();
+            }
             let tabs = grid.querySelector('.right-rail-tabs');
             if (!tabs) {
                 tabs = document.createElement('div');
                 tabs.className = 'right-rail-tabs';
                 tabs.id = 'right-rail-tabs';
                 tabs.innerHTML =
-                    '<button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>' +
-                    '<button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
-                    '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>';
+                    '<button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>';
                 grid.appendChild(tabs);
                 wireRightRailTabs();
             }
@@ -8795,16 +9263,29 @@ def index():
             priceContainer.appendChild(macdPane);
             grid.appendChild(priceContainer);
 
+            let gexCol = grid.querySelector('.gex-column');
+            if (!gexCol) {
+                gexCol = document.createElement('div');
+                gexCol.className = 'gex-column';
+                gexCol.id = 'gex-column';
+                gexCol.innerHTML = '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>';
+                grid.appendChild(gexCol);
+            }
             let railPanels = grid.querySelector('.right-rail-panels');
             if (!railPanels) {
                 railPanels = document.createElement('div');
                 railPanels.className = 'right-rail-panels';
                 railPanels.id = 'right-rail-panels';
                 railPanels.innerHTML =
-                    '<div class="right-rail-panel active" data-rail-panel="gex">' +
-                        '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
-                    '</div>' +
-                    '<div class="right-rail-panel" data-rail-panel="alerts">' +
+                    '<div class="right-rail-panel active" data-rail-panel="alerts">' +
+                        '<div class="price-info" id="price-info"></div>' +
+                        '<div class="dealer-impact" id="dealer-impact">' +
+                            '<div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>' +
+                            '<div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>' +
+                            '<div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>' +
+                            '<div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>' +
+                            '<div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>' +
+                        '</div>' +
                         '<div class="rail-alerts-list" id="right-rail-alerts">' +
                             '<div class="rail-alerts-empty">No active alerts.</div>' +
                         '</div>' +
@@ -8812,6 +9293,14 @@ def index():
                     '<div class="right-rail-panel" data-rail-panel="levels">' +
                         '<div class="rail-levels-table" id="right-rail-levels">' +
                             '<div class="lvl-empty">Key levels load with stream data.</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="right-rail-panel" data-rail-panel="scenarios">' +
+                        '<div class="scenario-table-wrap">' +
+                            '<table class="scenario-table" id="scenario-table">' +
+                                '<thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>' +
+                                '<tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>' +
+                            '</table>' +
                         '</div>' +
                     '</div>';
                 grid.appendChild(railPanels);
@@ -8821,11 +9310,66 @@ def index():
         }
 
         function showPriceChartUI() {
-            const ids = ['tv-toolbar-container', 'right-rail-tabs', 'right-rail-panels'];
+            const ids = ['tv-toolbar-container', 'gex-col-header', 'gex-column', 'right-rail-tabs', 'right-rail-panels'];
             ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
             const pc = document.querySelector('.price-chart-container');
             if (pc) pc.style.display = 'block';
         }
+
+        // ── GEX column collapse state ────────────────────────────────────
+        const GEX_COL_COLLAPSE_KEY = 'gex.sidePanelCollapsed';
+        function isGexColumnCollapsed() {
+            const grid = document.getElementById('chart-grid');
+            return !!(grid && grid.classList.contains('gex-collapsed'));
+        }
+        function applyGexColumnCollapse(collapsed) {
+            const grid = document.getElementById('chart-grid');
+            const btn  = document.getElementById('gex-col-toggle');
+            if (!grid) return;
+            grid.classList.toggle('gex-collapsed', !!collapsed);
+            if (btn) {
+                btn.textContent = collapsed ? '›' : '‹';
+                btn.title = collapsed ? 'Expand GEX' : 'Collapse GEX';
+            }
+            if (!collapsed) {
+                // Re-render last GEX data (renders were skipped while collapsed) then resize + sync
+                const target = document.getElementById('gex-side-panel');
+                if (target && _lastGexPanelJson) {
+                    try {
+                        const parsed = typeof _lastGexPanelJson === 'string'
+                            ? JSON.parse(_lastGexPanelJson) : _lastGexPanelJson;
+                        const config = { displayModeBar: false, responsive: true };
+                        Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
+                            .then(() => syncGexPanelYAxisToTV());
+                    } catch (e) {}
+                }
+                if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
+                scheduleGexPanelSync();
+            }
+            // Notify TV chart the container width changed so candles reflow
+            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+        }
+        function wireGexColumnToggle() {
+            const btn = document.getElementById('gex-col-toggle');
+            if (!btn || btn.__wired) return;
+            btn.__wired = true;
+            btn.addEventListener('click', () => {
+                const next = !isGexColumnCollapsed();
+                try { localStorage.setItem(GEX_COL_COLLAPSE_KEY, next ? '1' : '0'); } catch (e) {}
+                applyGexColumnCollapse(next);
+            });
+        }
+        (function restoreGexColumnCollapse() {
+            let collapsed = false;
+            try { collapsed = localStorage.getItem(GEX_COL_COLLAPSE_KEY) === '1'; } catch (e) {}
+            // Defer until DOM is parsed
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => { applyGexColumnCollapse(collapsed); wireGexColumnToggle(); });
+            } else {
+                applyGexColumnCollapse(collapsed);
+                wireGexColumnToggle();
+            }
+        })();
 
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
@@ -8840,16 +9384,19 @@ def index():
             }
         }
 
-        // ── Right-rail tab state (GEX / Alerts / Levels) ─────────────────
+        // ── Right-rail tab state (Alerts / Levels / Scenarios) ───────────
         const RAIL_TAB_KEY = 'gex.rightRailTab';
-        let activeRailTab = 'gex';
+        let activeRailTab = 'alerts';
         try {
             const saved = localStorage.getItem(RAIL_TAB_KEY);
-            if (saved === 'gex' || saved === 'alerts' || saved === 'levels') {
+            if (saved === 'alerts' || saved === 'levels' || saved === 'scenarios') {
                 activeRailTab = saved;
+            } else if (saved === 'gex') {
+                // GEX is now an always-visible column, not a tab. Migrate to Alerts.
+                try { localStorage.setItem(RAIL_TAB_KEY, 'alerts'); } catch (e) {}
             }
         } catch (e) {}
-        let _lastGexPanelJson = null; // retained so switching back to GEX can re-render
+        let _lastGexPanelJson = null; // retained so re-render paths (resize, uncollapse) can reuse last data
 
         function applyRightRailTab() {
             document.querySelectorAll('.right-rail-tab').forEach(btn => {
@@ -8858,24 +9405,13 @@ def index():
             document.querySelectorAll('.right-rail-panel').forEach(p => {
                 p.classList.toggle('active', p.dataset.railPanel === activeRailTab);
             });
-            if (activeRailTab === 'gex') {
-                // Panel was display:none; re-render + re-sync on return
-                const target = document.getElementById('gex-side-panel');
-                if (target && _lastGexPanelJson) {
-                    try {
-                        const parsed = typeof _lastGexPanelJson === 'string'
-                            ? JSON.parse(_lastGexPanelJson) : _lastGexPanelJson;
-                        const config = { displayModeBar: false, responsive: true };
-                        Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
-                            .then(() => syncGexPanelYAxisToTV());
-                    } catch (e) { /* fall through to plain resize */ }
-                }
-                if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
-                scheduleGexPanelSync();
-            } else if (activeRailTab === 'alerts') {
+            if (activeRailTab === 'alerts') {
                 markRailAlertsSeen();
             } else {
                 _updateAlertsBadge();
+            }
+            if (activeRailTab === 'scenarios') {
+                renderScenarioTable(_lastStats && _lastStats.scenarios);
             }
         }
 
@@ -8898,7 +9434,7 @@ def index():
             _lastGexPanelJson = panelJson;
             const target = document.getElementById('gex-side-panel');
             if (!target) return;
-            if (activeRailTab !== 'gex') return; // render on tab activation
+            if (isGexColumnCollapsed()) return; // skip render while column is collapsed
             try {
                 const parsed = typeof panelJson === 'string' ? JSON.parse(panelJson) : panelJson;
                 const config = { displayModeBar: false, responsive: true };
@@ -8913,7 +9449,7 @@ def index():
         // side panel so bars line up with candles at the same strike.
         let _gexSyncScheduled = false;
         function syncGexPanelYAxisToTV() {
-            if (activeRailTab !== 'gex') return;
+            if (isGexColumnCollapsed()) return;
             const panel = document.getElementById('gex-side-panel');
             const tvEl  = document.getElementById('price-chart');
             if (!panel || !tvEl || !tvPriceChart || !tvCandleSeries) return;
@@ -8943,7 +9479,7 @@ def index():
             }
         }
         function scheduleGexPanelSync() {
-            if (activeRailTab !== 'gex') return;
+            if (isGexColumnCollapsed()) return;
             if (_gexSyncScheduled) return;
             _gexSyncScheduled = true;
             requestAnimationFrame(() => {
@@ -8962,13 +9498,17 @@ def index():
             if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
             return sign + '$' + abs.toFixed(0);
         }
+        let _lastStats = null;
         function renderTraderStats(stats) {
+            _lastStats = stats || null;
             const strip  = document.getElementById('trader-stats-strip');
             if (!strip) return;
             if (!stats) {
                 strip.style.display = 'none';
                 renderRailAlerts([]);
                 renderRailKeyLevels(null);
+                renderDealerImpact(null);
+                renderScenarioTable(null);
                 return;
             }
 
@@ -9020,6 +9560,70 @@ def index():
 
             renderRailAlerts(Array.isArray(stats.alerts) ? stats.alerts : []);
             renderRailKeyLevels(stats);
+            renderDealerImpact(stats);
+            // Skip Scenario DOM work on background ticks; applyRightRailTab will
+            // render it lazily on first reveal using _lastStats.
+            if (activeRailTab === 'scenarios') {
+                renderScenarioTable(stats.scenarios);
+            }
+        }
+
+        // Scenario GEX table renderer (Stage 3). Rebuilds tbody from the
+        // 7-row scenarios payload. "Current" row is highlighted; sign drives
+        // the color token so long-/short-gamma rows are scannable at a glance.
+        function renderScenarioTable(rows) {
+            const tbl = document.getElementById('scenario-table');
+            if (!tbl) return;
+            const tbody = tbl.querySelector('tbody');
+            if (!tbody) return;
+            if (!Array.isArray(rows) || !rows.length) {
+                tbody.innerHTML = '<tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = rows.map(r => {
+                const v = (r && typeof r.net_gex === 'number' && isFinite(r.net_gex)) ? r.net_gex : null;
+                const cls = v == null ? '' : (v >= 0 ? 'pos' : 'neg');
+                const txt = fmtMoneyCompact(v);
+                const isCur = (r && r.label === 'Current');
+                const regime = _escapeHtml(r && r.regime ? r.regime : '—');
+                const mag = _escapeHtml(r && r.magnitude ? r.magnitude : '');
+                return '<tr' + (isCur ? ' class="current"' : '') + '>' +
+                       '<td>' + _escapeHtml(r && r.label ? r.label : '—') + '</td>' +
+                       '<td class="num ' + cls + '">' + txt + '</td>' +
+                       '<td>' + regime + (mag ? '<span class="mag">(' + mag + ')</span>' : '') + '</td>' +
+                       '</tr>';
+            }).join('');
+        }
+
+        // Dealer Hedge Impact block renderer (above GEX chart in the GEX rail tab).
+        // Values are signed $-flows/shifts; pos/neg class drives the color token.
+        function renderDealerImpact(stats) {
+            const el = document.getElementById('dealer-impact');
+            if (!el) return;
+            const set = (key, v) => {
+                const n = el.querySelector('[data-di="' + key + '"]');
+                if (!n) return;
+                if (v == null || !isFinite(v)) {
+                    n.textContent = '—';
+                    n.classList.remove('pos', 'neg');
+                    return;
+                }
+                const sign = v > 0 ? '+' : '';
+                n.textContent = sign + fmtMoneyCompact(v);
+                n.classList.remove('pos', 'neg');
+                if (v !== 0) n.classList.add(v > 0 ? 'pos' : 'neg');
+            };
+            if (!stats) {
+                ['hedge_on_up_1pct','hedge_on_down_1pct','vanna_up_1','vanna_down_1','charm_by_close']
+                    .forEach(k => set(k, null));
+                return;
+            }
+            set('hedge_on_up_1pct',   stats.hedge_on_up_1pct);
+            set('hedge_on_down_1pct', stats.hedge_on_down_1pct);
+            set('vanna_up_1',         stats.vanna_delta_shift_per_1volpt);
+            set('vanna_down_1',       stats.vanna_delta_shift_per_1volpt == null
+                                        ? null : -stats.vanna_delta_shift_per_1volpt);
+            set('charm_by_close',     stats.charm_by_close);
         }
 
         // ── Right-rail alerts panel ──────────────────────────────────────
@@ -9198,14 +9802,24 @@ def index():
             if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
             clearKeyLevels();
             const LS = LightweightCharts.LineStyle;
+            const vis = getChartVisibility();
+            const showWalls2 = vis.walls_2 !== false;
+            const showHvl    = vis.hvl     !== false;
+            const showEm2    = vis.em_2s   !== false;
             const defs = [
-                { key: 'call_wall',  title: 'Call Wall',  color: '#10B981', style: LS.Solid,  width: 2 },
-                { key: 'put_wall',   title: 'Put Wall',   color: '#EF4444', style: LS.Solid,  width: 2 },
-                { key: 'gamma_flip', title: 'Gamma Flip', color: '#FFC400', style: LS.Dashed, width: 2 },
-                { key: 'em_upper',   title: '+1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
-                { key: 'em_lower',   title: '-1σ EM',     color: '#9CA3AF', style: LS.Dotted, width: 1 },
+                { key: 'call_wall',   title: 'Call Wall',   color: '#10B981', style: LS.Solid,  width: 2 },
+                { key: 'put_wall',    title: 'Put Wall',    color: '#EF4444', style: LS.Solid,  width: 2 },
+                { key: 'gamma_flip',  title: 'Gamma Flip',  color: '#FFC400', style: LS.Dashed, width: 2 },
+                { key: 'em_upper',    title: '+1σ EM',      color: '#9CA3AF', style: LS.Dotted, width: 1 },
+                { key: 'em_lower',    title: '-1σ EM',      color: '#9CA3AF', style: LS.Dotted, width: 1 },
+                { key: 'call_wall_2', title: 'Call Wall 2', color: 'rgba(16,185,129,0.55)',  style: LS.Dashed, width: 1, show: showWalls2 },
+                { key: 'put_wall_2',  title: 'Put Wall 2',  color: 'rgba(239,68,68,0.55)',   style: LS.Dashed, width: 1, show: showWalls2 },
+                { key: 'hvl',         title: 'HVL',         color: 'rgba(156,163,175,0.8)',  style: LS.Dotted, width: 1, show: showHvl },
+                { key: 'em_upper_2',  title: '+2σ EM',      color: 'rgba(156,163,175,0.45)', style: LS.Dotted, width: 1, show: showEm2 },
+                { key: 'em_lower_2',  title: '-2σ EM',      color: 'rgba(156,163,175,0.45)', style: LS.Dotted, width: 1, show: showEm2 },
             ];
             defs.forEach(def => {
+                if (def.show === false) return;
                 const entry = levels[def.key];
                 if (!entry || entry.price == null || !isFinite(entry.price)) return;
                 try {
@@ -9274,6 +9888,7 @@ def index():
                     renderGexSidePanel(priceResp.gex_panel);
                 }
                 if (priceResp && priceResp.key_levels) {
+                    _lastKeyLevels = priceResp.key_levels;
                     renderKeyLevels(priceResp.key_levels);
                 }
                 if (priceResp && priceResp.trader_stats) {
@@ -9304,6 +9919,10 @@ def index():
                 if (priceContainer) priceContainer.style.display = 'none';
                 const toolbar = document.getElementById('tv-toolbar-container');
                 if (toolbar) toolbar.style.display = 'none';
+                const gexHeader = document.getElementById('gex-col-header');
+                if (gexHeader) gexHeader.style.display = 'none';
+                const gexCol = document.getElementById('gex-column');
+                if (gexCol) gexCol.style.display = 'none';
                 const railTabs = document.getElementById('right-rail-tabs');
                 if (railTabs) railTabs.style.display = 'none';
                 const railPanels = document.getElementById('right-rail-panels');
@@ -9924,22 +10543,32 @@ def index():
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
             volume: 'Volume Ratio', large_trades: 'Options Chain',
-            premium: 'Premium', centroid: 'Centroid'
+            premium: 'Premium', centroid: 'Centroid',
+            hvl: 'HVL line', em_2s: '±2σ EM lines', walls_2: 'Secondary walls'
         };
         function renderChartVisibilitySection() {
             const list = document.getElementById('chart-visibility-list');
             if (!list) return;
             const vis = getChartVisibility();
-            list.innerHTML = CHART_IDS.map(id => `
+            const mkToggle = id => `
                 <label class="visibility-toggle">
                     <input type="checkbox" data-chart-id="${id}" ${vis[id] ? 'checked' : ''}>
                     <span>${CHART_LABELS[id] || id}</span>
-                </label>
-            `).join('');
+                </label>`;
+            list.innerHTML =
+                CHART_IDS.map(mkToggle).join('') +
+                `<div class="visibility-group-sep">Chart overlays</div>` +
+                LINE_OVERLAY_IDS.map(mkToggle).join('');
             list.querySelectorAll('input[data-chart-id]').forEach(cb => {
                 cb.addEventListener('change', () => {
-                    setAllChartVisibility({ [cb.dataset.chartId]: cb.checked });
-                    updateData();
+                    const id = cb.dataset.chartId;
+                    setAllChartVisibility({ [id]: cb.checked });
+                    if (LINE_OVERLAY_IDS.includes(id)) {
+                        // Line overlays just need a redraw against cached levels — no refetch.
+                        if (_lastKeyLevels) renderKeyLevels(_lastKeyLevels);
+                    } else {
+                        updateData();
+                    }
                 });
             });
         }
@@ -10461,6 +11090,8 @@ def update_price():
             try:
                 trader_stats = compute_trader_stats(
                     calls, puts, S_for_panel, strike_range=strike_range,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
                 )
             except Exception as e:
                 print(f"[trader_stats] build failed: {e}")
