@@ -8,6 +8,7 @@ settings.json
 Screenshots/
 terminal_while_running.txt
 terminal_while_running_v*.txt
+docs/last_conversation.md
 .DS_Store
 __pycache__/
 *.pyc

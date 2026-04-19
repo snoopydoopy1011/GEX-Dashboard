@@ -5229,19 +5229,22 @@ def index():
         }
         .chart-grid {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) 300px;
+            grid-template-columns: minmax(0, 1fr) var(--gex-col-w, 300px) 320px;
             column-gap: 4px;
             row-gap: 5px;
             width: 100%;
             align-items: stretch;
         }
-        /* Row 1: toolbar (col 1) + right-rail tabs (col 2) — same grid row, so both stretch to the row's max height. */
+        .chart-grid.gex-collapsed { --gex-col-w: 28px; }
+        /* Row 1: toolbar (col 1) + GEX column header (col 2) + rail tabs (col 3). */
         .chart-grid > .tv-toolbar-container { grid-column: 1; }
-        .chart-grid > .right-rail-tabs      { grid-column: 2; }
-        /* Row 2: price chart (col 1) + right-rail panels (col 2). Same row → same height. */
+        .chart-grid > .gex-col-header       { grid-column: 2; }
+        .chart-grid > .right-rail-tabs      { grid-column: 3; }
+        /* Row 2: price chart (col 1) + GEX column (col 2) + rail panels (col 3). */
         .chart-grid > .price-chart-container { grid-column: 1; }
-        .chart-grid > .right-rail-panels     { grid-column: 2; }
-        /* Remaining rows span both columns. */
+        .chart-grid > .gex-column            { grid-column: 2; }
+        .chart-grid > .right-rail-panels     { grid-column: 3; }
+        /* Remaining rows span all columns. */
         .chart-grid > #secondary-tabs { grid-column: 1 / -1; }
         .chart-grid > .charts-grid    { grid-column: 1 / -1; }
 
@@ -5459,6 +5462,55 @@ def index():
             min-height: 0;
         }
         #gex-side-panel { flex: 1; min-height: 0; }
+
+        /* GEX column (always-on, collapsible) — lives between chart and rail */
+        .gex-col-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: #1a1a1a;
+            border-bottom: 1px solid var(--bg-2);
+            border-radius: 10px 10px 0 0;
+            padding: 0 8px;
+            overflow: hidden;
+            min-width: 0;
+        }
+        .gex-col-header .gex-col-title {
+            flex: 1;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--fg-0);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .gex-col-toggle {
+            background: transparent;
+            color: var(--fg-1);
+            border: none;
+            padding: 4px 6px;
+            font-size: 13px;
+            line-height: 1;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .gex-col-toggle:hover { color: var(--fg-0); background: var(--bg-2); }
+        .gex-column {
+            position: relative;
+            background: var(--bg-0);
+            height: 680px;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            overflow: hidden;
+        }
+        .chart-grid.gex-collapsed .gex-col-header .gex-col-title,
+        .chart-grid.gex-collapsed .gex-column > .gex-side-panel-wrap {
+            display: none;
+        }
+        .chart-grid.gex-collapsed .gex-col-header { padding: 0 2px; justify-content: center; }
 
         /* ── Trader stats KPI strip ────────────────────────────────── */
         .trader-stats-strip {
@@ -6074,13 +6126,16 @@ def index():
                 grid-template-columns: 1fr;
             }
             .chart-grid > .tv-toolbar-container,
+            .chart-grid > .gex-col-header,
             .chart-grid > .right-rail-tabs,
             .chart-grid > .price-chart-container,
+            .chart-grid > .gex-column,
             .chart-grid > .right-rail-panels,
             .chart-grid > #secondary-tabs,
             .chart-grid > .charts-grid {
                 grid-column: 1;
             }
+            .gex-column { height: 420px; }
             .right-rail-panels { height: 420px; }
         }
 
@@ -6462,9 +6517,12 @@ def index():
 
         <div class="chart-grid" id="chart-grid">
             <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
+            <div class="gex-col-header" id="gex-col-header">
+                <div class="gex-col-title">GEX</div>
+                <button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>
+            </div>
             <div class="right-rail-tabs" id="right-rail-tabs">
-                <button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>
-                <button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
+                <button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
             </div>
             <div class="price-chart-container">
@@ -6478,13 +6536,13 @@ def index():
                     <div id="macd-chart" style="height:120px"></div>
                 </div>
             </div>
-            <div class="right-rail-panels" id="right-rail-panels">
-                <div class="right-rail-panel active" data-rail-panel="gex">
-                    <div class="gex-side-panel-wrap">
-                        <div id="gex-side-panel"></div>
-                    </div>
+            <div class="gex-column" id="gex-column">
+                <div class="gex-side-panel-wrap">
+                    <div id="gex-side-panel"></div>
                 </div>
-                <div class="right-rail-panel" data-rail-panel="alerts">
+            </div>
+            <div class="right-rail-panels" id="right-rail-panels">
+                <div class="right-rail-panel active" data-rail-panel="alerts">
                     <div class="price-info" id="price-info"></div>
                     <div class="dealer-impact" id="dealer-impact">
                         <div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>
@@ -8927,14 +8985,24 @@ def index():
                 toolbar.id = 'tv-toolbar-container';
                 grid.appendChild(toolbar);
             }
+            let gexHeader = grid.querySelector('.gex-col-header');
+            if (!gexHeader) {
+                gexHeader = document.createElement('div');
+                gexHeader.className = 'gex-col-header';
+                gexHeader.id = 'gex-col-header';
+                gexHeader.innerHTML =
+                    '<div class="gex-col-title">GEX</div>' +
+                    '<button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>';
+                grid.appendChild(gexHeader);
+                wireGexColumnToggle();
+            }
             let tabs = grid.querySelector('.right-rail-tabs');
             if (!tabs) {
                 tabs = document.createElement('div');
                 tabs.className = 'right-rail-tabs';
                 tabs.id = 'right-rail-tabs';
                 tabs.innerHTML =
-                    '<button type="button" class="right-rail-tab active" data-rail-tab="gex">GEX</button>' +
-                    '<button type="button" class="right-rail-tab" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
+                    '<button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
                     '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>';
                 grid.appendChild(tabs);
                 wireRightRailTabs();
@@ -8955,16 +9023,21 @@ def index():
             priceContainer.appendChild(macdPane);
             grid.appendChild(priceContainer);
 
+            let gexCol = grid.querySelector('.gex-column');
+            if (!gexCol) {
+                gexCol = document.createElement('div');
+                gexCol.className = 'gex-column';
+                gexCol.id = 'gex-column';
+                gexCol.innerHTML = '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>';
+                grid.appendChild(gexCol);
+            }
             let railPanels = grid.querySelector('.right-rail-panels');
             if (!railPanels) {
                 railPanels = document.createElement('div');
                 railPanels.className = 'right-rail-panels';
                 railPanels.id = 'right-rail-panels';
                 railPanels.innerHTML =
-                    '<div class="right-rail-panel active" data-rail-panel="gex">' +
-                        '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>' +
-                    '</div>' +
-                    '<div class="right-rail-panel" data-rail-panel="alerts">' +
+                    '<div class="right-rail-panel active" data-rail-panel="alerts">' +
                         '<div class="price-info" id="price-info"></div>' +
                         '<div class="dealer-impact" id="dealer-impact">' +
                             '<div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>' +
@@ -8989,11 +9062,66 @@ def index():
         }
 
         function showPriceChartUI() {
-            const ids = ['tv-toolbar-container', 'right-rail-tabs', 'right-rail-panels'];
+            const ids = ['tv-toolbar-container', 'gex-col-header', 'gex-column', 'right-rail-tabs', 'right-rail-panels'];
             ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
             const pc = document.querySelector('.price-chart-container');
             if (pc) pc.style.display = 'block';
         }
+
+        // ── GEX column collapse state ────────────────────────────────────
+        const GEX_COL_COLLAPSE_KEY = 'gex.sidePanelCollapsed';
+        function isGexColumnCollapsed() {
+            const grid = document.getElementById('chart-grid');
+            return !!(grid && grid.classList.contains('gex-collapsed'));
+        }
+        function applyGexColumnCollapse(collapsed) {
+            const grid = document.getElementById('chart-grid');
+            const btn  = document.getElementById('gex-col-toggle');
+            if (!grid) return;
+            grid.classList.toggle('gex-collapsed', !!collapsed);
+            if (btn) {
+                btn.textContent = collapsed ? '›' : '‹';
+                btn.title = collapsed ? 'Expand GEX' : 'Collapse GEX';
+            }
+            if (!collapsed) {
+                // Re-render last GEX data (renders were skipped while collapsed) then resize + sync
+                const target = document.getElementById('gex-side-panel');
+                if (target && _lastGexPanelJson) {
+                    try {
+                        const parsed = typeof _lastGexPanelJson === 'string'
+                            ? JSON.parse(_lastGexPanelJson) : _lastGexPanelJson;
+                        const config = { displayModeBar: false, responsive: true };
+                        Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
+                            .then(() => syncGexPanelYAxisToTV());
+                    } catch (e) {}
+                }
+                if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
+                scheduleGexPanelSync();
+            }
+            // Notify TV chart the container width changed so candles reflow
+            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+        }
+        function wireGexColumnToggle() {
+            const btn = document.getElementById('gex-col-toggle');
+            if (!btn || btn.__wired) return;
+            btn.__wired = true;
+            btn.addEventListener('click', () => {
+                const next = !isGexColumnCollapsed();
+                try { localStorage.setItem(GEX_COL_COLLAPSE_KEY, next ? '1' : '0'); } catch (e) {}
+                applyGexColumnCollapse(next);
+            });
+        }
+        (function restoreGexColumnCollapse() {
+            let collapsed = false;
+            try { collapsed = localStorage.getItem(GEX_COL_COLLAPSE_KEY) === '1'; } catch (e) {}
+            // Defer until DOM is parsed
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => { applyGexColumnCollapse(collapsed); wireGexColumnToggle(); });
+            } else {
+                applyGexColumnCollapse(collapsed);
+                wireGexColumnToggle();
+            }
+        })();
 
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
@@ -9008,16 +9136,19 @@ def index():
             }
         }
 
-        // ── Right-rail tab state (GEX / Alerts / Levels) ─────────────────
+        // ── Right-rail tab state (Alerts / Levels) ───────────────────────
         const RAIL_TAB_KEY = 'gex.rightRailTab';
-        let activeRailTab = 'gex';
+        let activeRailTab = 'alerts';
         try {
             const saved = localStorage.getItem(RAIL_TAB_KEY);
-            if (saved === 'gex' || saved === 'alerts' || saved === 'levels') {
+            if (saved === 'alerts' || saved === 'levels') {
                 activeRailTab = saved;
+            } else if (saved === 'gex') {
+                // GEX is now an always-visible column, not a tab. Migrate to Alerts.
+                try { localStorage.setItem(RAIL_TAB_KEY, 'alerts'); } catch (e) {}
             }
         } catch (e) {}
-        let _lastGexPanelJson = null; // retained so switching back to GEX can re-render
+        let _lastGexPanelJson = null; // retained so re-render paths (resize, uncollapse) can reuse last data
 
         function applyRightRailTab() {
             document.querySelectorAll('.right-rail-tab').forEach(btn => {
@@ -9026,21 +9157,7 @@ def index():
             document.querySelectorAll('.right-rail-panel').forEach(p => {
                 p.classList.toggle('active', p.dataset.railPanel === activeRailTab);
             });
-            if (activeRailTab === 'gex') {
-                // Panel was display:none; re-render + re-sync on return
-                const target = document.getElementById('gex-side-panel');
-                if (target && _lastGexPanelJson) {
-                    try {
-                        const parsed = typeof _lastGexPanelJson === 'string'
-                            ? JSON.parse(_lastGexPanelJson) : _lastGexPanelJson;
-                        const config = { displayModeBar: false, responsive: true };
-                        Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
-                            .then(() => syncGexPanelYAxisToTV());
-                    } catch (e) { /* fall through to plain resize */ }
-                }
-                if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
-                scheduleGexPanelSync();
-            } else if (activeRailTab === 'alerts') {
+            if (activeRailTab === 'alerts') {
                 markRailAlertsSeen();
             } else {
                 _updateAlertsBadge();
@@ -9066,7 +9183,7 @@ def index():
             _lastGexPanelJson = panelJson;
             const target = document.getElementById('gex-side-panel');
             if (!target) return;
-            if (activeRailTab !== 'gex') return; // render on tab activation
+            if (isGexColumnCollapsed()) return; // skip render while column is collapsed
             try {
                 const parsed = typeof panelJson === 'string' ? JSON.parse(panelJson) : panelJson;
                 const config = { displayModeBar: false, responsive: true };
@@ -9081,7 +9198,7 @@ def index():
         // side panel so bars line up with candles at the same strike.
         let _gexSyncScheduled = false;
         function syncGexPanelYAxisToTV() {
-            if (activeRailTab !== 'gex') return;
+            if (isGexColumnCollapsed()) return;
             const panel = document.getElementById('gex-side-panel');
             const tvEl  = document.getElementById('price-chart');
             if (!panel || !tvEl || !tvPriceChart || !tvCandleSeries) return;
@@ -9111,7 +9228,7 @@ def index():
             }
         }
         function scheduleGexPanelSync() {
-            if (activeRailTab !== 'gex') return;
+            if (isGexColumnCollapsed()) return;
             if (_gexSyncScheduled) return;
             _gexSyncScheduled = true;
             requestAnimationFrame(() => {
@@ -9505,6 +9622,10 @@ def index():
                 if (priceContainer) priceContainer.style.display = 'none';
                 const toolbar = document.getElementById('tv-toolbar-container');
                 if (toolbar) toolbar.style.display = 'none';
+                const gexHeader = document.getElementById('gex-col-header');
+                if (gexHeader) gexHeader.style.display = 'none';
+                const gexCol = document.getElementById('gex-column');
+                if (gexCol) gexCol.style.display = 'none';
                 const railTabs = document.getElementById('right-rail-tabs');
                 if (railTabs) railTabs.style.display = 'none';
                 const railPanels = document.getElementById('right-rail-panels');
