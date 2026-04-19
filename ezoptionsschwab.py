@@ -3204,7 +3204,21 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     call_vals = [call_map.get(s, 0) for s in strikes]
     put_vals = [put_map.get(s, 0) for s in strikes]
     net = [c - p for c, p in zip(call_vals, put_vals)]
-    colors = [call_color if v >= 0 else put_color for v in net]
+
+    def _hex_to_rgb(h):
+        h = h.lstrip('#')
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    call_rgb = _hex_to_rgb(call_color)
+    put_rgb = _hex_to_rgb(put_color)
+    max_abs = max((abs(v) for v in net), default=0) or 1.0
+
+    def _shade(v):
+        alpha = 0.30 + 0.70 * (abs(v) / max_abs)
+        r, g, b = call_rgb if v >= 0 else put_rgb
+        return f'rgba({r},{g},{b},{alpha:.3f})'
+
+    colors = [_shade(v) for v in net]
     customdata = list(zip(call_vals, put_vals))
 
     native_interval = 1.0
