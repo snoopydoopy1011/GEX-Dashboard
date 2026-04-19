@@ -1225,7 +1225,8 @@ def fetch_options_for_date(ticker, date, exposure_metric="Open Interest", delta_
                 weight = option_data['openInterest'] + option_data['volume']
             else: # Open Interest
                 weight = option_data['openInterest']
-                
+
+            option_data['_weight'] = weight
             exposures = calculate_greek_exposures(option_data, S, weight, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
             option_data.update(exposures)
 
@@ -1243,7 +1244,8 @@ def fetch_options_for_date(ticker, date, exposure_metric="Open Interest", delta_
                 weight = option_data['openInterest'] + option_data['volume']
             else: # Open Interest
                 weight = option_data['openInterest']
-                
+
+            option_data['_weight'] = weight
             exposures = calculate_greek_exposures(option_data, S, weight, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
             option_data.update(exposures)
 
@@ -1363,12 +1365,16 @@ def calculate_color(flag, S, K, t, sigma, r=0.02, q=0):
     except:
         return 0
 
-def calculate_greek_exposures(option, S, weight, delta_adjusted: bool = False, calculate_in_notional: bool = True):
-    """Calculate accurate Greek exposures per $1 move, weighted by the provided weight."""
+def calculate_greek_exposures(option, S, weight, delta_adjusted: bool = False, calculate_in_notional: bool = True, iv_override=None):
+    """Calculate accurate Greek exposures per $1 move, weighted by the provided weight.
+
+    iv_override lets scenario callers re-run the same formula at a shifted IV
+    without mutating the source option dict.
+    """
     contract_size = 100
-    
+
     # Recalculate Greeks to ensure consistency with S and t
-    vol = option['impliedVolatility']
+    vol = option['impliedVolatility'] if iv_override is None else iv_override
     
     # Calculate time to expiration in years
     expiry_date = option['expiration']
@@ -3321,7 +3327,77 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     return out
 
 
-def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None):
+def _recompute_gex_row(row, S, iv_override=None,
+                       delta_adjusted: bool = False, calculate_in_notional: bool = True):
+    """Return GEX for a single option row at spot S, optionally with a shifted IV.
+
+    Delegates to calculate_greek_exposures so the formula can never drift from the
+    one used at chain-fetch time. Requires the row to carry '_weight' (set by the
+    chain fetcher) — falls back to openInterest if the row pre-dates that change.
+    """
+    try:
+        weight = row.get('_weight')
+        if weight is None:
+            weight = row.get('openInterest', 0) or 0
+        opt = {
+            'contractSymbol': row.get('contractSymbol', ''),
+            'strike': float(row['strike']),
+            'impliedVolatility': float(row.get('impliedVolatility', 0.0) or 0.0),
+            'expiration': row['expiration'],
+        }
+        return float(calculate_greek_exposures(
+            opt, S, weight,
+            delta_adjusted=delta_adjusted,
+            calculate_in_notional=calculate_in_notional,
+            iv_override=iv_override,
+        )['GEX'])
+    except Exception:
+        return 0.0
+
+
+def compute_scenario_gex(calls, puts, S, spot_shift=0.0, iv_shift=0.0,
+                         strike_range=0.02, selected_expiries=None,
+                         delta_adjusted: bool = False, calculate_in_notional: bool = True):
+    """Re-sum net GEX under a spot and/or IV shift.
+
+    No new math — every row is fed back through calculate_greek_exposures with
+    the shifted spot/IV. Strike window is anchored at the *shifted* spot so the
+    sample of strikes tracks the dealer's effective book under the scenario.
+    """
+    S_new = float(S) * (1.0 + float(spot_shift))
+    if S_new <= 0:
+        return {'net_gex': 0.0, 'regime': 'Long Gamma'}
+    lo, hi = S_new * (1.0 - strike_range), S_new * (1.0 + strike_range)
+
+    def _sum(df):
+        if df is None or df.empty:
+            return 0.0
+        f = df
+        if selected_expiries and 'expiration_date' in f.columns:
+            f = f[f['expiration_date'].isin(selected_expiries)]
+        f = f[(f['strike'] >= lo) & (f['strike'] <= hi)]
+        if f.empty:
+            return 0.0
+        total = 0.0
+        for _, r in f.iterrows():
+            iv_base = float(r.get('impliedVolatility', 0.0) or 0.0)
+            iv_new = max(0.0, iv_base + float(iv_shift)) if iv_base > 0 else iv_base
+            total += _recompute_gex_row(
+                r, S_new,
+                iv_override=(iv_new if iv_shift else None),
+                delta_adjusted=delta_adjusted,
+                calculate_in_notional=calculate_in_notional,
+            )
+        return total
+
+    call_gex = _sum(calls)
+    put_gex  = _sum(puts)
+    net = call_gex - put_gex
+    return {'net_gex': float(net), 'regime': 'Long Gamma' if net >= 0 else 'Short Gamma'}
+
+
+def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None,
+                         delta_adjusted: bool = False, calculate_in_notional: bool = True):
     """High-level trader KPIs + a short alerts list, for the header strip.
 
     Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
@@ -3340,6 +3416,8 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'hedge_on_down_1pct': None,
         'vanna_delta_shift_per_1volpt': None,
         'charm_by_close':     None,
+        # Stage 3 — scenario stress table
+        'scenarios': [],
     }
     if S is None:
         return out
@@ -3402,6 +3480,53 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         out['regime'] = 'Long Gamma' if S >= out['gamma_flip'] else 'Short Gamma'
     else:
         out['regime'] = 'Long Gamma' if net_gex >= 0 else 'Short Gamma'
+
+    # Scenario GEX table (Stage 3). Seven rows: current + ±2% spot + ±5 vol pts
+    # + two diagonals. "Current" mirrors out['net_gex'] exactly so the table can't
+    # disagree with the KPI strip; the other 6 re-sum row-by-row at shifted
+    # spot/IV via _recompute_gex_row.
+    try:
+        base_abs = abs(out['net_gex']) if out['net_gex'] else 1.0
+        def _mag(v):
+            if v is None or not base_abs:
+                return 'low'
+            r = abs(v) / max(base_abs, 1.0)
+            return 'high' if r >= 0.75 else ('med' if r >= 0.35 else 'low')
+        scenarios_spec = [
+            ('Current',      0.0,    0.0),
+            ('+2% spot',    +0.02,   0.0),
+            ('-2% spot',    -0.02,   0.0),
+            ('+5 vol',       0.0,   +0.05),
+            ('-5 vol',       0.0,   -0.05),
+            ('+2%/-5 vol',  +0.02, -0.05),
+            ('-2%/+5 vol',  -0.02, +0.05),
+        ]
+        rows = []
+        for label, ss, ivs in scenarios_spec:
+            if ss == 0.0 and ivs == 0.0:
+                net = out['net_gex']
+                regime = out['regime']
+            else:
+                r = compute_scenario_gex(
+                    calls, puts, S,
+                    spot_shift=ss, iv_shift=ivs,
+                    strike_range=strike_range,
+                    selected_expiries=selected_expiries,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
+                )
+                net = r['net_gex']
+                regime = r['regime']
+            rows.append({
+                'label': label,
+                'net_gex': net,
+                'regime': regime,
+                'magnitude': _mag(net),
+            })
+        out['scenarios'] = rows
+    except Exception as e:
+        print(f"[compute_trader_stats] scenarios build failed: {e}")
+        out['scenarios'] = []
 
     alerts = []
     def _near(a, b, pct):
@@ -5453,6 +5578,53 @@ def index():
             font-size: 11px;
         }
 
+        /* Scenario GEX table (Stage 3) */
+        .scenario-table-wrap {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            min-height: 0;
+        }
+        .scenario-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+        }
+        .scenario-table th {
+            color: var(--fg-2);
+            font-weight: 500;
+            text-align: left;
+            padding: 6px 4px;
+            border-bottom: 1px solid var(--border);
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            font-size: 10px;
+        }
+        .scenario-table th.num { text-align: right; }
+        .scenario-table td {
+            padding: 8px 4px;
+            border-bottom: 1px solid var(--bg-2);
+            color: var(--fg-0);
+        }
+        .scenario-table td.num { text-align: right; }
+        .scenario-table td.num.pos { color: var(--call); }
+        .scenario-table td.num.neg { color: var(--put); }
+        .scenario-table td .mag {
+            color: var(--fg-2);
+            font-size: 10px;
+            margin-left: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .scenario-table tr.current td { background: var(--bg-1); }
+        .scenario-table .scn-empty {
+            color: var(--fg-2);
+            text-align: center;
+            padding: 16px 4px;
+            font-size: 11px;
+        }
+
         .gex-side-panel-wrap {
             background: var(--bg-0);
             border-radius: 0;
@@ -6524,6 +6696,7 @@ def index():
             <div class="right-rail-tabs" id="right-rail-tabs">
                 <button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
+                <button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>
             </div>
             <div class="price-chart-container">
                 <div class="chart-container" id="price-chart"></div>
@@ -6558,6 +6731,14 @@ def index():
                 <div class="right-rail-panel" data-rail-panel="levels">
                     <div class="rail-levels-table" id="right-rail-levels">
                         <div class="lvl-empty">Key levels load with stream data.</div>
+                    </div>
+                </div>
+                <div class="right-rail-panel" data-rail-panel="scenarios">
+                    <div class="scenario-table-wrap">
+                        <table class="scenario-table" id="scenario-table">
+                            <thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>
+                            <tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -9003,7 +9184,8 @@ def index():
                 tabs.id = 'right-rail-tabs';
                 tabs.innerHTML =
                     '<button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
-                    '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>';
+                    '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>';
                 grid.appendChild(tabs);
                 wireRightRailTabs();
             }
@@ -9053,6 +9235,14 @@ def index():
                     '<div class="right-rail-panel" data-rail-panel="levels">' +
                         '<div class="rail-levels-table" id="right-rail-levels">' +
                             '<div class="lvl-empty">Key levels load with stream data.</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="right-rail-panel" data-rail-panel="scenarios">' +
+                        '<div class="scenario-table-wrap">' +
+                            '<table class="scenario-table" id="scenario-table">' +
+                                '<thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>' +
+                                '<tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>' +
+                            '</table>' +
                         '</div>' +
                     '</div>';
                 grid.appendChild(railPanels);
@@ -9136,12 +9326,12 @@ def index():
             }
         }
 
-        // ── Right-rail tab state (Alerts / Levels) ───────────────────────
+        // ── Right-rail tab state (Alerts / Levels / Scenarios) ───────────
         const RAIL_TAB_KEY = 'gex.rightRailTab';
         let activeRailTab = 'alerts';
         try {
             const saved = localStorage.getItem(RAIL_TAB_KEY);
-            if (saved === 'alerts' || saved === 'levels') {
+            if (saved === 'alerts' || saved === 'levels' || saved === 'scenarios') {
                 activeRailTab = saved;
             } else if (saved === 'gex') {
                 // GEX is now an always-visible column, not a tab. Migrate to Alerts.
@@ -9161,6 +9351,9 @@ def index():
                 markRailAlertsSeen();
             } else {
                 _updateAlertsBadge();
+            }
+            if (activeRailTab === 'scenarios') {
+                renderScenarioTable(_lastStats && _lastStats.scenarios);
             }
         }
 
@@ -9247,7 +9440,9 @@ def index():
             if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
             return sign + '$' + abs.toFixed(0);
         }
+        let _lastStats = null;
         function renderTraderStats(stats) {
+            _lastStats = stats || null;
             const strip  = document.getElementById('trader-stats-strip');
             if (!strip) return;
             if (!stats) {
@@ -9255,6 +9450,7 @@ def index():
                 renderRailAlerts([]);
                 renderRailKeyLevels(null);
                 renderDealerImpact(null);
+                renderScenarioTable(null);
                 return;
             }
 
@@ -9307,6 +9503,38 @@ def index():
             renderRailAlerts(Array.isArray(stats.alerts) ? stats.alerts : []);
             renderRailKeyLevels(stats);
             renderDealerImpact(stats);
+            // Skip Scenario DOM work on background ticks; applyRightRailTab will
+            // render it lazily on first reveal using _lastStats.
+            if (activeRailTab === 'scenarios') {
+                renderScenarioTable(stats.scenarios);
+            }
+        }
+
+        // Scenario GEX table renderer (Stage 3). Rebuilds tbody from the
+        // 7-row scenarios payload. "Current" row is highlighted; sign drives
+        // the color token so long-/short-gamma rows are scannable at a glance.
+        function renderScenarioTable(rows) {
+            const tbl = document.getElementById('scenario-table');
+            if (!tbl) return;
+            const tbody = tbl.querySelector('tbody');
+            if (!tbody) return;
+            if (!Array.isArray(rows) || !rows.length) {
+                tbody.innerHTML = '<tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = rows.map(r => {
+                const v = (r && typeof r.net_gex === 'number' && isFinite(r.net_gex)) ? r.net_gex : null;
+                const cls = v == null ? '' : (v >= 0 ? 'pos' : 'neg');
+                const txt = fmtMoneyCompact(v);
+                const isCur = (r && r.label === 'Current');
+                const regime = _escapeHtml(r && r.regime ? r.regime : '—');
+                const mag = _escapeHtml(r && r.magnitude ? r.magnitude : '');
+                return '<tr' + (isCur ? ' class="current"' : '') + '>' +
+                       '<td>' + _escapeHtml(r && r.label ? r.label : '—') + '</td>' +
+                       '<td class="num ' + cls + '">' + txt + '</td>' +
+                       '<td>' + regime + (mag ? '<span class="mag">(' + mag + ')</span>' : '') + '</td>' +
+                       '</tr>';
+            }).join('');
         }
 
         // Dealer Hedge Impact block renderer (above GEX chart in the GEX rail tab).
@@ -10783,6 +11011,8 @@ def update_price():
             try:
                 trader_stats = compute_trader_stats(
                     calls, puts, S_for_panel, strike_range=strike_range,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
                 )
             except Exception as e:
                 print(f"[trader_stats] build failed: {e}")
