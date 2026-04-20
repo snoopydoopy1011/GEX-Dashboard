@@ -1616,6 +1616,33 @@ CALL_COLOR = '#10B981'
 PUT_COLOR = '#EF4444'
 
 
+def apply_plotly_theme(fig) -> None:
+    """Apply shared visual theme to a Plotly figure. Call at the END of every chart builder."""
+    fig.update_layout(
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        font=dict(
+            family=PLOT_THEME['font']['family'],
+            size=PLOT_THEME['font']['size'],
+            color=PLOT_THEME['font']['color'],
+        ),
+        xaxis=dict(
+            gridcolor=PLOT_THEME['xaxis']['gridcolor'],
+            zerolinecolor=PLOT_THEME['xaxis']['zerolinecolor'],
+            nticks=10,
+        ),
+        yaxis=dict(
+            gridcolor=PLOT_THEME['yaxis']['gridcolor'],
+            zerolinecolor=PLOT_THEME['yaxis']['zerolinecolor'],
+        ),
+        hoverlabel=dict(
+            bgcolor=PLOT_THEME['paper_bgcolor'],
+            bordercolor=PLOT_THEME['xaxis']['gridcolor'],
+            font=dict(family=PLOT_THEME['font']['family'], size=12, color=PLOT_THEME['font']['color']),
+        ),
+    )
+
+
 def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.02, show_calls=True, show_puts=True, show_net=True, coloring_mode='Solid', call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None, horizontal=False, show_abs_gex_area=False, abs_gex_opacity=0.2, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Ensure the exposure_type column exists
     if exposure_type not in calls.columns or exposure_type not in puts.columns:
@@ -2041,6 +2068,7 @@ def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.0
         except Exception as e:
             print(f"Error highlighting max level: {e}")
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def create_volume_chart(call_volume, put_volume, use_itm=True, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
@@ -2063,7 +2091,7 @@ def create_volume_chart(call_volume, put_volume, use_itm=True, call_color=CALL_C
         font=dict(color='white'),
         height=500
     )
-    
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
@@ -2356,6 +2384,7 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
         except Exception as e:
             print(f"Error highlighting max level in options volume: {e}")
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def update_options_chain(ticker, expiration_date=None):
@@ -3278,6 +3307,49 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     return fig.to_json()
 
 
+def _nearest_expiration(df):
+    """Return the nearest expiration date string from a calls or puts DataFrame."""
+    if df is None or df.empty or 'expiration_date' not in df.columns:
+        return None
+    from datetime import date
+    today_str = date.today().isoformat()
+    future = df.loc[df['expiration_date'] >= today_str, 'expiration_date']
+    if not future.empty:
+        return future.min()
+    return df['expiration_date'].min()
+
+
+def compute_top_oi_strikes(calls, puts, n=5):
+    """Return top-N OI strikes per side for the nearest expiration.
+
+    Returns dict with keys 'calls' (list of {strike, oi}), 'puts', 'both' (overlap strikes).
+    Tolerates empty DataFrames — returns empty lists rather than raising.
+    """
+    empty = {'calls': [], 'puts': [], 'both': []}
+    if (calls is None or calls.empty) and (puts is None or puts.empty):
+        return empty
+
+    nearest = _nearest_expiration(calls if (calls is not None and not calls.empty) else puts)
+    if nearest is None:
+        return empty
+
+    def top_oi(df):
+        if df is None or df.empty or 'openInterest' not in df.columns:
+            return []
+        subset = df[df['expiration_date'] == nearest] if 'expiration_date' in df.columns else df
+        if subset.empty:
+            return []
+        agg = subset.groupby('strike')['openInterest'].sum().nlargest(n).reset_index()
+        return [{'strike': float(row['strike']), 'oi': int(row['openInterest'])} for _, row in agg.iterrows()]
+
+    top_calls = top_oi(calls)
+    top_puts = top_oi(puts)
+    call_strikes = {r['strike'] for r in top_calls}
+    put_strikes = {r['strike'] for r in top_puts}
+    overlap = sorted(call_strikes & put_strikes)
+    return {'calls': top_calls, 'puts': top_puts, 'both': overlap}
+
+
 def compute_key_levels(calls, puts, S, selected_expiries=None):
     """Return the key dealer-flow levels to draw on the price chart.
 
@@ -3535,12 +3607,52 @@ def _fetch_vol_spike_data(ticker, S, strike_range):
     return result
 
 
+def _extract_key_level_prices(key_levels):
+    """Flatten the active key-level payload into numeric prices for alert gating."""
+    if not isinstance(key_levels, dict):
+        return []
+    prices = []
+    for key in (
+        'call_wall', 'call_wall_2',
+        'put_wall', 'put_wall_2',
+        'gamma_flip', 'hvl',
+        'em_upper', 'em_upper_2',
+        'em_lower', 'em_lower_2',
+    ):
+        node = key_levels.get(key)
+        if not isinstance(node, dict):
+            continue
+        price = node.get('price')
+        if price is None:
+            continue
+        try:
+            prices.append(float(price))
+        except Exception:
+            continue
+    return prices
+
+
 def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
-                        call_wall=None, put_wall=None):
+                        call_wall=None, put_wall=None, key_levels=None,
+                        gate_strike_alerts=True):
     """Return list of flow-level alert dicts. Called from compute_trader_stats."""
     if not ticker or S is None:
         return []
     alerts = []
+    active_level_prices = _extract_key_level_prices(key_levels)
+
+    def _passes_key_level_gate(alert_type, strike):
+        if alert_type in ('wall_shift', 'gamma_flip_move'):
+            return True
+        if not gate_strike_alerts:
+            return True
+        if strike is None or S is None or S <= 0 or not active_level_prices:
+            return True
+        try:
+            proximity = min(abs(float(strike) - lvl) for lvl in active_level_prices) / float(S)
+        except Exception:
+            return True
+        return proximity <= 0.0025
 
     # 1. Wall shift
     prev_walls = _LAST_WALLS.get(ticker, {})
@@ -3565,7 +3677,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
             if curr_v >= max(500.0, 3.0 * avg20):
                 aid = f'vol_spike:{strike:.0f}'
                 ratio = (curr_v / avg20) if avg20 > 0 else 99.0
-                if _alert_cooldown_ok(ticker, aid, 300):
+                if _passes_key_level_gate('vol_spike', strike) and _alert_cooldown_ok(ticker, aid, 300):
                     alerts.append({
                         'id': aid, 'level': 'flow',
                         'text': f'Vol spike @ {strike:.0f} ({ratio:.1f}× avg)',
@@ -3589,7 +3701,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 if oi < 100 or vol / oi <= 0.25:
                     continue
                 aid = f'voi_ratio:{strike:.0f}'
-                if _alert_cooldown_ok(ticker, aid, 600):
+                if _passes_key_level_gate('voi_ratio', strike) and _alert_cooldown_ok(ticker, aid, 600):
                     alerts.append({
                         'id': aid, 'level': 'flow',
                         'text': f'Heavy vol/OI @ {strike:.0f} ({vol/oi:.2f})',
@@ -3626,7 +3738,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 z = (curr_iv - mu) / std
                 if z > 2.0:
                     aid = f'iv_surge:{strike:.0f}'
-                    if _alert_cooldown_ok(ticker, aid, 600):
+                    if _passes_key_level_gate('iv_surge', strike) and _alert_cooldown_ok(ticker, aid, 600):
                         alerts.append({
                             'id': aid, 'level': 'flow',
                             'text': f'IV surge @ {strike:.0f} (+{z:.1f}σ)',
@@ -3640,7 +3752,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
 
 def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None,
                          delta_adjusted: bool = False, calculate_in_notional: bool = True,
-                         ticker: str = None):
+                         ticker: str = None, gate_strike_alerts: bool = True):
     """High-level trader KPIs + a short alerts list, for the header strip.
 
     Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
@@ -3845,6 +3957,8 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
             strike_range=strike_range,
             call_wall=out.get('call_wall'),
             put_wall=out.get('put_wall'),
+            key_levels=levels,
+            gate_strike_alerts=gate_strike_alerts,
         )
         alerts.extend(flow)
     except Exception as e:
@@ -4832,6 +4946,7 @@ def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color=CAL
         except Exception as e:
             print(f"Error highlighting max level in open interest chart: {e}")
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def create_premium_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
@@ -5124,6 +5239,7 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLO
         except Exception as e:
             print(f"Error highlighting max level in premium chart: {e}")
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def create_centroid_chart(ticker, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
@@ -5289,6 +5405,7 @@ def create_centroid_chart(ticker, call_color=CALL_COLOR, put_color=PUT_COLOR, se
     fig.update_xaxes(showspikes=True, spikecolor='#CCCCCC', spikethickness=1)
     fig.update_yaxes(showspikes=True, spikecolor='#CCCCCC', spikethickness=1)
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def infer_side(last, bid, ask):
@@ -5347,7 +5464,7 @@ def index():
             --border:#2A313B; --border-strong:#3A424F;
             --fg-0:#E5E7EB; --fg-1:#9CA3AF; --fg-2:#6B7280;
             --call:#10B981; --put:#EF4444; --accent:#3B82F6;
-            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981;
+            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37;
             --radius:6px; --radius-lg:10px;
             --font-ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
             --font-mono:"SF Mono","JetBrains Mono",Menlo,monospace;
@@ -5854,6 +5971,18 @@ def index():
         }
         .rail-metric .d.pos { color: var(--call); }
         .rail-metric .d.neg { color: var(--put); }
+        .gex-scope-pill {
+            display: flex; gap: 4px; margin-top: 8px;
+        }
+        .gex-scope-btn {
+            flex: 1; padding: 3px 0; border-radius: var(--radius);
+            border: 1px solid var(--border); background: var(--bg-2);
+            color: var(--fg-2); font-size: 11px; cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        .gex-scope-btn.active {
+            background: var(--accent); color: #fff; border-color: var(--accent);
+        }
         .rail-range-track {
             position: relative;
             height: 6px;
@@ -7077,6 +7206,15 @@ def index():
                         </div>
                     </div>
                 </details>
+                <details class="drawer-section" open>
+                    <summary>Alerts</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="gate_alerts" checked>
+                            <label for="gate_alerts">Only alert near key levels</label>
+                        </div>
+                    </div>
+                </details>
                 <details class="drawer-section">
                     <summary>Max Level</summary>
                     <div class="drawer-content">
@@ -7293,7 +7431,12 @@ def index():
         let tvExposurePriceLines = [];
         let tvExpectedMovePriceLines = [];
         let tvKeyLevelLines = [];
-        let _lastKeyLevels = null;
+        let tvTopOILines   = [];
+        let _lastTopOI     = null;
+        let _lastKeyLevels     = null;
+        let _lastKeyLevels0dte = null;
+        let _lastStats0dte     = null;
+        let gexScope = (() => { try { return localStorage.getItem('gexScope') || 'all'; } catch(e) { return 'all'; } })();
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
         let tvHistoricalOverlayPending = false;
@@ -7329,10 +7472,11 @@ def index():
         // Price-line overlays on the TV candle chart (not Plotly containers).
         // Share the chart-visibility store but render under a separate drawer group.
         const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2'];
+        const ALERT_GATE_KEY = 'gex.gateAlerts';
         const CHART_VISIBILITY_DEFAULTS = {
             price: true, gamma: true, delta: true, vanna: true, charm: true,
             speed: false, vomma: false, color: false,
-            options_volume: true, open_interest: false, volume: true,
+            options_volume: true, open_interest: true, volume: true,
             large_trades: true, premium: true, centroid: true,
             hvl: true, em_2s: true, walls_2: true
         };
@@ -7355,6 +7499,24 @@ def index():
             try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
         }
         function isChartVisible(id) { return !!getChartVisibility()[id]; }
+        let gateAlertsNearKeyLevels = (() => {
+            try {
+                const raw = localStorage.getItem(ALERT_GATE_KEY);
+                return raw == null ? true : raw === '1';
+            } catch (e) {
+                return true;
+            }
+        })();
+        function syncAlertGateCheckbox() {
+            const cb = document.getElementById('gate_alerts');
+            if (cb) cb.checked = !!gateAlertsNearKeyLevels;
+        }
+        function setAlertGateSetting(next, persist = true) {
+            gateAlertsNearKeyLevels = !!next;
+            syncAlertGateCheckbox();
+            if (!persist) return;
+            try { localStorage.setItem(ALERT_GATE_KEY, gateAlertsNearKeyLevels ? '1' : '0'); } catch (e) {}
+        }
 
         // List of Plotly chart div IDs that carry a current-price line shape
         const PLOTLY_PRICE_LINE_CHARTS = [
@@ -7441,6 +7603,11 @@ def index():
             });
         }
 
+        function tvRefreshPriceScale() {
+            if (!tvPriceChart) return;
+            try { tvPriceChart.priceScale('right').applyOptions({ autoScale: true }); } catch (e) {}
+        }
+
         function tvFitAll() {
             if (!tvPriceChart) return;
             // Use setTimeout so this fires after LightweightCharts finishes its own internal layout pass
@@ -7501,8 +7668,18 @@ def index():
         }
 
         /**
-         * Update or extend the chart's current minute candle from a real-time last price.
-         * Uses UTC second-aligned minute boundaries to match the chart's time axis.
+         * Bucket size in seconds for the currently selected chart timeframe.
+         * The SSE stream is always 1-minute; we aggregate into the displayed bucket.
+         */
+        function tvBucketSec() {
+            const el = document.getElementById('timeframe');
+            const m = parseInt(el && el.value, 10);
+            return (isFinite(m) && m > 0 ? m : 1) * 60;
+        }
+
+        /**
+         * Update the current bucket's high/low/close from a real-time last price.
+         * Bucket boundaries follow the selected timeframe (1m/5m/15m/30m/1h).
          */
         function applyRealtimeQuote(last) {
             // Track live price and debounce Plotly chart updates
@@ -7511,12 +7688,13 @@ def index():
             plotlyPriceUpdateTimer = setTimeout(function() { updateAllPlotlyPriceLines(last); }, 500);
 
             if (!tvCandleSeries || !tvLastCandles.length) return;
+            const bucketSec = tvBucketSec();
             const nowSec = Math.floor(Date.now() / 1000);
-            const minuteStart = Math.floor(nowSec / 60) * 60;
+            const bucketStart = Math.floor(nowSec / bucketSec) * bucketSec;
             const lastCandle = tvLastCandles[tvLastCandles.length - 1];
 
-            if (lastCandle.time === minuteStart) {
-                // Update the existing in-progress candle
+            if (lastCandle.time === bucketStart) {
+                // Update the existing in-progress bucket
                 const updated = {
                     time:   lastCandle.time,
                     open:   lastCandle.open,
@@ -7537,36 +7715,88 @@ def index():
                     clearTimeout(tvIndicatorRefreshTimer);
                     tvIndicatorRefreshTimer = setTimeout(() => applyIndicators(tvIndicatorCandles, tvActiveInds), 2000);
                 }
-            } else if (minuteStart > lastCandle.time) {
-                // New minute – open a new candle and immediately refresh indicators
-                const newCandle = { time: minuteStart, open: last, high: last, low: last, close: last, volume: 0 };
-                try { tvCandleSeries.update(newCandle); } catch(e) {}
-                tvLastCandles.push(newCandle);
-                tvIndicatorCandles.push(newCandle);
-                if (tvActiveInds.size > 0) {
-                    clearTimeout(tvIndicatorRefreshTimer);
-                    applyIndicators(tvIndicatorCandles, tvActiveInds);
-                }
+            } else if (bucketStart > lastCandle.time) {
+                // Clock has rolled past the bucket boundary but CHART_EQUITY hasn't
+                // pushed the new bar yet. Open a fresh bucket off the last tick so
+                // the candle keeps wiggling; applyRealtimeCandle will reconcile
+                // volume and any missed O/H/L when the 1-min bar arrives.
+                const fresh = {
+                    time:   bucketStart,
+                    open:   last,
+                    high:   last,
+                    low:    last,
+                    close:  last,
+                    volume: 0,
+                };
+                try { tvCandleSeries.update(fresh); } catch(e) {}
+                try { tvVolumeSeries.update({ time: bucketStart, value: 0, color: callColor }); } catch(e) {}
+                tvLastCandles.push(fresh);
+                const icLast = tvIndicatorCandles[tvIndicatorCandles.length - 1];
+                if (!icLast || icLast.time < bucketStart) tvIndicatorCandles.push(fresh);
             }
         }
 
         /**
-         * Apply a completed 1-minute candle from CHART_EQUITY streaming.
+         * Apply a 1-minute candle from CHART_EQUITY streaming, rolled into the
+         * currently selected timeframe bucket. Schwab always pushes 1-min bars;
+         * on a 5-min/15-min/etc chart we merge into the containing bucket instead
+         * of appending the raw 1-min bar (which would render as a tiny sliver).
          */
         function applyRealtimeCandle(candle) {
             if (!tvCandleSeries) return;
-            const c = { time: candle.time, open: candle.open, high: candle.high,
-                        low: candle.low, close: candle.close, volume: candle.volume || 0 };
-            try { tvCandleSeries.update(c); } catch(e) {}
-            // Update display candles (current-day)
-            const idx = tvLastCandles.findIndex(x => x.time === c.time);
-            if (idx >= 0) { tvLastCandles[idx] = c; }
-            else { tvLastCandles.push(c); tvLastCandles.sort((a, b) => a.time - b.time); }
-            // Update multi-day indicator candles
-            const icIdx = tvIndicatorCandles.findIndex(x => x.time === c.time);
-            if (icIdx >= 0) { tvIndicatorCandles[icIdx] = c; }
-            else { tvIndicatorCandles.push(c); tvIndicatorCandles.sort((a, b) => a.time - b.time); }
-            // Refresh indicators with the full multi-day history
+            const bucketSec = tvBucketSec();
+            const bucketStart = Math.floor(candle.time / bucketSec) * bucketSec;
+
+            function rollInto(arr) {
+                const idx = arr.findIndex(x => x.time === bucketStart);
+                if (idx >= 0) {
+                    const b = arr[idx];
+                    const bucketWasSeededFromQuote = (b.volume || 0) === 0;
+                    if (bucketWasSeededFromQuote) {
+                        arr[idx] = {
+                            time:   b.time,
+                            open:   candle.open,
+                            high:   candle.high,
+                            low:    candle.low,
+                            close:  candle.close,
+                            volume: candle.volume || 0,
+                        };
+                        return arr[idx];
+                    }
+                    arr[idx] = {
+                        time:   b.time,
+                        open:   b.open,
+                        high:   Math.max(b.high, candle.high),
+                        low:    Math.min(b.low,  candle.low),
+                        close:  candle.close,
+                        volume: (b.volume || 0) + (candle.volume || 0),
+                    };
+                    return arr[idx];
+                }
+                // First 1-min candle of a new bucket — open the bucket with it.
+                const fresh = {
+                    time:   bucketStart,
+                    open:   candle.open,
+                    high:   candle.high,
+                    low:    candle.low,
+                    close:  candle.close,
+                    volume: candle.volume || 0,
+                };
+                arr.push(fresh);
+                arr.sort((a, b) => a.time - b.time);
+                return fresh;
+            }
+
+            const displayBar = rollInto(tvLastCandles);
+            rollInto(tvIndicatorCandles);
+            try { tvCandleSeries.update(displayBar); } catch(e) {}
+            try {
+                tvVolumeSeries.update({
+                    time:  displayBar.time,
+                    value: displayBar.volume || 0,
+                    color: displayBar.close >= displayBar.open ? callColor : putColor,
+                });
+            } catch(e) {}
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
         }
 
@@ -7748,6 +7978,7 @@ def index():
   var lineStyleMap={};
   var popoutTimeframe=1;
   var popoutCandleTimerInterval=null;
+  var popoutUpColor='#10B981', popoutDownColor='#EF4444';
     var historicalDomBound=false;
     var tvHistoricalRenderedPoints=[];
         var historicalBubbleDrawPending=false;
@@ -7901,6 +8132,7 @@ def index():
   function renderPriceChart(priceData){
     var candles=priceData.candles||[];
     var upColor=priceData.call_color||'#10B981',downColor=priceData.put_color||'#EF4444';
+    popoutUpColor=upColor; popoutDownColor=downColor;
     popoutTimeframe=parseInt(priceData.timeframe)||1;
     lineStyleMap={dashed:LightweightCharts.LineStyle.Dashed,dotted:LightweightCharts.LineStyle.Dotted,large_dashed:LightweightCharts.LineStyle.LargeDashed};
     if(!tvChart){
@@ -7945,27 +8177,46 @@ def index():
   }
 
   // ── Real-time quote / candle application ─────────────────────────────────
+  // SSE is always 1-minute; we aggregate into the selected timeframe bucket.
+  function tvBucketSec(){return (parseInt(popoutTimeframe,10)||1)*60;}
   function applyRealtimeQuote(last){
     if(!tvCandle||!tvLastCandles.length)return;
+    var bucketSec=tvBucketSec();
     var nowSec=Math.floor(Date.now()/1000);
-    var minuteStart=Math.floor(nowSec/60)*60;
+    var bucketStart=Math.floor(nowSec/bucketSec)*bucketSec;
     var lc=tvLastCandles[tvLastCandles.length-1];
-    if(lc.time===minuteStart){
+    if(lc.time===bucketStart){
       var updated={time:lc.time,open:lc.open,high:Math.max(lc.high,last),low:Math.min(lc.low,last),close:last,volume:lc.volume||0};
       try{tvCandle.update(updated);}catch(e){}
       tvLastCandles[tvLastCandles.length-1]=updated;
-    }else if(minuteStart>lc.time){
-      var newC={time:minuteStart,open:last,high:last,low:last,close:last,volume:0};
-      try{tvCandle.update(newC);}catch(e){}
-      tvLastCandles.push(newC);
+    } else if(bucketStart>lc.time){
+      var fresh={time:bucketStart,open:last,high:last,low:last,close:last,volume:0};
+      try{tvCandle.update(fresh);}catch(e){}
+      try{if(tvVol)tvVol.update({time:bucketStart,value:0,color:popoutUpColor});}catch(e){}
+      tvLastCandles.push(fresh);
     }
   }
   function applyRealtimeCandle(candle){
     if(!tvCandle)return;
-    var c={time:candle.time,open:candle.open,high:candle.high,low:candle.low,close:candle.close,volume:candle.volume||0};
-    try{tvCandle.update(c);}catch(e){}
-    var idx=tvLastCandles.findIndex(function(x){return x.time===c.time;});
-    if(idx>=0){tvLastCandles[idx]=c;}else{tvLastCandles.push(c);tvLastCandles.sort(function(a,b){return a.time-b.time;});}
+    var bucketSec=tvBucketSec();
+    var bucketStart=Math.floor(candle.time/bucketSec)*bucketSec;
+    var idx=tvLastCandles.findIndex(function(x){return x.time===bucketStart;});
+    var merged;
+    if(idx>=0){
+      var b=tvLastCandles[idx];
+      var bucketWasSeededFromQuote=(b.volume||0)===0;
+      if(bucketWasSeededFromQuote){
+        merged={time:b.time,open:candle.open,high:candle.high,low:candle.low,close:candle.close,volume:candle.volume||0};
+      }else{
+        merged={time:b.time,open:b.open,high:Math.max(b.high,candle.high),low:Math.min(b.low,candle.low),close:candle.close,volume:(b.volume||0)+(candle.volume||0)};
+      }
+      tvLastCandles[idx]=merged;
+    }else{
+      merged={time:bucketStart,open:candle.open,high:candle.high,low:candle.low,close:candle.close,volume:candle.volume||0};
+      tvLastCandles.push(merged);tvLastCandles.sort(function(a,b){return a.time-b.time;});
+    }
+    try{tvCandle.update(merged);}catch(e){}
+    try{if(tvVol)tvVol.update({time:merged.time,value:merged.volume||0,color:merged.close>=merged.open?popoutUpColor:popoutDownColor});}catch(e){}
     if(activeInds.size>0)applyIndicators(tvLastCandles);
   }
 
@@ -8321,7 +8572,9 @@ def index():
             updateInProgress = true;
             
             const ticker = document.getElementById('ticker').value;
-            const tickerChanged = tvLastTicker !== null && ticker.toUpperCase() !== tvLastTicker.toUpperCase();
+            const isFirstLoad = tvLastTicker === null;
+            const tickerChanged = !isFirstLoad && ticker.toUpperCase() !== tvLastTicker.toUpperCase();
+            const shouldRefreshPriceLevels = isFirstLoad || tickerChanged;
 
             // Reset chart state when the ticker changes
             if (tickerChanged) {
@@ -8364,6 +8617,8 @@ def index():
             const strikeRange = parseFloat(document.getElementById('strike_range').value) / 100;
             const highlightMaxLevel = document.getElementById('highlight_max_level').checked;
             const maxLevelMode = document.getElementById('max_level_mode').value;
+            const gateAlerts = !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked);
+            setAlertGateSetting(gateAlerts);
             
             // Get visible charts (server payload uses show_<id> keys for back-compat)
             const _vis = getChartVisibility();
@@ -8415,6 +8670,7 @@ def index():
                     delta_adjusted: deltaAdjusted,
                     calculate_in_notional: calculateInNotional,
                     strike_range: strikeRange,
+                    gate_alerts: gateAlerts,
                     call_color: callColor,
                     put_color: putColor,
                     highlight_max_level: highlightMaxLevel,
@@ -8444,7 +8700,10 @@ def index():
                 // Options cache is now populated — refresh price levels immediately.
                 // This fixes the delay where levels were missing right after a ticker change
                 // because /update_price fired before the options chain was cached.
-                if (isChartVisible('price')) {
+                // Gate on ticker-change / first-load only: running this every tick
+                // forces a full setData rebuild at 1Hz, which flashes the candle and
+                // level lines as the axis snaps back to the historical-only snapshot.
+                if (shouldRefreshPriceLevels && isChartVisible('price')) {
                     _priceHistoryLastKey = ''; // force cache-miss so fetchPriceHistory re-fetches
                     fetchPriceHistory(true);
                 }
@@ -8670,6 +8929,8 @@ def index():
             else                       destroyRsiPane();
             if (activeInds.has('macd')) applyMacdPane(candles, todayCandles);
             else                        destroyMacdPane();
+
+            renderTopOI(_lastTopOI);
 
             // Update legend overlay
             updateIndicatorLegend();
@@ -9064,6 +9325,7 @@ def index():
                 { key:'rsi',    label:'RSI',    title:'Relative Strength Index (14) — sub-pane' },
                 { key:'macd',   label:'MACD',   title:'MACD (12, 26, 9) — sub-pane' },
                 { key:'atr',    label:'ATR',    title:'Average True Range (14) — sub-pane' },
+                { key:'oi',     label:'OI',     title:'Top 5 OI strikes (nearest expiry)' },
             ];
             indicatorDefs.forEach(def => {
                 const b = btn(def.label, def.title, () => {
@@ -9071,6 +9333,10 @@ def index():
                     else                           tvActiveInds.add(def.key);
                     b.classList.toggle('active', tvActiveInds.has(def.key));
                     applyIndicators(tvIndicatorCandles, tvActiveInds);
+                    // Top-OI lives in the main /update payload, not /update_price. When the user
+                    // toggles OI on before the first /update cycle lands, _lastTopOI is still null;
+                    // kick off a one-shot fetch so the overlay shows immediately.
+                    if (def.key === 'oi' && tvActiveInds.has('oi')) ensureTopOILoaded();
                 });
                 if (tvActiveInds.has(def.key)) b.classList.add('active');
                 toolbar.appendChild(b);
@@ -9683,6 +9949,10 @@ def index():
                                 '<div class="d" data-met="net_dex_delta"></div>' +
                             '</div>' +
                         '</div>' +
+                        '<div class="gex-scope-pill" id="gex-scope-pill">' +
+                            '<button class="gex-scope-btn" data-scope="all">All</button>' +
+                            '<button class="gex-scope-btn" data-scope="0dte">0DTE</button>' +
+                        '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-range">' +
                         '<div class="rail-card-header">Range · EM <span data-met="em_pct"></span></div>' +
@@ -9824,6 +10094,8 @@ def index():
                         '</div>' +
                     '</div>';
                 grid.appendChild(railPanels);
+                wireGexScopePill();
+                redrawGexScope();
                 applyRightRailTab();
             }
             return priceContainer;
@@ -9947,6 +10219,32 @@ def index():
                     applyRightRailTab();
                 });
             });
+            wireGexScopePill();
+        }
+
+        function wireGexScopePill() {
+            document.querySelectorAll('.gex-scope-btn').forEach(btn => {
+                if (btn.__scopeWired) return;
+                btn.__scopeWired = true;
+                btn.addEventListener('click', () => {
+                    gexScope = btn.dataset.scope;
+                    try { localStorage.setItem('gexScope', gexScope); } catch(e) {}
+                    redrawGexScope();
+                });
+            });
+        }
+
+        function redrawGexScope() {
+            // Sync pill active state
+            document.querySelectorAll('.gex-scope-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.scope === gexScope);
+            });
+            const is0dte = gexScope === '0dte';
+            const stats  = is0dte ? _lastStats0dte     : (_lastStats      || null);
+            const levels = is0dte ? _lastKeyLevels0dte : (_lastKeyLevels  || null);
+            renderMarketMetrics(stats);
+            renderRailKeyLevels(stats);
+            renderKeyLevels(levels);
         }
 
         function renderGexSidePanel(panelJson) {
@@ -10291,8 +10589,8 @@ def index():
         }
 
         function renderKeyLevels(levels) {
-            if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
             clearKeyLevels();
+            if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
             const LS = LightweightCharts.LineStyle;
             const vis = getChartVisibility();
             const showWalls2 = vis.walls_2 !== false;
@@ -10330,6 +10628,98 @@ def index():
             });
         }
 
+        // ── Top-OI overlay (dotted price lines, nearest expiry) ───────────────
+        let tvTopOIPrices = [];
+
+        function clearTopOILines() {
+            const hadLines = tvTopOILines.length > 0 || tvTopOIPrices.length > 0;
+            if (tvTopOIPrices.length) {
+                const drop = new Set(tvTopOIPrices);
+                tvAllLevelPrices = tvAllLevelPrices.filter(p => !drop.has(p));
+                tvTopOIPrices = [];
+            }
+            if (!tvCandleSeries) { tvTopOILines = []; return; }
+            tvTopOILines.forEach(l => { try { tvCandleSeries.removePriceLine(l); } catch (e) {} });
+            tvTopOILines = [];
+            return hadLines;
+        }
+
+        function renderTopOI(topOi) {
+            const cleared = clearTopOILines();
+            if (!tvActiveInds.has('oi') || !topOi || !tvCandleSeries || !window.LightweightCharts) {
+                if (cleared && tvCandleSeries) {
+                    tvApplyAutoscale();
+                    tvRefreshPriceScale();
+                }
+                return;
+            }
+            const LS = LightweightCharts.LineStyle;
+            const callC = getComputedStyle(document.documentElement).getPropertyValue('--call').trim() || '#10B981';
+            const putC  = getComputedStyle(document.documentElement).getPropertyValue('--put').trim()  || '#EF4444';
+            const goldColor = getComputedStyle(document.documentElement).getPropertyValue('--gold').trim() || '#D4AF37';
+
+            const map = new Map();
+            (topOi.calls || []).forEach(r => map.set(r.strike, { color: callC, title: 'C OI ' + r.strike }));
+            (topOi.puts  || []).forEach(r => {
+                if (map.has(r.strike)) map.set(r.strike, { color: goldColor, title: '\u2605 ' + r.strike });
+                else                   map.set(r.strike, { color: putC,  title: 'P OI ' + r.strike });
+            });
+
+            map.forEach(({ color, title }, strike) => {
+                try {
+                    const line = tvCandleSeries.createPriceLine({
+                        price: strike, color, lineWidth: 1,
+                        lineStyle: LS.Dotted, lineVisible: true, axisLabelVisible: true, title,
+                    });
+                    tvTopOILines.push(line);
+                    tvTopOIPrices.push(strike);
+                    tvAllLevelPrices.push(strike);
+                } catch (e) { console.warn('renderTopOI createPriceLine failed:', e); }
+            });
+            if (tvTopOILines.length) {
+                tvApplyAutoscale();
+                tvRefreshPriceScale();
+            }
+        }
+
+        // Fetch top-OI from /update when user toggles on before /update has populated it
+        function ensureTopOILoaded() {
+            if (_lastTopOI || _topOIFetchInFlight) return;
+            const t = (document.getElementById('ticker') && document.getElementById('ticker').value || '').trim();
+            const expiry = Array.from(
+                document.querySelectorAll('.expiry-option input[type="checkbox"]:checked')
+            ).map(cb => cb.value);
+            if (!t || !expiry.length) return;
+            const exposureMetricEl = document.getElementById('exposure_metric');
+            const deltaAdjustedEl = document.getElementById('delta_adjusted_exposures');
+            const calculateInNotionalEl = document.getElementById('calculate_in_notional');
+            const strikeRangeEl = document.getElementById('strike_range');
+            _topOIFetchInFlight = true;
+            fetch('/update', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    ticker: t,
+                    expiry,
+                    exposure_metric: exposureMetricEl ? exposureMetricEl.value : 'Open Interest',
+                    delta_adjusted: !!(deltaAdjustedEl && deltaAdjustedEl.checked),
+                    calculate_in_notional: !!(calculateInNotionalEl && calculateInNotionalEl.checked),
+                    strike_range: strikeRangeEl ? (parseFloat(strikeRangeEl.value) / 100) : 0.1,
+                    gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
+                    show_gamma: false,
+                    show_delta: false,
+                    show_vanna: false,
+                    show_charm: false,
+                }),
+            }).then(r => r.json()).then(d => {
+                if (d && d.top_oi) {
+                    _lastTopOI = d.top_oi;
+                    if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
+                }
+            }).catch(() => {}).finally(() => { _topOIFetchInFlight = false; });
+        }
+        let _topOIFetchInFlight = false;
+
         // ── Throttled price history fetcher ───────────────────────────────────
         // Fetches candle history + exposure levels from /update_price.
         // Real-time ticks come from SSE; this only handles the historical snapshot
@@ -10352,6 +10742,7 @@ def index():
                 highlight_max_level: document.getElementById('highlight_max_level').checked,
                 max_level_color: maxLevelColor,
                 coloring_mode: document.getElementById('coloring_mode').value,
+                gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
             };
         }
 
@@ -10381,11 +10772,17 @@ def index():
                 }
                 if (priceResp && priceResp.key_levels) {
                     _lastKeyLevels = priceResp.key_levels;
-                    renderKeyLevels(priceResp.key_levels);
+                }
+                if (priceResp && priceResp.key_levels_0dte) {
+                    _lastKeyLevels0dte = priceResp.key_levels_0dte;
+                }
+                if (priceResp && priceResp.stats_0dte) {
+                    _lastStats0dte = priceResp.stats_0dte;
                 }
                 if (priceResp && priceResp.trader_stats) {
                     renderTraderStats(priceResp.trader_stats);
                 }
+                redrawGexScope();
             })
             .catch(err => console.error('Error fetching price chart:', err))
             .finally(() => { _priceHistoryInFlight = false; });
@@ -10394,6 +10791,11 @@ def index():
         function updateCharts(data) {
             // Save scroll position before any DOM changes
             savedScrollPosition = window.scrollY || window.pageYOffset;
+
+            if (data.top_oi) {
+                _lastTopOI = data.top_oi;
+                if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
+            }
             
             const selectedCharts = getChartVisibility();
             
@@ -10431,6 +10833,7 @@ def index():
                     tvHistoricalPoints = [];
                     tvHistoricalExpectedMoveSeries = [];
                     tvKeyLevelLines = [];
+                    tvTopOILines = [];
                 }
                 if (tvResizeObserver) {
                     tvResizeObserver.disconnect();
@@ -10959,6 +11362,14 @@ def index():
         }
         
         document.getElementById('streamToggle').addEventListener('click', toggleStreaming);
+        syncAlertGateCheckbox();
+        const gateAlertsToggle = document.getElementById('gate_alerts');
+        if (gateAlertsToggle) {
+            gateAlertsToggle.addEventListener('change', () => {
+                setAlertGateSetting(gateAlertsToggle.checked);
+                updateData();
+            });
+        }
 
         // Settings save/load functions
         function gatherSettings() {
@@ -10985,6 +11396,7 @@ def index():
                 highlight_max_level: document.getElementById('highlight_max_level').checked,
                 max_level_color: document.getElementById('max_level_color').value,
                 max_level_mode: document.getElementById('max_level_mode').value,
+                gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
                 em_range_locked: emRangeLocked,
                 // Chart visibility
                 charts: getChartVisibility()
@@ -11042,6 +11454,9 @@ def index():
             }
             if (settings.max_level_mode) {
                 document.getElementById('max_level_mode').value = settings.max_level_mode;
+            }
+            if (settings.gate_alerts !== undefined) {
+                setAlertGateSetting(settings.gate_alerts);
             }
             if (settings.em_range_locked !== undefined) {
                 setEmRangeLocked(settings.em_range_locked);
@@ -11436,7 +11851,13 @@ def update():
  
         
         response = {}
-        
+
+        try:
+            response['top_oi'] = compute_top_oi_strikes(calls, puts)
+        except Exception as e:
+            print(f"[top_oi] build failed: {e}")
+            response['top_oi'] = {'calls': [], 'puts': [], 'both': []}
+
         # Create charts based on visibility settings
         # NOTE: price chart is handled by /update_price (separate concurrent request)
 
@@ -11625,6 +12046,11 @@ def update_price():
             calculate_in_notional = cin_val.lower() == 'true'
         else:
             calculate_in_notional = bool(cin_val)
+        gate_val = data.get('gate_alerts', True)
+        if isinstance(gate_val, str):
+            gate_alerts = gate_val.lower() == 'true'
+        else:
+            gate_alerts = bool(gate_val)
 
         price_data = get_price_history(ticker, timeframe=timeframe)
 
@@ -11685,16 +12111,40 @@ def update_price():
                     delta_adjusted=delta_adjusted,
                     calculate_in_notional=calculate_in_notional,
                     ticker=ticker,
+                    gate_strike_alerts=gate_alerts,
                 )
             except Exception as e:
                 print(f"[trader_stats] build failed: {e}")
                 trader_stats = None
+
+        # 0DTE-filtered bundles (nearest expiration only)
+        key_levels_0dte = None
+        stats_0dte = None
+        if calls is not None and puts is not None and S_for_panel is not None:
+            try:
+                nearest_exp = _nearest_expiration(calls) or _nearest_expiration(puts)
+                if nearest_exp:
+                    c0 = calls[calls['expiration_date'] == nearest_exp] if 'expiration_date' in calls.columns else calls
+                    p0 = puts[puts['expiration_date']   == nearest_exp] if 'expiration_date' in puts.columns  else puts
+                    key_levels_0dte = compute_key_levels(c0, p0, S_for_panel)
+                    stats_0dte = compute_trader_stats(
+                        c0, p0, S_for_panel,
+                        strike_range=strike_range,
+                        delta_adjusted=delta_adjusted,
+                        calculate_in_notional=calculate_in_notional,
+                        ticker=ticker,
+                        gate_strike_alerts=gate_alerts,
+                    )
+            except Exception as e:
+                print(f"[0dte_bundle] build failed: {e}")
 
         return jsonify({
             'price': price_chart,
             'gex_panel': gex_panel,
             'key_levels': key_levels,
             'trader_stats': trader_stats,
+            'key_levels_0dte': key_levels_0dte,
+            'stats_0dte': stats_0dte,
         })
     except Exception as e:
         import traceback

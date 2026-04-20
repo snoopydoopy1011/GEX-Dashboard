@@ -9,6 +9,8 @@ Screenshots/
 terminal_while_running.txt
 terminal_while_running_v*.txt
 docs/last_conversation.md
+last_conversation_with_Claude.md
+terminal_return_with_live_candles.md
 .DS_Store
 __pycache__/
 *.pyc
