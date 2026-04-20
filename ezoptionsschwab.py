@@ -7533,6 +7533,11 @@ def index():
             });
         }
 
+        function tvRefreshPriceScale() {
+            if (!tvPriceChart) return;
+            try { tvPriceChart.priceScale('right').applyOptions({ autoScale: true }); } catch (e) {}
+        }
+
         function tvFitAll() {
             if (!tvPriceChart) return;
             // Use setTimeout so this fires after LightweightCharts finishes its own internal layout pass
@@ -7677,9 +7682,20 @@ def index():
                 if (idx >= 0) {
                     const b = arr[idx];
                     const bucketWasSeededFromQuote = (b.volume || 0) === 0;
+                    if (bucketWasSeededFromQuote) {
+                        arr[idx] = {
+                            time:   b.time,
+                            open:   candle.open,
+                            high:   candle.high,
+                            low:    candle.low,
+                            close:  candle.close,
+                            volume: candle.volume || 0,
+                        };
+                        return arr[idx];
+                    }
                     arr[idx] = {
                         time:   b.time,
-                        open:   bucketWasSeededFromQuote ? candle.open : b.open,
+                        open:   b.open,
                         high:   Math.max(b.high, candle.high),
                         low:    Math.min(b.low,  candle.low),
                         close:  candle.close,
@@ -8119,7 +8135,11 @@ def index():
     if(idx>=0){
       var b=tvLastCandles[idx];
       var bucketWasSeededFromQuote=(b.volume||0)===0;
-      merged={time:b.time,open:bucketWasSeededFromQuote?candle.open:b.open,high:Math.max(b.high,candle.high),low:Math.min(b.low,candle.low),close:candle.close,volume:(b.volume||0)+(candle.volume||0)};
+      if(bucketWasSeededFromQuote){
+        merged={time:b.time,open:candle.open,high:candle.high,low:candle.low,close:candle.close,volume:candle.volume||0};
+      }else{
+        merged={time:b.time,open:b.open,high:Math.max(b.high,candle.high),low:Math.min(b.low,candle.low),close:candle.close,volume:(b.volume||0)+(candle.volume||0)};
+      }
       tvLastCandles[idx]=merged;
     }else{
       merged={time:bucketStart,open:candle.open,high:candle.high,low:candle.low,close:candle.close,volume:candle.volume||0};
@@ -10554,7 +10574,10 @@ def index():
         function renderTopOI(topOi) {
             const cleared = clearTopOILines();
             if (!tvActiveInds.has('oi') || !topOi || !tvCandleSeries || !window.LightweightCharts) {
-                if (cleared && tvCandleSeries) tvApplyAutoscale();
+                if (cleared && tvCandleSeries) {
+                    tvApplyAutoscale();
+                    tvRefreshPriceScale();
+                }
                 return;
             }
             const LS = LightweightCharts.LineStyle;
@@ -10573,14 +10596,17 @@ def index():
                 try {
                     const line = tvCandleSeries.createPriceLine({
                         price: strike, color, lineWidth: 1,
-                        lineStyle: LS.Dotted, axisLabelVisible: true, title,
+                        lineStyle: LS.Dotted, lineVisible: true, axisLabelVisible: true, title,
                     });
                     tvTopOILines.push(line);
                     tvTopOIPrices.push(strike);
                     tvAllLevelPrices.push(strike);
                 } catch (e) { console.warn('renderTopOI createPriceLine failed:', e); }
             });
-            if (tvTopOILines.length) tvApplyAutoscale();
+            if (tvTopOILines.length) {
+                tvApplyAutoscale();
+                tvRefreshPriceScale();
+            }
         }
 
         // Fetch top-OI from /update when user toggles on before /update has populated it
