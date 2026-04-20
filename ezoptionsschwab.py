@@ -4471,7 +4471,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
             display: flex;
             justify-content: space-between;
             gap: 12px;
-            padding: 12px 14px 10px;
+            padding: 10px 12px 8px;
             border-bottom: 1px solid var(--border);
             background: linear-gradient(180deg, rgba(59,130,246,0.08), rgba(59,130,246,0));
             flex-wrap: wrap;
@@ -4507,7 +4507,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
             background: var(--bg-2);
             color: var(--fg-1);
             border-radius: 999px;
-            padding: 5px 10px;
+            padding: 4px 9px;
             font-size: 11px;
             cursor: pointer;
             transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
@@ -4547,7 +4547,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
         }}
         .flow-blotter__summary,
         .flow-blotter__note {{
-            padding: 0 14px 10px;
+            padding: 0 12px 8px;
         }}
         .flow-blotter__table-wrap {{
             flex: 1;
@@ -4580,7 +4580,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
             font-size: 10px;
             letter-spacing: 0.04em;
             text-transform: uppercase;
-            padding: 8px 10px;
+            padding: 7px 10px;
             cursor: pointer;
         }}
         .flow-blotter__sort:hover {{
@@ -4591,7 +4591,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
             font-size: 11px;
         }}
         .flow-blotter tbody td {{
-            padding: 8px 10px;
+            padding: 7px 10px;
             border-bottom: 1px solid var(--border);
             color: var(--fg-0);
             font-size: 11px;
@@ -5899,17 +5899,18 @@ def index():
         }
         .tm-btn-del:hover { background: #2a1010; border-color: #883333; color: #cc4444; }
         .container {
-            width: 95%;
+            width: 100%;
             max-width: none;
             margin: 0 auto;
-            padding: 15px;
+            padding: 12px;
+            box-sizing: border-box;
         }
         /* Slim sticky top bar (replaces .header / .header-top / .header-bottom) */
         .top-bar {
             display: flex;
             align-items: center;
-            gap: 10px;
-            padding: 6px 14px;
+            gap: 8px;
+            padding: 6px 12px;
             background: var(--bg-1);
             border-bottom: 1px solid var(--border);
             position: sticky;
@@ -5917,7 +5918,7 @@ def index():
             z-index: 100;
             min-height: 44px;
             box-sizing: border-box;
-            margin-bottom: 14px;
+            margin-bottom: 10px;
         }
         .top-bar .top-spacer { flex: 1; }
         .top-bar input[type="text"],
@@ -6153,10 +6154,13 @@ def index():
             text-align: center;
         }
         .chart-grid {
+            --gex-col-w: 320px;
+            --rail-col-w: 272px;
+            --workspace-pane-h: clamp(700px, 74vh, 840px);
             display: grid;
-            grid-template-columns: minmax(0, 1fr) var(--gex-col-w, 340px) 320px;
-            column-gap: 4px;
-            row-gap: 5px;
+            grid-template-columns: minmax(0, 1fr) var(--gex-col-w) var(--rail-col-w);
+            column-gap: 2px;
+            row-gap: 4px;
             width: 100%;
             align-items: stretch;
         }
@@ -6198,6 +6202,7 @@ def index():
             border-radius: 0 0 10px 10px;
             overflow: hidden;
             margin-bottom: 5px;
+            min-width: 0;
         }
 
         /* ── Right rail (GEX / Alerts / Levels) ──────────────────────── */
@@ -6210,6 +6215,7 @@ def index():
             border-radius: 10px 10px 0 0;
             padding: 0;
             overflow: hidden;
+            min-height: 34px;
         }
         .right-rail-tab {
             flex: 1 1 0;
@@ -6217,7 +6223,7 @@ def index():
             color: var(--fg-1);
             border: none;
             border-bottom: 2px solid transparent;
-            padding: 3px 4px;
+            padding: 0 6px;
             font-size: 10px;
             line-height: 1.3;
             font-weight: 500;
@@ -6225,6 +6231,10 @@ def index():
             text-transform: uppercase;
             cursor: pointer;
             min-width: 0;
+            min-height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
         .right-rail-tab:hover { color: var(--fg-0); }
         .right-rail-tab.active {
@@ -6234,7 +6244,7 @@ def index():
         .right-rail-panels {
             position: relative;
             background: var(--bg-0);
-            height: 680px;
+            height: var(--workspace-pane-h);
             display: flex;
             flex-direction: column;
             min-width: 0;
@@ -6266,8 +6276,8 @@ def index():
         .dealer-impact {
             display: flex;
             flex-direction: column;
-            gap: 8px;
-            padding: 10px 12px;
+            gap: 7px;
+            padding: 8px 10px;
             border-bottom: 1px solid var(--border);
             font-size: 12px;
             flex: 0 0 auto;
@@ -6308,11 +6318,11 @@ def index():
             background: var(--bg-1);
             border: 1px solid var(--border);
             border-radius: var(--radius-lg);
-            padding: 12px 14px;
-            margin: 8px 10px 0 10px;
+            padding: 10px 12px;
+            margin: 6px 8px 0 8px;
             flex: 0 0 auto;
         }
-        .rail-card:last-child { margin-bottom: 8px; }
+        .rail-card:last-child { margin-bottom: 6px; }
         .rail-card-header-row {
             display: flex;
             align-items: baseline;
@@ -6336,7 +6346,7 @@ def index():
             white-space: nowrap;
         }
         .rail-card-price-big {
-            font-size: 24px;
+            font-size: 22px;
             font-weight: 650;
             color: var(--fg-0);
             font-variant-numeric: tabular-nums;
@@ -6547,10 +6557,10 @@ def index():
         .rail-alerts-list {
             flex: 1;
             overflow-y: auto;
-            padding: 10px;
+            padding: 8px;
             display: flex;
             flex-direction: column;
-            gap: 6px;
+            gap: 5px;
             min-height: 0;
         }
         .rail-alerts-empty {
@@ -6831,26 +6841,43 @@ def index():
             flex-direction: column;
             min-height: 0;
         }
-        #gex-side-panel { flex: 1; min-height: 0; }
+        #gex-side-panel {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+        }
+        #gex-side-panel > .js-plotly-plot,
+        #gex-side-panel > .plot-container,
+        #gex-side-panel .plotly,
+        #gex-side-panel .svg-container {
+            flex: 1 1 auto;
+            width: 100% !important;
+            height: 100% !important;
+            min-height: 0;
+        }
 
         /* Strike rail (always-on, collapsible) — lives between chart and rail */
         .gex-col-header {
             display: flex;
             align-items: stretch;
-            gap: 8px;
+            gap: 6px;
             background: #1a1a1a;
             border-bottom: 1px solid var(--bg-2);
             border-radius: 10px 10px 0 0;
-            padding: 8px 10px;
+            padding: 4px 8px;
             overflow: hidden;
             min-width: 0;
+            min-height: 34px;
+            container-type: inline-size;
         }
         .strike-rail-header-main {
             flex: 1;
             min-width: 0;
             display: flex;
-            flex-direction: column;
-            gap: 6px;
+            align-items: center;
+            gap: 8px;
         }
         .gex-col-header .gex-col-title {
             font-size: 10px;
@@ -6861,19 +6888,32 @@ def index():
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+            flex: 0 0 auto;
         }
         .strike-rail-tabs {
             display: flex;
-            flex-wrap: wrap;
-            gap: 4px;
+            align-items: center;
+            flex: 1 1 auto;
             min-width: 0;
         }
+        .strike-rail-tab-list {
+            display: none;
+            align-items: center;
+            flex: 1 1 auto;
+            flex-wrap: nowrap;
+            gap: 3px;
+            min-width: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: none;
+        }
+        .strike-rail-tab-list::-webkit-scrollbar { display: none; }
         .strike-rail-tab {
             background: var(--bg-2);
             color: var(--fg-2);
             border: 1px solid var(--border);
             border-radius: 999px;
-            padding: 3px 8px;
+            padding: 2px 7px;
             font-size: 10px;
             line-height: 1.2;
             letter-spacing: 0.04em;
@@ -6886,6 +6926,32 @@ def index():
             background: var(--accent);
             color: #fff;
             border-color: var(--accent);
+        }
+        .strike-rail-select-wrap {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 1 1 auto;
+            min-width: 0;
+            padding-left: 4px;
+        }
+        .strike-rail-select-icon {
+            color: var(--fg-1);
+            font-size: 12px;
+            line-height: 1;
+            flex: 0 0 auto;
+        }
+        .strike-rail-select {
+            width: 100%;
+            min-width: 0;
+            min-height: 26px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: var(--bg-2);
+            color: var(--fg-0);
+            font-size: 11px;
+            letter-spacing: 0.02em;
         }
         .gex-col-toggle {
             background: transparent;
@@ -6901,7 +6967,7 @@ def index():
         .gex-column {
             position: relative;
             background: var(--bg-0);
-            height: 680px;
+            height: var(--workspace-pane-h);
             display: flex;
             flex-direction: column;
             min-width: 0;
@@ -6929,7 +6995,7 @@ def index():
         .secondary-tabs {
             display: flex;
             gap: 2px;
-            margin: 8px 0 6px 0;
+            margin: 6px 0 6px 0;
             flex-wrap: wrap;
             border-bottom: 1px solid #2A2A2A;
             padding-bottom: 0;
@@ -6958,7 +7024,7 @@ def index():
         #price-chart {
             padding: 0 !important;
             background-color: var(--bg-0) !important;
-            height: 680px !important;
+            height: var(--workspace-pane-h) !important;
             border-radius: 0 0 0 0;
             overflow: hidden;
             /* override .chart-container defaults that conflict */
@@ -7079,9 +7145,9 @@ def index():
         .tv-chart-title {
             display: inline-block;
             color: #CCCCCC;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: bold;
-            padding: 2px 8px;
+            padding: 0 6px 0 2px;
             pointer-events: none;
             flex: 0 0 auto;
             white-space: nowrap;
@@ -7091,14 +7157,15 @@ def index():
             background: #1a1a1a;
             border-bottom: 1px solid var(--bg-2);
             border-radius: 10px 10px 0 0;
-            padding: 2px 6px;
+            padding: 2px 5px;
             display: flex;
             flex-wrap: nowrap;
-            gap: 8px;
+            gap: 6px;
             align-items: center;
             min-height: 0;
             min-width: 0;
             overflow: hidden;
+            min-height: 34px;
         }
         .tv-toolbar {
             display: contents; /* children flow directly into container */
@@ -7106,7 +7173,7 @@ def index():
         .tv-toolbar-main {
             display: flex;
             align-items: center;
-            gap: 3px;
+            gap: 2px;
             flex: 1 1 auto;
             min-width: 0;
             overflow-x: auto;
@@ -7116,7 +7183,7 @@ def index():
         .tv-toolbar-right {
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 4px;
             flex: 0 0 auto;
             margin-left: auto;
             white-space: nowrap;
@@ -7133,7 +7200,7 @@ def index():
             border: 1px solid var(--border);
             color: #ccc;
             border-radius: 4px;
-            padding: 2px 6px;
+            padding: 2px 5px;
             font-size: 10px;
             line-height: 1.3;
             cursor: pointer;
@@ -7151,7 +7218,7 @@ def index():
             border: 1px solid rgba(245, 158, 11, 0.28);
             background: rgba(245, 158, 11, 0.12);
             border-radius: 4px;
-            padding: 3px 6px;
+            padding: 3px 5px;
             white-space: nowrap;
             user-select: none;
         }
@@ -7222,7 +7289,7 @@ def index():
         .candle-close-timer {
             font-size: 11px;
             font-family: 'Courier New', monospace;
-            padding: 3px 7px;
+            padding: 3px 6px;
             border-radius: 4px;
             background: #2a2a2a;
             border: 1px solid var(--border);
@@ -7469,8 +7536,11 @@ def index():
         /* Add new CSS for the responsive grid layout */
         .charts-grid {
             display: grid;
-            gap: 5px;
+            gap: 4px;
             width: 100%;
+        }
+        .charts-grid.tabbed .chart-container {
+            height: 430px;
         }
         
         .charts-grid.one-chart {
@@ -7522,7 +7592,7 @@ def index():
         /* Drop the strike rail below price on laptop widths before going single-column. */
         @media screen and (max-width: 1400px) {
             .chart-grid {
-                grid-template-columns: minmax(0, 1fr) 320px;
+                grid-template-columns: minmax(0, 1fr) var(--rail-col-w);
             }
             .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
             .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
@@ -11068,10 +11138,20 @@ def index():
                 activeStrikeRailTab = availableTabs[0] || 'gex';
                 try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
             }
-            tabsEl.innerHTML = availableTabs.map(tab =>
+            const buttonHtml = availableTabs.map(tab =>
                 '<button type="button" class="strike-rail-tab' + (tab === activeStrikeRailTab ? ' active' : '') +
                 '" data-strike-rail-tab="' + tab + '">' + (STRIKE_RAIL_LABELS[tab] || tab) + '</button>'
             ).join('');
+            const optionHtml = availableTabs.map(tab =>
+                '<option value="' + tab + '"' + (tab === activeStrikeRailTab ? ' selected' : '') + '>' +
+                (STRIKE_RAIL_LABELS[tab] || tab) + '</option>'
+            ).join('');
+            tabsEl.innerHTML =
+                '<div class="strike-rail-tab-list">' + buttonHtml + '</div>' +
+                '<label class="strike-rail-select-wrap" aria-label="Strike rail view">' +
+                    '<span class="strike-rail-select-icon" aria-hidden="true">&#9776;</span>' +
+                    '<select class="strike-rail-select" id="strike-rail-select">' + optionHtml + '</select>' +
+                '</label>';
             wireStrikeRailTabs();
         }
 
@@ -11088,6 +11168,18 @@ def index():
                     renderStrikeRailPanel();
                 });
             });
+            const select = document.getElementById('strike-rail-select');
+            if (select && !select.__strikeRailWired) {
+                select.__strikeRailWired = true;
+                select.addEventListener('change', () => {
+                    const next = select.value;
+                    if (!next || next === activeStrikeRailTab) return;
+                    activeStrikeRailTab = next;
+                    try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
+                    applyStrikeRailTabs();
+                    renderStrikeRailPanel();
+                });
+            }
         }
 
         function getStrikeRailTarget() {
@@ -11146,7 +11238,10 @@ def index():
                 }
                 const renderer = hasMountedPlot ? Plotly.react : Plotly.newPlot;
                 renderer(target, fig.data || [], fig.layout || {}, config)
-                    .then(() => syncGexPanelYAxisToTV());
+                    .then(() => {
+                        try { Plotly.Plots.resize(target); } catch (e) {}
+                        syncGexPanelYAxisToTV();
+                    });
             } catch (e) {
                 console.warn('strike rail render failed', activeStrikeRailTab, e);
                 renderStrikeRailEmpty('Could not render ' + (STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'strike rail') + '.');
