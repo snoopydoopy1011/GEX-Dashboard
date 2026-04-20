@@ -1166,11 +1166,14 @@ def fetch_options_for_date(ticker, date, exposure_metric="Open Interest", delta_
                             'lastPrice': float(option['last']),
                             'bid': float(option['bid']),
                             'ask': float(option['ask']),
+                            'mark': float(option.get('mark', 0) or 0),
                             'volume': int(option['totalVolume']),
                             'openInterest': int(option['openInterest']),
                             'impliedVolatility': vol,
                             'inTheMoney': option['inTheMoney'],
                             'expiration': datetime.strptime(exp_date.split(':')[0], '%Y-%m-%d').date(),
+                            'quoteTimeInLong': _coerce_epoch_ms(option.get('quoteTimeInLong')),
+                            'tradeTimeInLong': _coerce_epoch_ms(option.get('tradeTimeInLong')),
                             'delta': delta,
                             'gamma': gamma,
                             'theta': theta,
@@ -1202,11 +1205,14 @@ def fetch_options_for_date(ticker, date, exposure_metric="Open Interest", delta_
                             'lastPrice': float(option['last']),
                             'bid': float(option['bid']),
                             'ask': float(option['ask']),
+                            'mark': float(option.get('mark', 0) or 0),
                             'volume': int(option['totalVolume']),
                             'openInterest': int(option['openInterest']),
                             'impliedVolatility': vol,
                             'inTheMoney': option['inTheMoney'],
                             'expiration': datetime.strptime(exp_date.split(':')[0], '%Y-%m-%d').date(),
+                            'quoteTimeInLong': _coerce_epoch_ms(option.get('quoteTimeInLong')),
+                            'tradeTimeInLong': _coerce_epoch_ms(option.get('tradeTimeInLong')),
                             'delta': delta,
                             'gamma': gamma,
                             'theta': theta,
@@ -3370,6 +3376,65 @@ def compute_top_oi_strikes(calls, puts, n=5):
     return {'calls': top_calls, 'puts': top_puts, 'both': overlap}
 
 
+def _coerce_epoch_ms(value):
+    """Normalize optional Schwab epoch timestamps to integer milliseconds."""
+    try:
+        if value is None or pd.isna(value):
+            return None
+        ts = int(float(value))
+    except Exception:
+        return None
+    if ts <= 0:
+        return None
+    if ts < 10_000_000_000:
+        ts *= 1000
+    return ts
+
+
+def _format_flow_blotter_time(ts_ms):
+    if not ts_ms:
+        return '—'
+    try:
+        local_dt = datetime.fromtimestamp(ts_ms / 1000, tz=pytz.UTC).astimezone()
+        today = datetime.now(local_dt.tzinfo).date()
+        if local_dt.date() == today:
+            return local_dt.strftime('%H:%M:%S')
+        return local_dt.strftime('%b %d %H:%M')
+    except Exception:
+        return '—'
+
+
+def _format_flow_blotter_expiry(expiry_value):
+    if expiry_value is None or pd.isna(expiry_value):
+        return '—'
+    try:
+        expiry_dt = pd.to_datetime(expiry_value, errors='coerce')
+        if pd.isna(expiry_dt):
+            return '—'
+        return expiry_dt.strftime('%b %d')
+    except Exception:
+        return '—'
+
+
+def _flow_blotter_market_text(bid, mid, ask):
+    if bid <= 0 and ask <= 0:
+        return '—'
+    bid_text = f"{bid:.2f}" if bid > 0 else '—'
+    mid_text = f"{mid:.2f}" if mid > 0 else '—'
+    ask_text = f"{ask:.2f}" if ask > 0 else '—'
+    return f"{bid_text} / {mid_text} / {ask_text}"
+
+
+def _flow_blotter_side_label(side_code, bid, ask):
+    if bid <= 0 and ask <= 0:
+        return 'unknown'
+    if side_code > 0:
+        return 'ask'
+    if side_code < 0:
+        return 'bid'
+    return 'mid'
+
+
 def compute_key_levels(calls, puts, S, selected_expiries=None):
     """Return the key dealer-flow levels to draw on the price chart.
 
@@ -4237,162 +4302,423 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
 
 
 def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
-    """Create a sortable options chain table showing all options within the strike range"""
-    # Calculate strike range boundaries
-    min_strike = S * (1 - strike_range)
-    max_strike = S * (1 + strike_range)
-    
-    # Filter options within strike range
-    calls = calls[(calls['strike'] >= min_strike) & (calls['strike'] <= max_strike)]
-    puts = puts[(puts['strike'] >= min_strike) & (puts['strike'] <= max_strike)]
-    
-    def analyze_options(df, is_put=False):
-        options = []
-        for _, row in df.iterrows():
-            options.append({
-                'type': 'Put' if is_put else 'Call',
-                'strike': float(row['strike']),
-                'bid': float(row['bid']),
-                'ask': float(row['ask']),
-                'last': float(row['lastPrice']),
-                'volume': int(row['volume']),
-                'openInterest': int(row['openInterest']),
-                'iv': float(row['impliedVolatility'])
+    """Create a flow-oriented blotter from the option chain snapshot."""
+    try:
+        spot = float(S)
+    except Exception:
+        spot = None
+
+    max_rows = 120
+    min_strike = spot * (1 - strike_range) if spot and np.isfinite(spot) else None
+    max_strike = spot * (1 + strike_range) if spot and np.isfinite(spot) else None
+
+    def build_rows(df, is_put=False):
+        if df is None or df.empty:
+            return []
+        working = df.copy()
+        if 'volume' in working.columns:
+            working = working[pd.to_numeric(working['volume'], errors='coerce').fillna(0) > 0]
+        if min_strike is not None and max_strike is not None and 'strike' in working.columns:
+            strikes = pd.to_numeric(working['strike'], errors='coerce')
+            working = working[(strikes >= min_strike) & (strikes <= max_strike)]
+
+        rows = []
+        for _, row in working.iterrows():
+            strike = float(row.get('strike', 0) or 0)
+            bid = float(row.get('bid', 0) or 0)
+            ask = float(row.get('ask', 0) or 0)
+            last = float(row.get('lastPrice', 0) or 0)
+            volume = int(float(row.get('volume', 0) or 0))
+            open_interest = int(float(row.get('openInterest', 0) or 0))
+            mid = ((bid + ask) / 2.0) if bid > 0 and ask > 0 else (bid if bid > 0 else ask)
+            ref_price = last if last > 0 else mid
+            premium = max(ref_price, 0) * max(volume, 0) * 100
+            if premium <= 0:
+                continue
+
+            expiry_value = row.get('expiration', row.get('expiration_date'))
+            expiry_value_norm = pd.to_datetime(expiry_value, errors='coerce')
+            expiry_iso = expiry_value_norm.strftime('%Y-%m-%d') if not pd.isna(expiry_value_norm) else ''
+            trade_ts = _coerce_epoch_ms(row.get('tradeTimeInLong'))
+            quote_ts = _coerce_epoch_ms(row.get('quoteTimeInLong'))
+            event_ts = trade_ts or quote_ts
+            voi = (volume / open_interest) if open_interest > 0 else float(volume)
+            side_label = _flow_blotter_side_label(int(row.get('side', 0) or 0), bid, ask)
+            side_text = {'ask': 'Ask', 'bid': 'Bid', 'mid': 'Mid', 'unknown': 'Unknown'}[side_label]
+            distance = abs(strike - spot) if spot and np.isfinite(spot) else 0.0
+            option_type = 'put' if is_put else 'call'
+            time_title = 'Latest trade time from chain snapshot' if trade_ts else (
+                'Latest quote time from chain snapshot' if quote_ts else 'Chain snapshot does not include per-contract time here'
+            )
+            rows.append({
+                'time_text': _format_flow_blotter_time(event_ts),
+                'time_value': event_ts or 0,
+                'time_title': time_title,
+                'type_key': option_type,
+                'type_label': 'Put' if is_put else 'Call',
+                'type_color': put_color if is_put else call_color,
+                'strike': strike,
+                'expiry_text': _format_flow_blotter_expiry(expiry_value),
+                'expiry_value': expiry_iso,
+                'last': last,
+                'market_text': _flow_blotter_market_text(bid, mid, ask),
+                'market_value': mid,
+                'volume': volume,
+                'open_interest': open_interest,
+                'voi': voi,
+                'voi_text': 'new' if open_interest <= 0 and volume > 0 else f"{voi:.2f}x",
+                'premium': premium,
+                'premium_text': f"${format_large_number(premium)}",
+                'side_key': side_label,
+                'side_text': side_text,
+                'distance': distance,
             })
-        return options
-    
-    # Get options for both calls and puts
-    options_chain = analyze_options(calls) + analyze_options(puts, is_put=True)
-    
-    # Sort by strike price (default)
-    options_chain.sort(key=lambda x: x['strike'])
-    
-    # Add expiry info to title if multiple expiries are selected
-    chart_title = 'Options Chain'
+        return rows
+
+    flow_rows = build_rows(calls, is_put=False) + build_rows(puts, is_put=True)
+    has_event_times = any(row['time_value'] > 0 for row in flow_rows)
+    if has_event_times:
+        flow_rows.sort(
+            key=lambda row: (
+                row['time_value'],
+                row['premium'],
+                row['voi'],
+                row['volume'],
+                -row['distance'],
+            ),
+            reverse=True,
+        )
+        default_sort = 'time'
+        sort_note = 'Sorted by latest chain timestamp, then premium.'
+    else:
+        flow_rows.sort(
+            key=lambda row: (
+                row['premium'],
+                row['voi'],
+                row['volume'],
+                -row['distance'],
+            ),
+            reverse=True,
+        )
+        default_sort = 'premium'
+        sort_note = 'No per-contract timestamps in this chain snapshot, so rows rank by premium.'
+
+    visible_rows = flow_rows[:max_rows]
+    total_premium = sum(row['premium'] for row in visible_rows)
+    hidden_count = max(0, len(flow_rows) - len(visible_rows))
+
+    chart_title = 'Flow Blotter'
     if selected_expiries and len(selected_expiries) > 1:
-        chart_title = f"Options Chain ({len(selected_expiries)} expiries)"
-    
-    # Create HTML table with sorting functionality
-    html_content = f'''
-    <div style="background-color: #1E1E1E; padding: 10px; border-radius: 10px; height: 100%; overflow: hidden; display: flex; flex-direction: column;">
-        <h3 style="color: #CCCCCC; text-align: center; margin: 0 0 10px 0; font-size: 14px;">{chart_title}</h3>
-        <div style="flex: 1; overflow: auto;">
-            <table id="optionsChainTable" style="width: 100%; border-collapse: collapse; background-color: #1E1E1E; color: white; font-family: Arial, sans-serif; font-size: 10px; table-layout: fixed;">
+        chart_title = f"Flow Blotter ({len(selected_expiries)} expiries)"
+
+    subtitle_parts = [f"{len(flow_rows):,} active contracts in range"]
+    if hidden_count:
+        subtitle_parts.append(f"showing top {len(visible_rows):,} by signal")
+    subtitle_parts.append(sort_note)
+    subtitle = ' · '.join(subtitle_parts)
+
+    rows_html = []
+    for row in visible_rows:
+        rows_html.append(f'''
+                    <tr data-flow-row="1"
+                        data-option-type="{row['type_key']}"
+                        data-time="{row['time_value']}"
+                        data-strike="{row['strike']}"
+                        data-expiry="{row['expiry_value']}"
+                        data-last="{row['last']}"
+                        data-market="{row['market_value']}"
+                        data-volume="{row['volume']}"
+                        data-open-interest="{row['open_interest']}"
+                        data-voi="{row['voi']}"
+                        data-premium="{row['premium']}"
+                        data-side="{row['side_key']}">
+                        <td class="flow-blotter__time" title="{row['time_title']}">{row['time_text']}</td>
+                        <td><span class="flow-blotter__badge flow-blotter__badge--{row['type_key']}" style="--flow-badge-color:{row['type_color']};">{row['type_label']}</span></td>
+                        <td class="num">{row['strike']:.0f}</td>
+                        <td>{row['expiry_text']}</td>
+                        <td class="num">{row['last']:.2f}</td>
+                        <td class="flow-blotter__market num">{row['market_text']}</td>
+                        <td class="num">{row['volume']:,}</td>
+                        <td class="num">{row['open_interest']:,}</td>
+                        <td class="num">{row['voi_text']}</td>
+                        <td class="num">{row['premium_text']}</td>
+                        <td><span class="flow-blotter__side flow-blotter__side--{row['side_key']}">{row['side_text']}</span></td>
+                    </tr>
+        ''')
+
+    if not rows_html:
+        rows_html.append('''
+                    <tr>
+                        <td colspan="11" class="flow-blotter__empty">
+                            No in-range contracts with non-zero day volume are available for this snapshot.
+                        </td>
+                    </tr>
+        ''')
+
+    return f'''
+    <style>
+        .flow-blotter {{
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+        }}
+        .flow-blotter__header {{
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 14px 10px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(180deg, rgba(59,130,246,0.08), rgba(59,130,246,0));
+            flex-wrap: wrap;
+        }}
+        .flow-blotter__title {{
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--fg-0);
+        }}
+        .flow-blotter__meta,
+        .flow-blotter__summary,
+        .flow-blotter__note {{
+            font-size: 11px;
+            color: var(--fg-1);
+        }}
+        .flow-blotter__controls {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }}
+        .flow-blotter__segmented {{
+            display: inline-flex;
+            background: var(--bg-0);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 2px;
+            gap: 2px;
+        }}
+        .flow-blotter__chip,
+        .flow-blotter__reset {{
+            border: 1px solid var(--border);
+            background: var(--bg-2);
+            color: var(--fg-1);
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        }}
+        .flow-blotter__segmented .flow-blotter__chip {{
+            border: none;
+            background: transparent;
+        }}
+        .flow-blotter__chip:hover,
+        .flow-blotter__reset:hover {{
+            color: var(--fg-0);
+            border-color: var(--border-strong);
+        }}
+        .flow-blotter__chip.active {{
+            background: var(--accent);
+            color: var(--fg-0);
+        }}
+        .flow-blotter__threshold {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--fg-1);
+            background: var(--bg-0);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 0 8px;
+            min-height: 30px;
+        }}
+        .flow-blotter__threshold input {{
+            width: 96px;
+            border: none;
+            outline: none;
+            background: transparent;
+            color: var(--fg-0);
+            font: inherit;
+        }}
+        .flow-blotter__summary,
+        .flow-blotter__note {{
+            padding: 0 14px 10px;
+        }}
+        .flow-blotter__table-wrap {{
+            flex: 1;
+            min-height: 0;
+            overflow: auto;
+        }}
+        .flow-blotter table {{
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }}
+        .flow-blotter thead th {{
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: var(--bg-2);
+            border-bottom: 1px solid var(--border);
+            text-align: left;
+            padding: 0;
+        }}
+        .flow-blotter__sort {{
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+            background: transparent;
+            border: none;
+            color: var(--fg-1);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            padding: 8px 10px;
+            cursor: pointer;
+        }}
+        .flow-blotter__sort:hover {{
+            color: var(--fg-0);
+        }}
+        .flow-blotter__sort-indicator {{
+            color: var(--fg-2);
+            font-size: 11px;
+        }}
+        .flow-blotter tbody td {{
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--border);
+            color: var(--fg-0);
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .flow-blotter tbody tr:hover td {{
+            background: rgba(59,130,246,0.06);
+        }}
+        .flow-blotter__badge,
+        .flow-blotter__side {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 44px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+        .flow-blotter__badge {{
+            color: var(--flow-badge-color);
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border-strong);
+        }}
+        .flow-blotter__side--ask {{
+            color: var(--call);
+            background: rgba(16,185,129,0.10);
+            border: 1px solid rgba(16,185,129,0.28);
+        }}
+        .flow-blotter__side--bid {{
+            color: var(--put);
+            background: rgba(239,68,68,0.10);
+            border: 1px solid rgba(239,68,68,0.28);
+        }}
+        .flow-blotter__side--mid {{
+            color: var(--warn);
+            background: rgba(245,158,11,0.10);
+            border: 1px solid rgba(245,158,11,0.28);
+        }}
+        .flow-blotter__side--unknown {{
+            color: var(--fg-1);
+            background: var(--bg-2);
+            border: 1px solid var(--border);
+        }}
+        .flow-blotter__market,
+        .flow-blotter__time {{
+            color: var(--fg-1);
+        }}
+        .flow-blotter__empty {{
+            text-align: center;
+            color: var(--fg-1);
+            padding: 24px 12px;
+        }}
+        .flow-blotter__empty-state {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 14px;
+            color: var(--fg-1);
+            font-size: 11px;
+            border-top: 1px solid var(--border);
+        }}
+        .flow-blotter__empty-state[hidden] {{
+            display: none;
+        }}
+        @media (max-width: 900px) {{
+            .flow-blotter__header {{
+                flex-direction: column;
+                align-items: stretch;
+            }}
+            .flow-blotter__controls {{
+                justify-content: flex-start;
+            }}
+        }}
+    </style>
+    <div class="flow-blotter" data-default-sort="{default_sort}" data-default-dir="desc" data-initial-type="all">
+        <div class="flow-blotter__header">
+            <div>
+                <div class="flow-blotter__title">{chart_title}</div>
+                <div class="flow-blotter__meta">{subtitle}</div>
+            </div>
+            <div class="flow-blotter__controls">
+                <div class="flow-blotter__segmented" role="tablist" aria-label="Flow blotter contract type filter">
+                    <button type="button" class="flow-blotter__chip active" data-flow-type="all" aria-pressed="true">All</button>
+                    <button type="button" class="flow-blotter__chip" data-flow-type="call" aria-pressed="false">Calls</button>
+                    <button type="button" class="flow-blotter__chip" data-flow-type="put" aria-pressed="false">Puts</button>
+                </div>
+                <label class="flow-blotter__threshold">
+                    <span>Min prem</span>
+                    <input type="number" min="0" step="25000" value="0" data-flow-min-premium>
+                </label>
+                <button type="button" class="flow-blotter__reset" data-flow-reset>Reset</button>
+            </div>
+        </div>
+        <div class="flow-blotter__summary" data-flow-summary">
+            {len(visible_rows):,} shown · Approx premium ${format_large_number(total_premium)}
+        </div>
+        <div class="flow-blotter__note">
+            Chain snapshot view: premium is estimated as last x day volume x 100. Side is inferred from last vs. bid/ask and is not a tape classification.
+        </div>
+        <div class="flow-blotter__empty-state" data-flow-empty hidden>No rows match the current filters.</div>
+        <div class="flow-blotter__table-wrap">
+            <table>
                 <thead>
-                    <tr style="background-color: #2D2D2D; position: sticky; top: 0; z-index: 10;">
-                        <th onclick="sortTable(0, 'string')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 8%;">
-                            Type <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(1, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 12%;">
-                            Strike <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(2, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 12%;">
-                            Bid <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(3, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 12%;">
-                            Ask <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(4, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 12%;">
-                            Last <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(5, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 14%;">
-                            Vol <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(6, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 22%;">
-                            OI <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(7, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 8%;">
-                            IV <span style="font-size: 8px;">▼▲</span>
-                        </th>
+                    <tr>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="time" data-sort-type="number">Time <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="optionType" data-sort-type="string">Type <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="strike" data-sort-type="number">Strike <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="expiry" data-sort-type="string">Expiry <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="last" data-sort-type="number">Last <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="market" data-sort-type="number">Bid / Mid / Ask <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="volume" data-sort-type="number">Vol <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="openInterest" data-sort-type="number">OI <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="voi" data-sort-type="number">V/OI <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="premium" data-sort-type="number">Premium <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="side" data-sort-type="string">Side <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
                     </tr>
                 </thead>
                 <tbody>
-    '''
-    
-    # Add table rows
-    for option in options_chain:
-        row_color = call_color if option['type'] == 'Call' else put_color
-        html_content += f'''
-                    <tr style="border-bottom: 1px solid #333333;" onmouseover="this.style.backgroundColor='#333333'" onmouseout="this.style.backgroundColor='transparent'">
-                        <td style="padding: 3px 2px; border: 1px solid #444444; color: {row_color}; font-weight: bold; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{option['type'][0]}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['strike']}">{option['strike']:.0f}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['bid']}">{option['bid']:.2f}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['ask']}">{option['ask']:.2f}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['last']}">{option['last']:.2f}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['volume']}">{option['volume']:,}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['openInterest']}">{option['openInterest']:,}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['iv']}">{option['iv']:.0%}</td>
-                    </tr>
-        '''
-    
-    html_content += '''
+                    {''.join(rows_html)}
                 </tbody>
             </table>
         </div>
     </div>
-    
-    <script>
-    let sortDirection = {};
-    
-    function sortTable(columnIndex, dataType) {
-        const table = document.getElementById('optionsChainTable');
-        const tbody = table.tBodies[0];
-        const rows = Array.from(tbody.rows);
-        
-        // Toggle sort direction
-        if (!sortDirection[columnIndex]) {
-            sortDirection[columnIndex] = 'asc';
-        } else {
-            sortDirection[columnIndex] = sortDirection[columnIndex] === 'asc' ? 'desc' : 'asc';
-        }
-        
-        const direction = sortDirection[columnIndex];
-        
-        rows.sort((a, b) => {
-            let aVal, bVal;
-            
-            if (dataType === 'number') {
-                aVal = parseFloat(a.cells[columnIndex].getAttribute('data-sort') || a.cells[columnIndex].textContent.replace(/[$,%]/g, ''));
-                bVal = parseFloat(b.cells[columnIndex].getAttribute('data-sort') || b.cells[columnIndex].textContent.replace(/[$,%]/g, ''));
-                
-                if (isNaN(aVal)) aVal = 0;
-                if (isNaN(bVal)) bVal = 0;
-            } else {
-                aVal = a.cells[columnIndex].textContent.toLowerCase();
-                bVal = b.cells[columnIndex].textContent.toLowerCase();
-            }
-            
-            if (direction === 'asc') {
-                return aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
-            } else {
-                return aVal > bVal ? -1 : aVal < bVal ? 1 : 0;
-            }
-        });
-        
-        // Clear tbody and append sorted rows
-        while (tbody.firstChild) {
-            tbody.removeChild(tbody.firstChild);
-        }
-        
-        rows.forEach(row => tbody.appendChild(row));
-        
-        // Update header indicators
-        const headers = table.querySelectorAll('th');
-        headers.forEach((header, index) => {
-            const span = header.querySelector('span');
-            if (index === columnIndex) {
-                span.textContent = direction === 'asc' ? '▲' : '▼';
-                span.style.color = '#10B981';
-            } else {
-                span.textContent = '▼▲';
-                span.style.color = '#666';
-            }
-        });
-    }
-    </script>
     '''
-    
-    return html_content
 
 
 
@@ -11210,12 +11536,13 @@ def index():
         let secondaryActiveTab = (() => {
             try { return localStorage.getItem(SECONDARY_TAB_KEY) || null; } catch(e) { return null; }
         })();
+        const FLOW_BLOTTER_STATE_KEY = 'gex.flowBlotterState';
         const secondaryTabLabels = {
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
             volume: 'Volume', volume_ratio: 'Vol Ratio', options_chain: 'Chain',
-            premium: 'Premium', large_trades: 'Large Trades', centroid: 'Centroid',
+            premium: 'Premium', large_trades: 'Flow Blotter', centroid: 'Centroid',
         };
         function updateSecondaryTabs(chartIds) {
             const grid = document.querySelector('.charts-grid');
@@ -11258,6 +11585,175 @@ def index():
                     try { Plotly.Plots.resize(el); } catch (e) {}
                 }
             });
+        }
+        function initFlowBlotter(container) {
+            if (!container) return;
+            const root = container.querySelector('.flow-blotter');
+            if (!root || root.dataset.bound === '1') return;
+            root.dataset.bound = '1';
+
+            const tbody = root.querySelector('tbody');
+            if (!tbody) return;
+            const rows = Array.from(tbody.querySelectorAll('tr[data-flow-row="1"]'));
+            const filterButtons = Array.from(root.querySelectorAll('[data-flow-type]'));
+            const minPremiumInput = root.querySelector('[data-flow-min-premium]');
+            const resetButton = root.querySelector('[data-flow-reset]');
+            const summaryEl = root.querySelector('[data-flow-summary]');
+            const emptyStateEl = root.querySelector('[data-flow-empty]');
+            const sortButtons = Array.from(root.querySelectorAll('[data-sort-key]'));
+
+            function loadFlowState() {
+                try {
+                    const raw = localStorage.getItem(FLOW_BLOTTER_STATE_KEY);
+                    const parsed = raw ? JSON.parse(raw) : null;
+                    return parsed && typeof parsed === 'object' ? parsed : {};
+                } catch (e) {
+                    return {};
+                }
+            }
+            function saveFlowState() {
+                try {
+                    localStorage.setItem(FLOW_BLOTTER_STATE_KEY, JSON.stringify({
+                        activeType,
+                        sortKey,
+                        sortDir,
+                        minPremium: minPremiumInput ? (parseFloat(minPremiumInput.value) || 0) : 0,
+                    }));
+                } catch (e) {}
+            }
+
+            const savedState = loadFlowState();
+            let activeType = savedState.activeType || root.dataset.initialType || 'all';
+            let sortKey = savedState.sortKey || root.dataset.defaultSort || 'premium';
+            let sortDir = savedState.sortDir || root.dataset.defaultDir || 'desc';
+            if (minPremiumInput) {
+                minPremiumInput.value = String(Math.max(0, Number(savedState.minPremium) || 0));
+            }
+
+            function compactUsd(value) {
+                const amount = Number(value) || 0;
+                if (Math.abs(amount) >= 1e9) return '$' + (amount / 1e9).toFixed(2) + 'B';
+                if (Math.abs(amount) >= 1e6) return '$' + (amount / 1e6).toFixed(2) + 'M';
+                if (Math.abs(amount) >= 1e3) return '$' + (amount / 1e3).toFixed(1) + 'K';
+                return '$' + amount.toFixed(0);
+            }
+
+            function readSortValue(row, key, type) {
+                const raw = row.dataset[key] || '';
+                if (type === 'string') return raw.toLowerCase();
+                const num = parseFloat(raw);
+                return Number.isFinite(num) ? num : 0;
+            }
+
+            function updateFilterButtons() {
+                filterButtons.forEach(btn => {
+                    const active = btn.dataset.flowType === activeType;
+                    btn.classList.toggle('active', active);
+                    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+                });
+            }
+
+            function updateSortIndicators() {
+                sortButtons.forEach(btn => {
+                    const indicator = btn.querySelector('[data-sort-indicator]');
+                    if (!indicator) return;
+                    if (btn.dataset.sortKey === sortKey) {
+                        indicator.textContent = sortDir === 'desc' ? '↓' : '↑';
+                        indicator.style.color = 'var(--accent)';
+                    } else {
+                        indicator.textContent = '↕';
+                        indicator.style.color = 'var(--fg-2)';
+                    }
+                });
+            }
+
+            function applyFiltersAndSort() {
+                const minPremium = minPremiumInput ? Math.max(0, parseFloat(minPremiumInput.value) || 0) : 0;
+                const activeSortButton = root.querySelector(`[data-sort-key="${sortKey}"]`);
+                const sortType = activeSortButton ? (activeSortButton.dataset.sortType || 'number') : 'number';
+                const visibleRows = [];
+                const hiddenRows = [];
+
+                rows.forEach(row => {
+                    const matchesType = activeType === 'all' || row.dataset.optionType === activeType;
+                    const premium = parseFloat(row.dataset.premium) || 0;
+                    const matchesPremium = premium >= minPremium;
+                    if (matchesType && matchesPremium) visibleRows.push(row);
+                    else hiddenRows.push(row);
+                });
+
+                visibleRows.sort((a, b) => {
+                    const aVal = readSortValue(a, sortKey, sortType);
+                    const bVal = readSortValue(b, sortKey, sortType);
+                    let cmp = 0;
+                    if (sortType === 'string') cmp = aVal.localeCompare(bVal);
+                    else if (aVal !== bVal) cmp = aVal < bVal ? -1 : 1;
+                    if (cmp !== 0) return sortDir === 'desc' ? -cmp : cmp;
+                    return (parseFloat(b.dataset.premium) || 0) - (parseFloat(a.dataset.premium) || 0);
+                });
+
+                visibleRows.forEach(row => {
+                    row.hidden = false;
+                    tbody.appendChild(row);
+                });
+                hiddenRows.forEach(row => {
+                    row.hidden = true;
+                    tbody.appendChild(row);
+                });
+
+                const visiblePremium = visibleRows.reduce((sum, row) => sum + (parseFloat(row.dataset.premium) || 0), 0);
+                if (summaryEl) {
+                    const shownText = `${visibleRows.length.toLocaleString()} shown` +
+                        (rows.length !== visibleRows.length ? ` of ${rows.length.toLocaleString()}` : '');
+                    const premiumText = `Approx premium ${compactUsd(visiblePremium)}`;
+                    const thresholdText = minPremium > 0 ? ` · Min prem ${compactUsd(minPremium)}` : '';
+                    summaryEl.textContent = shownText + ' · ' + premiumText + thresholdText;
+                }
+                if (emptyStateEl) {
+                    emptyStateEl.hidden = !(rows.length > 0 && visibleRows.length === 0);
+                }
+
+                saveFlowState();
+                updateFilterButtons();
+                updateSortIndicators();
+            }
+
+            filterButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    activeType = btn.dataset.flowType || 'all';
+                    applyFiltersAndSort();
+                });
+            });
+
+            sortButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const nextKey = btn.dataset.sortKey || 'premium';
+                    if (sortKey === nextKey) {
+                        sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+                    } else {
+                        sortKey = nextKey;
+                        sortDir = 'desc';
+                    }
+                    applyFiltersAndSort();
+                });
+            });
+
+            if (minPremiumInput) {
+                minPremiumInput.addEventListener('input', applyFiltersAndSort);
+                minPremiumInput.addEventListener('change', applyFiltersAndSort);
+            }
+
+            if (resetButton) {
+                resetButton.addEventListener('click', () => {
+                    activeType = root.dataset.initialType || 'all';
+                    sortKey = root.dataset.defaultSort || 'premium';
+                    sortDir = root.dataset.defaultDir || 'desc';
+                    if (minPremiumInput) minPremiumInput.value = '0';
+                    applyFiltersAndSort();
+                });
+            }
+
+            applyFiltersAndSort();
         }
 
         // ── Key levels (Call Wall / Put Wall / Gamma Flip / ±1σ EM) ──────────
@@ -11587,6 +12083,7 @@ def index():
                             if (container.innerHTML !== data[key]) {
                                 container.innerHTML = data[key];
                             }
+                            initFlowBlotter(container);
                         } else {
                             const chartData = JSON.parse(data[key]);
                             
@@ -12277,7 +12774,7 @@ def index():
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
-            volume: 'Volume Ratio', large_trades: 'Options Chain',
+            volume: 'Volume Ratio', large_trades: 'Flow Blotter',
             premium: 'Premium', centroid: 'Centroid',
             hvl: 'HVL line', em_2s: '±2σ EM lines', walls_2: 'Secondary walls',
             historical_dots: 'Historical dots'

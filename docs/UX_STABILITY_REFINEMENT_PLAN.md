@@ -12,7 +12,7 @@
 
 Read the three prior docs first. This plan assumes their layout, tokens, and no-formula-change rules remain in force.
 
-**Current state (as of 2026-04-20):** Stages 1-4 are landed on the active worktree branch `codex-ux-stability-refinement-plan`. Stage 1 manual smoke review passed from user-provided screenshots across `1 min`, `5 min`, `15 min`, `30 min`, and `1 hour` with the timer staying on the first toolbar row and no obvious timeframe bucketing regressions visible in the captured bars. Stage 2 restores top-OI lines reliably and adds a historical-dots drawer toggle. Stage 3 refreshes the right rail into a clearer decision ladder with stronger alert hierarchy and level-context rows. Stage 4 promotes strike-aligned analytics into the center strike rail and leaves Stage 5 as the next implementation target.
+**Current state (as of 2026-04-20):** Stages 1-5 are landed on the active worktree branch `codex-ux-stability-refinement-plan`. Stage 1 manual smoke review passed from user-provided screenshots across `1 min`, `5 min`, `15 min`, `30 min`, and `1 hour` with the timer staying on the first toolbar row and no obvious timeframe bucketing regressions visible in the captured bars. Stage 2 restores top-OI lines reliably and adds a historical-dots drawer toggle. Stage 3 refreshes the right rail into a clearer decision ladder with stronger alert hierarchy and level-context rows. Stage 4 promotes strike-aligned analytics into the center strike rail. Stage 5 replaces the misleading `Large Trades` table with an actionable flow blotter and leaves Stage 6 as the next implementation target.
 
 ---
 
@@ -395,6 +395,15 @@ This phase should make the dashboard read more like a trading workstation and le
 **Commit:**
 
 `feat(flow): replace large-trades table with actionable blotter`
+
+**Progress note (2026-04-20):**
+
+- Landed in `ezoptionsschwab.py`.
+- The former strike-sorted options-chain table is now a `Flow Blotter` tab with aligned columns for `Time`, `Type`, `Strike`, `Expiry`, `Last`, `Bid / Mid / Ask`, `Vol`, `OI`, `V/OI`, `Premium`, and inferred side.
+- When Schwab chain snapshots expose `tradeTimeInLong` or `quoteTimeInLong`, the blotter defaults to recency-first sorting; otherwise it falls back to premium-first ranking and labels that limitation clearly in the UI.
+- The blotter adds one-click `All` / `Calls` / `Puts` filters plus a minimum premium threshold so unusual activity can be narrowed quickly.
+- User-selected sort direction, active sort key, contract-side filter, and minimum premium threshold now persist across normal live refreshes instead of snapping back to the default order.
+- Empty-filter and no-data states are explicitly called out so the tab no longer looks broken when a filter removes all rows.
 
 ---
 
