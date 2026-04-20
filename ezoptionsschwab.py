@@ -108,6 +108,11 @@ def init_db():
                 pass
 
             cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_interval_data_ticker_date_ts
+                ON interval_data (ticker, date, timestamp, strike)
+            ''')
+
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS interval_session_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ticker TEXT NOT NULL,
