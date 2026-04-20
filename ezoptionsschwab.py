@@ -8168,10 +8168,8 @@ def index():
 
         // ── Chart visibility (replaces the deleted .chart-selector checkbox row) ──
         // Source of truth for which secondary charts render. Defaults below mirror the
-        // checked/unchecked state of the old chart-selector markup so behavior on a
-        // fresh browser is identical. Until the Stage-4 drawer ships, the only UI to
-        // toggle a chart on/off is via a saved settings file (gatherSettings/applySettings)
-        // — Stage 4 wires the drawer to setChartVisibility().
+        // legacy checked/unchecked chart state so a fresh browser keeps the same
+        // surfaces visible before any saved settings are loaded.
         const CHART_IDS = [
             'price','gamma','delta','vanna','charm','speed','vomma','color',
             'options_volume','open_interest','volume','large_trades','premium','centroid'
@@ -11167,6 +11165,14 @@ def index():
             });
         }
 
+        function getScopedStats() {
+            return gexScope === '0dte' ? (_lastStats0dte || null) : (_lastStats || null);
+        }
+
+        function getScopedKeyLevels() {
+            return gexScope === '0dte' ? (_lastKeyLevels0dte || null) : (_lastKeyLevels || null);
+        }
+
         function scopePillShouldShow() {
             const selected = getSelectedExpiryValues();
             return selected.length > 1 && !!_lastStats && !!_lastStats0dte;
@@ -11190,17 +11196,21 @@ def index():
             document.querySelectorAll('.gex-scope-btn').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.scope === gexScope);
             });
-            const is0dte = gexScope === '0dte';
-            const stats  = is0dte ? _lastStats0dte     : (_lastStats      || null);
-            const levels = is0dte ? _lastKeyLevels0dte : (_lastKeyLevels  || null);
+            const stats = getScopedStats();
+            const levels = getScopedKeyLevels();
             renderMarketMetrics(stats);
             renderRailKeyLevels(stats);
             renderKeyLevels(levels);
         }
 
         function renderGexSidePanel(panelJson) {
-            if (!panelJson) return;
-            _lastGexPanelJson = panelJson;
+            _lastGexPanelJson = panelJson || null;
+            if (!_lastGexPanelJson) {
+                if (activeStrikeRailTab === 'gex') {
+                    renderStrikeRailEmpty('GEX data loads with the next refresh.');
+                }
+                return;
+            }
             if (activeStrikeRailTab === 'gex') renderStrikeRailPanel();
         }
 
@@ -11947,21 +11957,11 @@ def index():
                     _lastTopOIContextKey = requestTopOIContextKey;
                     if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
                 }
-                if (priceResp && priceResp.gex_panel) {
-                    renderGexSidePanel(priceResp.gex_panel);
-                }
-                if (priceResp && priceResp.key_levels) {
-                    _lastKeyLevels = priceResp.key_levels;
-                }
-                if (priceResp && priceResp.key_levels_0dte) {
-                    _lastKeyLevels0dte = priceResp.key_levels_0dte;
-                }
-                if (priceResp && priceResp.stats_0dte) {
-                    _lastStats0dte = priceResp.stats_0dte;
-                }
-                if (priceResp && priceResp.trader_stats) {
-                    renderTraderStats(priceResp.trader_stats);
-                }
+                renderGexSidePanel(priceResp ? priceResp.gex_panel : null);
+                _lastKeyLevels = priceResp ? (priceResp.key_levels || null) : null;
+                _lastKeyLevels0dte = priceResp ? (priceResp.key_levels_0dte || null) : null;
+                _lastStats0dte = priceResp ? (priceResp.stats_0dte || null) : null;
+                renderTraderStats(priceResp ? (priceResp.trader_stats || null) : null);
                 redrawGexScope();
             })
             .catch(err => console.error('Error fetching price chart:', err))
@@ -12077,7 +12077,7 @@ def index():
                     }
                     
                     try {
-                        // Special handling for options chain (HTML table)
+                        // Flow blotter is HTML, not a Plotly figure.
                         if (key === 'large_trades') {
                             // Only update if content changed
                             if (container.innerHTML !== data[key]) {
@@ -12774,7 +12774,7 @@ def index():
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
-            volume: 'Volume Ratio', large_trades: 'Flow Blotter',
+            volume: 'Volume', large_trades: 'Flow Blotter',
             premium: 'Premium', centroid: 'Centroid',
             hvl: 'HVL line', em_2s: '±2σ EM lines', walls_2: 'Secondary walls',
             historical_dots: 'Historical dots'
@@ -12798,7 +12798,7 @@ def index():
                     setAllChartVisibility({ [id]: cb.checked });
                     if (LINE_OVERLAY_IDS.includes(id)) {
                         // Price-chart overlays redraw from cache — no refetch needed.
-                        if (_lastKeyLevels) renderKeyLevels(_lastKeyLevels);
+                        renderKeyLevels(getScopedKeyLevels());
                         scheduleTVHistoricalOverlayDraw();
                     } else {
                         updateData();

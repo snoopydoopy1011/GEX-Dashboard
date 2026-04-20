@@ -1,6 +1,6 @@
 # GEX Dashboard — UX Stability + Decision-Speed Refinement Plan
 
-**Status:** In Progress
+**Status:** Complete
 **Owner:** Codex
 **Created:** 2026-04-20
 **Target branch:** `feat/ux-stability-refinement`
@@ -12,7 +12,7 @@
 
 Read the three prior docs first. This plan assumes their layout, tokens, and no-formula-change rules remain in force.
 
-**Current state (as of 2026-04-20):** Stages 1-5 are landed on the active worktree branch `codex-ux-stability-refinement-plan`. Stage 1 manual smoke review passed from user-provided screenshots across `1 min`, `5 min`, `15 min`, `30 min`, and `1 hour` with the timer staying on the first toolbar row and no obvious timeframe bucketing regressions visible in the captured bars. Stage 2 restores top-OI lines reliably and adds a historical-dots drawer toggle. Stage 3 refreshes the right rail into a clearer decision ladder with stronger alert hierarchy and level-context rows. Stage 4 promotes strike-aligned analytics into the center strike rail. Stage 5 replaces the misleading `Large Trades` table with an actionable flow blotter and leaves Stage 6 as the next implementation target.
+**Current state (as of 2026-04-20):** Stages 1-6 are landed on the active worktree branch `codex-ux-stability-refinement-plan`. Stage 1 manual smoke review passed from user-provided screenshots across `1 min`, `5 min`, `15 min`, `30 min`, and `1 hour` with the timer staying on the first toolbar row and no obvious timeframe bucketing regressions visible in the captured bars. Stage 2 restores top-OI lines reliably and adds a historical-dots drawer toggle. Stage 3 refreshes the right rail into a clearer decision ladder with stronger alert hierarchy and level-context rows. Stage 4 promotes strike-aligned analytics into the center strike rail. Stage 5 replaces the misleading `Large Trades` table with an actionable flow blotter. Stage 6 closes the loop with a regression sweep across scoped rail data, overlay redraws, and Stage 4/5 copy consistency.
 
 ---
 
@@ -430,6 +430,13 @@ This phase should make the dashboard read more like a trading workstation and le
 **Commit:**
 
 `chore(ui): regression sweep for ux stability refinement`
+
+**Progress note (2026-04-20):**
+
+- Landed in `ezoptionsschwab.py`.
+- `/update_price` response handling now clears stale strike-rail, key-level, and 0DTE scoped payloads when the server returns `null`, so ticker switches and thin-data symbols no longer keep showing the prior symbol's rail state.
+- Overlay redraws in the settings drawer now respect the active `All` vs `0DTE` scope instead of always reapplying the full-chain level set.
+- Remaining Stage 4/5 copy mismatches were cleaned up so the drawer labels and comments match the shipped `Strike Rail` and `Flow Blotter` surfaces.
 
 ---
 
