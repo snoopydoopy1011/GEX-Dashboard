@@ -12,7 +12,7 @@
 
 Read the three prior docs first. This plan assumes their layout, tokens, and no-formula-change rules remain in force.
 
-**Current state (as of 2026-04-20):** Stage 1 is landed on the active worktree branch `codex-ux-stability-refinement-plan`. Manual smoke review passed from user-provided screenshots across `1 min`, `5 min`, `15 min`, `30 min`, and `1 hour` with the timer staying on the first toolbar row and no obvious timeframe bucketing regressions visible in the captured bars.
+**Current state (as of 2026-04-20):** Stages 1-4 are landed on the active worktree branch `codex-ux-stability-refinement-plan`. Stage 1 manual smoke review passed from user-provided screenshots across `1 min`, `5 min`, `15 min`, `30 min`, and `1 hour` with the timer staying on the first toolbar row and no obvious timeframe bucketing regressions visible in the captured bars. Stage 2 restores top-OI lines reliably and adds a historical-dots drawer toggle. Stage 3 refreshes the right rail into a clearer decision ladder with stronger alert hierarchy and level-context rows. Stage 4 promotes strike-aligned analytics into the center strike rail and leaves Stage 5 as the next implementation target.
 
 ---
 
@@ -31,7 +31,8 @@ The dashboard now has strong analytics coverage, but three things still block fa
    - Important context like distance from spot and drift since open is missing, so the user must mentally compute what matters.
 
 3. **The lower analytics tabs are functional but clunky.**
-   - Gamma / Delta / Vanna / Charm / OI / Volume all render as separate Plotly surfaces with inconsistent visual hierarchy.
+   - Strike-aligned tabs like Gamma / Delta / Vanna / Charm / OI are buried in the bottom analytics area even though they belong next to price.
+   - GEX has the only strike-aligned rail, so users must mentally switch between the center chart and a disconnected lower tab strip to compare per-strike structure.
    - The current `Large Trades` tab is not actually a large-trades blotter; it is an options chain table, which is the wrong tool for fast reading.
 
 **Goal:** improve trust, readability, and time-to-decision without changing the underlying GEX/DEX/Vanna/Charm/Flow formulas.
@@ -60,7 +61,7 @@ This phase is explicitly a **stability + presentation** phase. It does **not** a
 - Add a toggle for historical key-level dots/bubbles on the price chart.
 - Tighten the price-chart toolbar so the timer stays on the first line.
 - Refresh the right rail for better scanning.
-- Modernize the lower analytics panel layout and chart presentation.
+- Promote strike-aligned analytics into a shared center strike rail and modernize the remaining lower utility area.
 - Replace the misleading `Large Trades` view with a true flow/trade blotter.
 
 ### Out of scope
@@ -107,9 +108,11 @@ Use these anchors instead of trusting line numbers:
 - `.rail-card`
 - `.dealer-impact`
 
-### Lower analytics area
+### Strike rail + lower utility area
 
 - `updateSecondaryTabs`
+- `renderGexSidePanel`
+- `syncGexPanelYAxisToTV`
 - `create_exposure_chart`
 - `create_open_interest_chart`
 - `create_options_volume_chart`
@@ -149,6 +152,7 @@ This phase should make the dashboard read more like a trading workstation and le
 
 ### What gets added
 
+- A tabbed strike rail beside the price chart with `GEX` as the default view
 - Distance-from-spot context on the Levels surface
 - Drift-since-open context for major levels
 - A toggle for historical level dots/bubbles
@@ -220,12 +224,14 @@ This phase should make the dashboard read more like a trading workstation and le
 **Changes:**
 
 - Fix the top-OI overlay data lifecycle so the OI button reliably draws:
-  - top 5 call strikes
-  - top 5 put strikes
+  - top N call strikes
+  - top N put strikes
   - gold overlap strikes
 - Add a visibility toggle for historical wall/level dots under the existing chart overlay controls.
 - Keep the existing Call Wall / Put Wall / Gamma Flip / HVL / EM line behavior unchanged.
 - Ensure overlay toggles redraw from cache without a full expensive refetch where possible.
+- Add a drawer setting for `Top OI lines / side` with a bounded count so the user can control how many ranked OI strikes render per side.
+- Keep OI lines out of the manual price-scale autoscale path so they do not force the chart to zoom back out when `Auto-Range` is off.
 
 **Acceptance criteria:**
 
@@ -237,6 +243,16 @@ This phase should make the dashboard read more like a trading workstation and le
 **Commit:**
 
 `fix(overlays): restore top-oi lines and add historical-dot toggle`
+
+**Progress note (2026-04-20):**
+
+- Landed in `ezoptionsschwab.py`.
+- `compute_top_oi_strikes` now tolerates either `expiration_date` or `expiration` chain schemas, which fixed the empty top-OI payload that made the toolbar `OI` toggle appear broken.
+- `/update` and `/update_price` both accept a bounded `top_oi_count` and return the current ranked OI payload from cache, so OI lines survive normal chart refreshes instead of depending on the slower full update cycle.
+- The settings drawer now exposes `Top OI lines / side` with a `1-10` clamp and save/load support.
+- Ranked call/put OI labels now show their ordinal in the axis tag (for example `C OI #1`), while overlap strikes remain gold and unlabeled by rank.
+- Historical bubbles now have their own `Historical dots` overlay toggle in the drawer and redraw from cached chart data without a refetch.
+- OI lines no longer participate in the manual price autoscale range, so with `Auto-Range OFF` the user can zoom into candles without the chart snapping back out to fit distant OI strikes.
 
 ---
 
@@ -282,15 +298,25 @@ This phase should make the dashboard read more like a trading workstation and le
 
 `style(rail): improve right-rail scanning and level context`
 
+**Progress note (2026-04-20):**
+
+- Landed in `ezoptionsschwab.py`.
+- The `Alerts`, `Levels`, and `Scenarios` tabs are unchanged structurally, but the alert stack now emphasizes the top signal and demotes stale or lower-priority alerts.
+- The `Levels` tab now renders nearest-first cards with price, distance-from-spot, and since-open drift in one scan.
+- Dealer impact shifted from a heavier grid into compact labeled rows so the block reads as supporting context instead of competing with the primary cards.
+- KPI, range, gamma-profile, and chain-activity cards now share tighter spacing, stronger numeric alignment, and more consistent typography.
+
 ---
 
-### Stage 4 — Lower analytics panel modernization
+### Stage 4 — Promote strike-aligned analytics into a center strike rail
 
-**Why:** The bottom area works, but the current tab surfaces feel disconnected and heavy.
+**Why:** The dashboard should not force traders to look down to compare strike structure. GEX already proves that a strike-aligned side rail works; the next step is to turn that single-purpose panel into a shared strike rail and leave only non-strike utilities in the lower area.
 
 **Files / anchors:**
 
 - `updateSecondaryTabs`
+- `renderGexSidePanel`
+- `syncGexPanelYAxisToTV`
 - `create_exposure_chart`
 - `create_open_interest_chart`
 - `create_options_volume_chart`
@@ -299,22 +325,36 @@ This phase should make the dashboard read more like a trading workstation and le
 
 **Changes:**
 
-- Normalize chart layout, margins, titles, and number placement across all lower tabs.
-- Give each lower chart a clearer “headline + supporting context” structure.
-- Improve chart-title consistency so the active metric is obvious immediately.
-- Reduce wasted dark space and rebalance label density.
-- Consider consolidating repeated chart controls into a common visual pattern.
-- Do **not** add more tabs in this stage.
+- Replace the dedicated `GEX` panel with a generic strike rail that sits between the price chart and the right rail.
+- Add strike-rail tabs for the strike-aligned surfaces only:
+  - `GEX` (default)
+  - `Gamma`, `Delta`, `Vanna`, `Charm`
+  - `OI`, `Options Vol`, `Premium`
+- Keep non-strike surfaces in the lower utility area:
+  - `Volume`, `Centroid`, `Chain`, and the future flow blotter / `Large Trades` replacement
+- Ensure only the active strike-rail tab renders and runs Y-axis sync against the price chart.
+- Normalize chart layout, margins, titles, and number placement across the strike-rail tabs so they feel like one system.
+- Add a responsive collapse rule so the strike rail drops below the price chart on narrower widths instead of crushing the candle pane.
 
 **Acceptance criteria:**
 
-- Gamma / Delta / Vanna / Charm / OI / Volume / Premium feel like one system.
-- Titles, net readouts, and strike context are easier to parse.
-- The user does not need to relearn each tab’s layout.
+- A trader can switch between `GEX`, `Gamma`, `Delta`, `Vanna`, `Charm`, `OI`, `Options Vol`, and `Premium` without moving their eyes away from the price/gamma area.
+- The price chart and active strike-rail tab stay visually aligned by strike.
+- Non-strike tabs remain available below without being forced into a fake strike-aligned format.
+- The main chart remains usable on laptop widths because the strike rail collapses instead of over-squeezing the center layout.
 
 **Commit:**
 
-`style(charts): modernize lower analytics panel surfaces`
+`feat(layout): promote strike-aligned tabs into center strike rail`
+
+**Progress note (2026-04-20):**
+
+- Landed in `ezoptionsschwab.py`.
+- The former GEX-only middle panel is now a shared strike rail with `GEX`, `Gamma`, `Delta`, `Vanna`, `Charm`, `Options Vol`, `OI`, and `Premium` tabs.
+- Strike-aligned surfaces render in the middle rail while the lower utility area is reduced to non-strike views such as `Volume`, `Large Trades`, and `Centroid`.
+- The strike rail reuses the price-chart sync path so the active strike surface stays aligned to the visible candle price range.
+- The rail now mounts and refreshes through a stable Plotly lifecycle, which fixed the blank/disappearing panel regression during live updates.
+- On narrower widths, the strike rail drops below the price chart instead of compressing the candle pane and right rail into an unreadable layout.
 
 ---
 
@@ -391,7 +431,7 @@ Do the stages in this exact order:
 1. Stage 1 — live chart trust fixes
 2. Stage 2 — OI overlay + dot toggle
 3. Stage 3 — right rail readability refresh
-4. Stage 4 — lower analytics modernization
+4. Stage 4 — promote strike-aligned analytics into center strike rail
 5. Stage 5 — real flow blotter
 6. Stage 6 — regression sweep
 
@@ -420,7 +460,7 @@ Golden-path checks:
 - OI lines show reliably
 - timer stays in place
 - right rail is readable
-- lower tabs feel consistent
+- strike-aligned tabs live beside price and feel consistent
 - `Large Trades` is finally useful
 
 ---
@@ -434,7 +474,7 @@ Specifically:
 - live chart behavior feels stable
 - key overlays always show when requested
 - the right rail answers “what matters right now?” quickly
-- the lower tabs feel modern and coherent
+- strike-aligned analytics sit next to price while the remaining lower tabs stay useful and coherent
 - the flow/trade surface becomes genuinely decision-useful
 
 If there is tension between “more information” and “faster comprehension,” choose faster comprehension.
