@@ -2,23 +2,32 @@
 
 ## Active initiative
 
-**UI modernization** — see [`docs/UI_MODERNIZATION_PLAN.md`](docs/UI_MODERNIZATION_PLAN.md).
+_None — Phase 3 (Alerts Rail + Flow Alerts) wrapped on `feat/analytics-phase3`; branch pending PR._
 
-If the user asks about the UI, layout, palette, chart controls, side panel, KPI strip, alerts, drawer, or "the plan" — that doc is authoritative. Read it before proposing changes.
+## Completed initiatives
 
-### Before starting implementation work
+- **UI modernization** — [`docs/UI_MODERNIZATION_PLAN.md`](docs/UI_MODERNIZATION_PLAN.md). 7-stage layout/palette/design-token refresh.
+- **Analytics + Chart Phase 2** — [`docs/ANALYTICS_CHART_PHASE2_PLAN.md`](docs/ANALYTICS_CHART_PHASE2_PLAN.md). Dealer Impact block, Scenarios tab, HVL/±2σ EM/secondary walls on-chart, extended candle history.
+- **Alerts Rail Phase 3** — [`docs/ALERTS_RAIL_PHASE3_PLAN.md`](docs/ALERTS_RAIL_PHASE3_PLAN.md). Alpha-intensity GEX bars, 7-card alerts rail, live flow alerts engine (vol spike, V/OI, IV surge, wall shift) + SQLite index for the hot path.
 
-1. `git branch -a` — is `feat/ui-modernization` checked out or does it need to be created from `main`?
-2. `git log --oneline feat/ui-modernization` (if it exists) — match commit subjects against the 7 stages in §7 of the plan to determine which stage is next. Commit subject prefixes map 1:1 to stages (see §6.2 of the plan).
-3. Line numbers in the plan are a snapshot as of commit `3d26533` and have drifted heavily since stages 1–5 landed. **Grep by anchor name** rather than trusting the numbers. Useful current anchors: `.top-bar`, `.drawer`, `.drawer-section`, `.settings-modal`, `.secondary-tabs`, `.right-rail-tabs`, `.right-rail-panels`, `.right-rail-panel`, `.gex-side-panel-wrap`; functions `ensurePriceChartDom`, `wireRightRailTabs`, `applyRightRailTab`, `renderChartVisibilitySection`, `renderGexSidePanel`, `syncGexPanelYAxisToTV`, `updateSecondaryTabs`, `compute_trader_stats`, `getChartVisibility`. The pre-Stage-4 anchors `.header` / `.header-top` / `.header-bottom` / `.chart-selector` / `.chart-checkbox` no longer exist; the pre-Stage-5 `.price-chart-row` is also gone (GEX panel lives in `.right-rail-panels` now).
+If the user asks about the UI, layout, palette, chart controls, side panel, KPI strip, alerts, drawer, dealer impact, scenarios, or flow alerts — the relevant plan doc above is authoritative. Read it before proposing changes.
 
-### Ground rules from the plan
+### When starting new implementation work
 
-- No analytical-formula changes (GEX/DEX/Vanna/Charm math stays put).
+1. Confirm the branch: `git branch -a` and `git log --oneline main..HEAD`.
+2. **Grep by anchor name** rather than trusting line numbers in plan docs — markup drifts fast across stages. Useful anchors in this codebase:
+   - HTML/CSS: `.top-bar`, `.drawer`, `.settings-modal`, `.secondary-tabs`, `.right-rail-tabs`, `.right-rail-panels`, `.right-rail-panel`, `[data-rail-panel="alerts"]`, `.rail-card`, `.dealer-impact`, `.gex-side-panel-wrap`, `.scenario-table`.
+   - JS: `ensurePriceChartDom`, `wireRightRailTabs`, `applyRightRailTab`, `buildAlertsPanelHtml`, `renderGexSidePanel`, `renderRailAlerts`, `renderDealerImpact`, `renderMarketMetrics`, `renderRangeScale`, `renderGammaProfile`, `renderChainActivity`, `updatePriceInfo`, `updateSecondaryTabs`.
+   - Python: `compute_trader_stats`, `compute_key_levels`, `compute_greek_exposures`, `compute_flow_alerts`, `_fetch_vol_spike_data`, `create_gex_side_panel`, `_compute_session_deltas`.
+   - SQLite: tables `interval_data`, `interval_session_data`, `centroid_data`; index `idx_interval_data_ticker_date_ts`.
+
+### Standing ground rules
+
+- No analytical-formula changes (GEX/DEX/Vanna/Charm/Flow math stays put).
 - No JS framework introduction — vanilla JS + CSS tokens only.
 - No breaking the single-file `ezoptionsschwab.py` structure.
-- One commit per stage; follow the commit-message convention in §6.2.
-- No pushes to `main` during the effort — merge via PR at the end.
+- Tokens only for colors (`--bg-*`, `--fg-*`, `--call`, `--put`, `--warn`, `--info`, `--accent`, `--border`); no neon hex literals.
+- Any new element under `[data-rail-panel="alerts"]` must also appear in `buildAlertsPanelHtml()` or tick rebuilds drop it.
 
 ## Project shape
 

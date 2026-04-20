@@ -6,6 +6,7 @@ from bisect import bisect_left
 from datetime import datetime, timedelta
 import math
 import time
+import collections
 import os
 
 # python.org Python on macOS ships without a default CA bundle unless
@@ -105,6 +106,11 @@ def init_db():
                 cursor.execute('ALTER TABLE interval_data ADD COLUMN net_color REAL')
             except sqlite3.OperationalError:
                 pass
+
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_interval_data_ticker_date_ts
+                ON interval_data (ticker, date, timestamp, strike)
+            ''')
 
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS interval_session_data (
@@ -3204,7 +3210,21 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     call_vals = [call_map.get(s, 0) for s in strikes]
     put_vals = [put_map.get(s, 0) for s in strikes]
     net = [c - p for c, p in zip(call_vals, put_vals)]
-    colors = [call_color if v >= 0 else put_color for v in net]
+
+    def _hex_to_rgb(h):
+        h = h.lstrip('#')
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    call_rgb = _hex_to_rgb(call_color)
+    put_rgb = _hex_to_rgb(put_color)
+    max_abs = max((abs(v) for v in net), default=0) or 1.0
+
+    def _shade(v):
+        alpha = 0.30 + 0.70 * (abs(v) / max_abs)
+        r, g, b = call_rgb if v >= 0 else put_rgb
+        return f'rgba({r},{g},{b},{alpha:.3f})'
+
+    colors = [_shade(v) for v in net]
     customdata = list(zip(call_vals, put_vals))
 
     native_interval = 1.0
@@ -3439,8 +3459,188 @@ def compute_scenario_gex(calls, puts, S, spot_shift=0.0, iv_shift=0.0,
     return {'net_gex': float(net), 'regime': 'Long Gamma' if net >= 0 else 'Short Gamma'}
 
 
+# Phase 3 Stage 2 — session baselines for the Net GEX/DEX Δ columns. First
+# tick of the trading session captures the baseline; subsequent ticks emit
+# (current - baseline). In-process dict — acceptable to lose state on restart.
+_SESSION_BASELINE = {}
+
+def _compute_session_deltas(ticker, net_gex, net_dex):
+    if ticker is None or net_gex is None:
+        return None
+    try:
+        today = datetime.now(pytz.timezone('US/Eastern')).date()
+    except Exception:
+        return None
+    key = (ticker, today)
+    if key not in _SESSION_BASELINE:
+        _SESSION_BASELINE[key] = {'net_gex': net_gex, 'net_dex': net_dex}
+    base = _SESSION_BASELINE[key]
+    return {
+        'net_gex_vs_open': (net_gex - base['net_gex']) if base.get('net_gex') is not None else None,
+        'net_dex_vs_open': (net_dex - base['net_dex']) if (net_dex is not None and base.get('net_dex') is not None) else None,
+    }
+
+
+# Phase 3 Stage 3 — Live flow alerts engine
+# Module-level state; intentionally module-scoped so it survives across ticks.
+_ALERT_COOLDOWNS = {}   # (ticker, alert_id) -> float unix ts of last fire
+_IV_BUFFER = collections.defaultdict(lambda: collections.deque(maxlen=30))  # (ticker, strike) -> deque[float]
+_LAST_WALLS = {}        # ticker -> {'call_wall': float|None, 'put_wall': float|None}
+_VOL_SPIKE_CACHE = {}   # ticker -> {'ts': float, 'data': {strike: {'avg20', 'curr'}}}
+
+
+def _alert_cooldown_ok(ticker, alert_id, seconds):
+    key = (ticker, alert_id)
+    last = _ALERT_COOLDOWNS.get(key, 0.0)
+    now_ts = time.time()
+    if now_ts - last >= seconds:
+        _ALERT_COOLDOWNS[key] = now_ts
+        return True
+    return False
+
+
+def _fetch_vol_spike_data(ticker, S, strike_range):
+    """Batch-load last-20-min per-strike volume from interval_data, cached 30 s."""
+    now_ts = time.time()
+    cached = _VOL_SPIKE_CACHE.get(ticker)
+    if cached and now_ts - cached['ts'] < 30:
+        return cached['data']
+    cutoff_ts = int(now_ts) - 20 * 60
+    today = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
+    lo = S * (1 - strike_range)
+    hi = S * (1 + strike_range)
+    try:
+        with closing(sqlite3.connect('options_data.db')) as conn:
+            with closing(conn.cursor()) as cursor:
+                cursor.execute('''
+                    SELECT strike, timestamp, net_volume
+                    FROM interval_data
+                    WHERE ticker = ? AND date = ? AND timestamp >= ?
+                      AND strike >= ? AND strike <= ?
+                    ORDER BY strike, timestamp
+                ''', (ticker, today, cutoff_ts, lo, hi))
+                rows = cursor.fetchall()
+    except Exception:
+        rows = []
+    by_strike = {}
+    for s_raw, _ts, nvol in rows:
+        by_strike.setdefault(float(s_raw), []).append(float(nvol) if nvol is not None else 0.0)
+    result = {}
+    for strike, vols in by_strike.items():
+        avols = [abs(v) for v in vols]
+        curr = avols[-1] if avols else 0.0
+        avg20 = (sum(avols[:-1]) / len(avols[:-1])) if len(avols) > 1 else 0.0
+        result[strike] = {'avg20': avg20, 'curr': curr}
+    _VOL_SPIKE_CACHE[ticker] = {'ts': now_ts, 'data': result}
+    return result
+
+
+def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
+                        call_wall=None, put_wall=None):
+    """Return list of flow-level alert dicts. Called from compute_trader_stats."""
+    if not ticker or S is None:
+        return []
+    alerts = []
+
+    # 1. Wall shift
+    prev_walls = _LAST_WALLS.get(ticker, {})
+    _LAST_WALLS[ticker] = {'call_wall': call_wall, 'put_wall': put_wall}
+    for wtype, label in (('call_wall', 'Call Wall'), ('put_wall', 'Put Wall')):
+        prev = prev_walls.get(wtype)
+        curr = {'call_wall': call_wall, 'put_wall': put_wall}[wtype]
+        if prev is not None and curr is not None and prev != curr:
+            aid = f'wall_shift:{wtype}'
+            if _alert_cooldown_ok(ticker, aid, 120):
+                alerts.append({
+                    'id': aid, 'level': 'flow',
+                    'text': f'{label} {prev:.0f} → {curr:.0f}',
+                    'strike': curr, 'ts': now_iso, 'detail': None,
+                })
+
+    # 2. Volume spike (SQLite rolling 20-min baseline)
+    try:
+        vol_data = _fetch_vol_spike_data(ticker, S, strike_range)
+        for strike, d in vol_data.items():
+            curr_v, avg20 = d['curr'], d['avg20']
+            if curr_v >= max(500.0, 3.0 * avg20):
+                aid = f'vol_spike:{strike:.0f}'
+                ratio = (curr_v / avg20) if avg20 > 0 else 99.0
+                if _alert_cooldown_ok(ticker, aid, 300):
+                    alerts.append({
+                        'id': aid, 'level': 'flow',
+                        'text': f'Vol spike @ {strike:.0f} ({ratio:.1f}× avg)',
+                        'strike': float(strike), 'ts': now_iso, 'detail': None,
+                    })
+    except Exception as e:
+        print(f'[compute_flow_alerts] vol_spike: {e}')
+
+    # 3. Volume / OI ratio unusual (live chain)
+    try:
+        lo = S * (1 - strike_range)
+        hi = S * (1 + strike_range)
+        for df in (calls, puts):
+            if df is None or getattr(df, 'empty', True):
+                continue
+            window = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
+            for _, row in window.iterrows():
+                strike = float(row['strike'])
+                oi  = float(row.get('openInterest', 0) or 0)
+                vol = float(row.get('volume', 0) or 0)
+                if oi < 100 or vol / oi <= 0.25:
+                    continue
+                aid = f'voi_ratio:{strike:.0f}'
+                if _alert_cooldown_ok(ticker, aid, 600):
+                    alerts.append({
+                        'id': aid, 'level': 'flow',
+                        'text': f'Heavy vol/OI @ {strike:.0f} ({vol/oi:.2f})',
+                        'strike': strike, 'ts': now_iso, 'detail': None,
+                    })
+    except Exception as e:
+        print(f'[compute_flow_alerts] voi_ratio: {e}')
+
+    # 4. IV surge (in-process ring buffer; resets on restart — acceptable)
+    try:
+        lo = S * (1 - strike_range)
+        hi = S * (1 + strike_range)
+        seen_strikes = set()
+        for df in (calls, puts):
+            if df is None or getattr(df, 'empty', True):
+                continue
+            window = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
+            for _, row in window.iterrows():
+                strike = float(row['strike'])
+                if strike in seen_strikes:
+                    continue
+                seen_strikes.add(strike)
+                curr_iv = float(row.get('impliedVolatility', 0) or 0)
+                if curr_iv <= 0:
+                    continue
+                buf = _IV_BUFFER[(ticker, strike)]
+                buf.append(curr_iv)
+                if len(buf) < 5:
+                    continue
+                mu  = sum(buf) / len(buf)
+                std = (sum((x - mu) ** 2 for x in buf) / len(buf)) ** 0.5
+                if std < 0.001:
+                    continue
+                z = (curr_iv - mu) / std
+                if z > 2.0:
+                    aid = f'iv_surge:{strike:.0f}'
+                    if _alert_cooldown_ok(ticker, aid, 600):
+                        alerts.append({
+                            'id': aid, 'level': 'flow',
+                            'text': f'IV surge @ {strike:.0f} (+{z:.1f}σ)',
+                            'strike': strike, 'ts': now_iso, 'detail': None,
+                        })
+    except Exception as e:
+        print(f'[compute_flow_alerts] iv_surge: {e}')
+
+    return alerts
+
+
 def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None,
-                         delta_adjusted: bool = False, calculate_in_notional: bool = True):
+                         delta_adjusted: bool = False, calculate_in_notional: bool = True,
+                         ticker: str = None):
     """High-level trader KPIs + a short alerts list, for the header strip.
 
     Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
@@ -3448,6 +3648,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     """
     out = {
         'net_gex': None,              # dollar-notional net GEX in the window
+        'net_dex': None,              # dollar-notional net DEX in the window (Phase 3)
         'hedge_per_1pct': None,       # dollar-notional dealer hedge for ±1% move
         'regime': None,               # 'Long Gamma' | 'Short Gamma'
         'em_move': None, 'em_upper': None, 'em_lower': None, 'em_pct': None,
@@ -3461,6 +3662,10 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'charm_by_close':     None,
         # Stage 3 — scenario stress table
         'scenarios': [],
+        # Phase 3 Stage 2 — alerts rail card payloads
+        'chain_activity': None,
+        'profile':        None,
+        'session_deltas': None,
     }
     if S is None:
         return out
@@ -3494,6 +3699,12 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     # display as "Hedging Impact per 1%".
     out['hedge_per_1pct'] = 0.01 * net_gex
 
+    # Net DEX (window). Calls carry positive delta, puts negative; summing
+    # the per-strike DEX column gives signed dealer delta exposure directly.
+    dex_call = _window_sum(calls, col='DEX')
+    dex_put  = _window_sum(puts,  col='DEX')
+    out['net_dex'] = dex_call + dex_put
+
     # Dealer Hedge Impact block (Stage 2)
     # Spot ±1%: same 1% hedge number, signed so ± sides render independently.
     out['hedge_on_up_1pct']   = +0.01 * net_gex
@@ -3523,6 +3734,42 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         out['regime'] = 'Long Gamma' if S >= out['gamma_flip'] else 'Short Gamma'
     else:
         out['regime'] = 'Long Gamma' if net_gex >= 0 else 'Short Gamma'
+
+    # Phase 3 Stage 2 — chain activity, gamma profile, session deltas
+    try:
+        def _chain_sum(df, col):
+            if df is None or getattr(df, 'empty', True) or col not in df.columns:
+                return 0.0
+            return float(df[col].sum())
+        call_oi  = _chain_sum(calls, 'openInterest')
+        put_oi   = _chain_sum(puts,  'openInterest')
+        call_vol = _chain_sum(calls, 'volume')
+        put_vol  = _chain_sum(puts,  'volume')
+        total_vol = call_vol + put_vol
+        sentiment = 0.0
+        if total_vol > 0:
+            sentiment = (call_vol - put_vol) / total_vol  # -1..+1
+        out['chain_activity'] = {
+            'oi_cp_ratio':  (call_oi  / put_oi)  if put_oi  > 0 else None,
+            'vol_cp_ratio': (call_vol / put_vol) if put_vol > 0 else None,
+            'sentiment':    sentiment,
+        }
+    except Exception as e:
+        print(f"[compute_trader_stats] chain_activity build failed: {e}")
+        out['chain_activity'] = None
+
+    is_long = (out['regime'] == 'Long Gamma')
+    out['profile'] = {
+        'regime':   out['regime'],
+        'headline': 'Positive Gamma' if is_long else 'Negative Gamma',
+        'blurb':    'dealer hedging dampens moves' if is_long else 'dealer hedging amplifies moves',
+    }
+
+    try:
+        out['session_deltas'] = _compute_session_deltas(ticker, out['net_gex'], out['net_dex'])
+    except Exception as e:
+        print(f"[compute_trader_stats] session_deltas failed: {e}")
+        out['session_deltas'] = None
 
     # Scenario GEX table (Stage 3). Seven rows: current + ±2% spot + ±5 vol pts
     # + two diagonals. "Current" mirrors out['net_gex'] exactly so the table can't
@@ -3584,6 +3831,25 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         alerts.append({'level': 'warn', 'text': 'Short-gamma regime — moves may accelerate'})
     elif out['regime'] == 'Long Gamma':
         alerts.append({'level': 'info', 'text': 'Long-gamma regime — dealer hedging dampens moves'})
+
+    # Stamp existing rule-based alerts with id + ts (backwards-compatible)
+    now_iso = datetime.utcnow().isoformat() + 'Z'
+    for a in alerts:
+        a.setdefault('id', f"{a['level']}:{hash(a['text']) & 0xffff}")
+        a.setdefault('ts', now_iso)
+
+    # Append live flow alerts
+    try:
+        flow = compute_flow_alerts(
+            ticker, calls, puts, now_iso, S,
+            strike_range=strike_range,
+            call_wall=out.get('call_wall'),
+            put_wall=out.get('put_wall'),
+        )
+        alerts.extend(flow)
+    except Exception as e:
+        print(f'[compute_trader_stats] compute_flow_alerts failed: {e}')
+
     out['alerts'] = alerts
     return out
 
@@ -5460,8 +5726,9 @@ def index():
             color: var(--fg-1);
             border: none;
             border-bottom: 2px solid transparent;
-            padding: 6px 4px;
-            font-size: 11px;
+            padding: 3px 4px;
+            font-size: 10px;
+            line-height: 1.3;
             font-weight: 500;
             letter-spacing: 0.06em;
             text-transform: uppercase;
@@ -5486,6 +5753,7 @@ def index():
             flex: 1;
             min-height: 0;
             flex-direction: column;
+            overflow-y: auto;
         }
         .right-rail-panel.active { display: flex; }
         .right-rail-tab { position: relative; }
@@ -5523,6 +5791,185 @@ def index():
         }
         .dealer-impact .val.pos { color: var(--call); }
         .dealer-impact .val.neg { color: var(--put); }
+
+        /* ── Phase 3 Stage 2 — rail card system ───────────────────────── */
+        .rail-card {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 10px 12px;
+            margin: 8px 10px 0 10px;
+            flex: 0 0 auto;
+        }
+        .rail-card:last-child { margin-bottom: 8px; }
+        .rail-card-header {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--fg-2);
+            margin-bottom: 6px;
+        }
+        .rail-card-price-big {
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--fg-0);
+            font-variant-numeric: tabular-nums;
+            line-height: 1.1;
+        }
+        .rail-card-price-sub {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 4px;
+            font-size: 11px;
+            color: var(--fg-1);
+        }
+        .rail-card-price-sub .chg { font-variant-numeric: tabular-nums; }
+        .rail-card-price-sub .chg.pos { color: var(--call); }
+        .rail-card-price-sub .chg.neg { color: var(--put); }
+        .rail-card-chip {
+            display: inline-block;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: var(--bg-2);
+            color: var(--fg-1);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+        }
+        .rail-metric-pair {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .rail-metric .v {
+            font-size: 18px;
+            color: var(--fg-0);
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-metric .d {
+            font-size: 11px;
+            color: var(--fg-2);
+            font-variant-numeric: tabular-nums;
+            margin-top: 2px;
+        }
+        .rail-metric .d.pos { color: var(--call); }
+        .rail-metric .d.neg { color: var(--put); }
+        .rail-range-track {
+            position: relative;
+            height: 6px;
+            background: var(--bg-2);
+            border-radius: 3px;
+            margin: 8px 0;
+        }
+        .rail-range-em {
+            position: absolute;
+            top: 0;
+            height: 100%;
+            background: linear-gradient(90deg, rgba(239,68,68,0.25), rgba(16,185,129,0.25));
+            border-radius: 3px;
+        }
+        .rail-range-marker {
+            position: absolute;
+            top: -3px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--fg-0);
+            transform: translateX(-50%);
+            box-shadow: 0 0 0 2px var(--bg-1);
+        }
+        .rail-range-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: var(--fg-2);
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-profile-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+            background: var(--fg-2);
+        }
+        .rail-profile-dot.pos { background: var(--call); }
+        .rail-profile-dot.neg { background: var(--put); }
+        .rail-profile-headline {
+            font-size: 13px;
+            color: var(--fg-0);
+            font-weight: 500;
+        }
+        .rail-profile-blurb {
+            color: var(--fg-1);
+            font-size: 11px;
+            margin-top: 4px;
+            line-height: 1.35;
+        }
+        .rail-sentiment-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: var(--fg-2);
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .rail-sentiment-track {
+            position: relative;
+            height: 4px;
+            background: linear-gradient(90deg, var(--put), var(--bg-2) 50%, var(--call));
+            border-radius: 2px;
+            margin: 0 0 10px 0;
+        }
+        .rail-sentiment-marker {
+            position: absolute;
+            top: -3px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--fg-0);
+            transform: translateX(-50%);
+            box-shadow: 0 0 0 2px var(--bg-1);
+        }
+        .rail-bar {
+            display: grid;
+            grid-template-columns: 32px 1fr 80px;
+            gap: 8px;
+            align-items: center;
+            font-size: 11px;
+            margin-top: 6px;
+            color: var(--fg-1);
+        }
+        .rail-bar-track {
+            height: 4px;
+            background: var(--bg-2);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .rail-bar-fill {
+            height: 100%;
+            background: var(--accent);
+            transition: width 180ms ease;
+        }
+        .rail-bar .num {
+            text-align: right;
+            color: var(--fg-0);
+            font-variant-numeric: tabular-nums;
+        }
+        /* Dealer-impact block nested inside a rail-card — drop redundant
+           padding and the divider it carries when standalone. */
+        .rail-card .dealer-impact {
+            padding: 0;
+            border-bottom: none;
+        }
+        /* Alerts list nested inside a rail-card — same treatment. */
+        .rail-card .rail-alerts-list {
+            padding: 0;
+            overflow-y: visible;
+            flex: 0 0 auto;
+        }
 
         /* Alerts panel */
         .rail-alerts-list {
@@ -5692,7 +6139,7 @@ def index():
         }
         .gex-col-header .gex-col-title {
             flex: 1;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 600;
             letter-spacing: 0.08em;
             text-transform: uppercase;
@@ -5705,8 +6152,8 @@ def index():
             background: transparent;
             color: var(--fg-1);
             border: none;
-            padding: 4px 6px;
-            font-size: 13px;
+            padding: 2px 6px;
+            font-size: 12px;
             line-height: 1;
             cursor: pointer;
             border-radius: 4px;
@@ -5726,51 +6173,6 @@ def index():
             display: none;
         }
         .chart-grid.gex-collapsed .gex-col-header { padding: 0 2px; justify-content: center; }
-
-        /* ── Trader stats KPI strip ────────────────────────────────── */
-        .trader-stats-strip {
-            display: flex;
-            gap: 8px;
-            margin: 0 0 10px 0;
-            flex-wrap: wrap;
-        }
-        .kpi-card {
-            flex: 1 1 0;
-            min-width: 170px;
-            background: var(--bg-1);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 9px 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 3px;
-        }
-        .kpi-label {
-            font-size: 10px;
-            color: var(--fg-2);
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            font-weight: 500;
-        }
-        .kpi-value {
-            font-size: 18px;
-            font-weight: 600;
-            color: var(--fg-0);
-            font-family: var(--font-mono);
-            font-variant-numeric: tabular-nums;
-            line-height: 1.2;
-            display: flex;
-            align-items: baseline;
-            gap: 4px;
-        }
-        .kpi-sub {
-            font-size: 11px;
-            color: var(--fg-1);
-            font-variant-numeric: tabular-nums;
-        }
-        .kpi-pos   { color: var(--call); }
-        .kpi-neg   { color: var(--put); }
-        .kpi-trend { font-size: 12px; line-height: 1; }
 
         /* ── Secondary chart tab bar ──────────────────────────────── */
         .secondary-tabs {
@@ -5936,18 +6338,19 @@ def index():
             background: #1a1a1a;
             border-bottom: 1px solid var(--bg-2);
             border-radius: 10px 10px 0 0;
-            padding: 4px 8px;
+            padding: 2px 6px;
             display: flex;
             flex-wrap: wrap;
-            gap: 4px;
+            gap: 3px;
             align-items: center;
+            min-height: 0;
         }
         .tv-toolbar {
             display: contents; /* children flow directly into container */
         }
         .tv-toolbar-sep {
             width: 1px;
-            height: 20px;
+            height: 16px;
             background: var(--border);
             margin: 0 2px;
         }
@@ -5956,8 +6359,9 @@ def index():
             border: 1px solid var(--border);
             color: #ccc;
             border-radius: 4px;
-            padding: 3px 7px;
-            font-size: 11px;
+            padding: 2px 6px;
+            font-size: 10px;
+            line-height: 1.3;
             cursor: pointer;
             white-space: nowrap;
             transition: background 0.15s;
@@ -6042,21 +6446,6 @@ def index():
             user-select: none;
             letter-spacing: 0.5px;
         }
-        /* Lives inside the Alerts rail panel (above .dealer-impact). Narrow column
-           context — stack rows vertically rather than the old full-width strip. */
-        .price-info {
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-            padding: 10px 12px;
-            border-bottom: 1px solid var(--border);
-            font-size: 12px;
-            color: var(--fg-0);
-            font-variant-numeric: tabular-nums;
-            flex: 0 0 auto;
-        }
-        .price-info > div { line-height: 1.35; }
-        .price-info [data-live-price] { font-size: 13px; color: var(--fg-0); }
         .green {
             color: var(--call);
         }
@@ -6738,8 +7127,6 @@ def index():
             </div>
         </dialog>
         
-        <div id="trader-stats-strip" class="trader-stats-strip" style="display:none"></div>
-
         <div class="chart-grid" id="chart-grid">
             <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
             <div class="gex-col-header" id="gex-col-header">
@@ -6769,16 +7156,78 @@ def index():
             </div>
             <div class="right-rail-panels" id="right-rail-panels">
                 <div class="right-rail-panel active" data-rail-panel="alerts">
-                    <div class="price-info" id="price-info"></div>
-                    <div class="dealer-impact" id="dealer-impact">
-                        <div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>
-                        <div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>
-                        <div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>
-                        <div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>
-                        <div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>
+                    <div class="rail-card" id="rail-card-price">
+                        <div class="rail-card-price-big" data-live-price>—</div>
+                        <div class="rail-card-price-sub">
+                            <span class="chg" data-met="price_change">—</span>
+                            <span class="rail-card-chip" data-met="expiry_chip">—</span>
+                        </div>
                     </div>
-                    <div class="rail-alerts-list" id="right-rail-alerts">
-                        <div class="rail-alerts-empty">No active alerts.</div>
+                    <div class="rail-card" id="rail-card-metrics">
+                        <div class="rail-metric-pair">
+                            <div class="rail-metric">
+                                <div class="rail-card-header">Net GEX</div>
+                                <div class="v" data-met="net_gex">—</div>
+                                <div class="d" data-met="net_gex_delta"></div>
+                            </div>
+                            <div class="rail-metric">
+                                <div class="rail-card-header">Net DEX</div>
+                                <div class="v" data-met="net_dex">—</div>
+                                <div class="d" data-met="net_dex_delta"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rail-card" id="rail-card-range">
+                        <div class="rail-card-header">Range · EM <span data-met="em_pct"></span></div>
+                        <div class="rail-range-track">
+                            <div class="rail-range-em" data-met="em_band"></div>
+                            <div class="rail-range-marker" data-met="price_marker"></div>
+                        </div>
+                        <div class="rail-range-labels">
+                            <span data-met="range_low">—</span>
+                            <span data-met="range_high">—</span>
+                        </div>
+                    </div>
+                    <div class="rail-card" id="rail-card-profile">
+                        <div class="rail-card-header">Gamma Profile</div>
+                        <div class="rail-profile-headline">
+                            <span class="rail-profile-dot" data-met="profile_dot"></span>
+                            <span data-met="profile_headline">—</span>
+                        </div>
+                        <div class="rail-profile-blurb" data-met="profile_blurb">—</div>
+                    </div>
+                    <div class="rail-card" id="rail-card-dealer">
+                        <div class="rail-card-header">Dealer Impact</div>
+                        <div class="dealer-impact" id="dealer-impact">
+                            <div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>
+                            <div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>
+                            <div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>
+                            <div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>
+                            <div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>
+                        </div>
+                    </div>
+                    <div class="rail-card" id="rail-card-activity">
+                        <div class="rail-card-header">Chain Activity</div>
+                        <div class="rail-sentiment-labels"><span>bearish</span><span>bullish</span></div>
+                        <div class="rail-sentiment-track">
+                            <div class="rail-sentiment-marker" data-met="sentiment_marker"></div>
+                        </div>
+                        <div class="rail-bar">
+                            <span>OI</span>
+                            <div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div>
+                            <span class="num" data-met="oi_cp">—</span>
+                        </div>
+                        <div class="rail-bar">
+                            <span>VOL</span>
+                            <div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>
+                            <span class="num" data-met="vol_cp">—</span>
+                        </div>
+                    </div>
+                    <div class="rail-card" id="rail-card-alerts">
+                        <div class="rail-card-header">Live Alerts</div>
+                        <div class="rail-alerts-list" id="right-rail-alerts">
+                            <div class="rail-alerts-empty">No active alerts.</div>
+                        </div>
                     </div>
                 </div>
                 <div class="right-rail-panel" data-rail-panel="levels">
@@ -6966,13 +7415,12 @@ def index():
                 }
             });
 
-            // Live-update the "Current Price" line in the price-info panel
-            const priceInfo = document.getElementById('price-info');
-            if (priceInfo) {
-                const cpLine = priceInfo.querySelector('[data-live-price]');
-                if (cpLine) {
-                    cpLine.textContent = 'Current Price: $' + priceStr;
-                }
+            // Live-update the price card big number in the alerts rail.
+            // Phase 3: the price-info div has been replaced with a rail-card;
+            // the [data-live-price] hook moved into .rail-card-price-big.
+            const cpLine = document.querySelector('[data-live-price]');
+            if (cpLine) {
+                cpLine.textContent = '$' + priceStr;
             }
         }
 
@@ -9208,6 +9656,90 @@ def index():
         }
         // ─────────────────────────────────────────────────────────────────────
 
+        // Single source of truth for the alerts-panel markup. Both the initial
+        // server-rendered HTML and ensurePriceChartDom's rebuild path must
+        // produce identical DOM, or tick rebuilds (ticker switch) drop the
+        // cards added in Phase 3. Mirror any change here in the Python HTML.
+        function buildAlertsPanelHtml() {
+            return (
+                '<div class="right-rail-panel active" data-rail-panel="alerts">' +
+                    '<div class="rail-card" id="rail-card-price">' +
+                        '<div class="rail-card-price-big" data-live-price>—</div>' +
+                        '<div class="rail-card-price-sub">' +
+                            '<span class="chg" data-met="price_change">—</span>' +
+                            '<span class="rail-card-chip" data-met="expiry_chip">—</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card" id="rail-card-metrics">' +
+                        '<div class="rail-metric-pair">' +
+                            '<div class="rail-metric">' +
+                                '<div class="rail-card-header">Net GEX</div>' +
+                                '<div class="v" data-met="net_gex">—</div>' +
+                                '<div class="d" data-met="net_gex_delta"></div>' +
+                            '</div>' +
+                            '<div class="rail-metric">' +
+                                '<div class="rail-card-header">Net DEX</div>' +
+                                '<div class="v" data-met="net_dex">—</div>' +
+                                '<div class="d" data-met="net_dex_delta"></div>' +
+                            '</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card" id="rail-card-range">' +
+                        '<div class="rail-card-header">Range · EM <span data-met="em_pct"></span></div>' +
+                        '<div class="rail-range-track">' +
+                            '<div class="rail-range-em" data-met="em_band"></div>' +
+                            '<div class="rail-range-marker" data-met="price_marker"></div>' +
+                        '</div>' +
+                        '<div class="rail-range-labels">' +
+                            '<span data-met="range_low">—</span>' +
+                            '<span data-met="range_high">—</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card" id="rail-card-profile">' +
+                        '<div class="rail-card-header">Gamma Profile</div>' +
+                        '<div class="rail-profile-headline">' +
+                            '<span class="rail-profile-dot" data-met="profile_dot"></span>' +
+                            '<span data-met="profile_headline">—</span>' +
+                        '</div>' +
+                        '<div class="rail-profile-blurb" data-met="profile_blurb">—</div>' +
+                    '</div>' +
+                    '<div class="rail-card" id="rail-card-dealer">' +
+                        '<div class="rail-card-header">Dealer Impact</div>' +
+                        '<div class="dealer-impact" id="dealer-impact">' +
+                            '<div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>' +
+                            '<div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>' +
+                            '<div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>' +
+                            '<div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>' +
+                            '<div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card" id="rail-card-activity">' +
+                        '<div class="rail-card-header">Chain Activity</div>' +
+                        '<div class="rail-sentiment-labels"><span>bearish</span><span>bullish</span></div>' +
+                        '<div class="rail-sentiment-track">' +
+                            '<div class="rail-sentiment-marker" data-met="sentiment_marker"></div>' +
+                        '</div>' +
+                        '<div class="rail-bar">' +
+                            '<span>OI</span>' +
+                            '<div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div>' +
+                            '<span class="num" data-met="oi_cp">—</span>' +
+                        '</div>' +
+                        '<div class="rail-bar">' +
+                            '<span>VOL</span>' +
+                            '<div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>' +
+                            '<span class="num" data-met="vol_cp">—</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card" id="rail-card-alerts">' +
+                        '<div class="rail-card-header">Live Alerts</div>' +
+                        '<div class="rail-alerts-list" id="right-rail-alerts">' +
+                            '<div class="rail-alerts-empty">No active alerts.</div>' +
+                        '</div>' +
+                    '</div>' +
+                '</div>'
+            );
+        }
+
         // Rebuild missing chart-grid children in the canonical Stage-5 order.
         // The initial HTML markup already includes all of these; this defensive
         // path only kicks in if price-chart-container was removed from the DOM.
@@ -9277,19 +9809,7 @@ def index():
                 railPanels.className = 'right-rail-panels';
                 railPanels.id = 'right-rail-panels';
                 railPanels.innerHTML =
-                    '<div class="right-rail-panel active" data-rail-panel="alerts">' +
-                        '<div class="price-info" id="price-info"></div>' +
-                        '<div class="dealer-impact" id="dealer-impact">' +
-                            '<div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>' +
-                            '<div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>' +
-                            '<div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>' +
-                            '<div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>' +
-                            '<div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>' +
-                        '</div>' +
-                        '<div class="rail-alerts-list" id="right-rail-alerts">' +
-                            '<div class="rail-alerts-empty">No active alerts.</div>' +
-                        '</div>' +
-                    '</div>' +
+                    buildAlertsPanelHtml() +
                     '<div class="right-rail-panel" data-rail-panel="levels">' +
                         '<div class="rail-levels-table" id="right-rail-levels">' +
                             '<div class="lvl-empty">Key levels load with stream data.</div>' +
@@ -9501,66 +10021,22 @@ def index():
         let _lastStats = null;
         function renderTraderStats(stats) {
             _lastStats = stats || null;
-            const strip  = document.getElementById('trader-stats-strip');
-            if (!strip) return;
             if (!stats) {
-                strip.style.display = 'none';
                 renderRailAlerts([]);
                 renderRailKeyLevels(null);
                 renderDealerImpact(null);
+                renderMarketMetrics(null);
+                renderGammaProfile(null);
+                renderChainActivity(null);
                 renderScenarioTable(null);
                 return;
             }
-
-            const netGex    = stats.net_gex;
-            const hedge     = stats.hedge_per_1pct;
-            const regime    = stats.regime || '—';
-            const regimeCls = regime === 'Long Gamma' ? 'kpi-pos' : regime === 'Short Gamma' ? 'kpi-neg' : '';
-            const netCls    = netGex == null ? '' : (netGex >= 0 ? 'kpi-pos' : 'kpi-neg');
-            const netArrow  = netGex == null ? '' : (netGex >= 0 ? '▲' : '▼');
-            const regimeArrow = regime === 'Long Gamma' ? '▲' : regime === 'Short Gamma' ? '▼' : '';
-
-            const spot = stats.spot;
-            const emMove = stats.em_move, emLo = stats.em_lower, emHi = stats.em_upper, emPct = stats.em_pct;
-            const emValue = (emMove != null)
-                ? '±$' + emMove.toFixed(2) + (emPct != null ? ' (' + emPct.toFixed(2) + '%)' : '')
-                : '—';
-            const emSub = (emLo != null && emHi != null)
-                ? emLo.toFixed(2) + ' — ' + emHi.toFixed(2) : '';
-
-            const cw = stats.call_wall, pw = stats.put_wall, gf = stats.gamma_flip;
-            const walls = (cw != null || pw != null)
-                ? (cw != null ? cw.toFixed(2) : '—') + ' / ' + (pw != null ? pw.toFixed(2) : '—')
-                : '—';
-            const flipTxt = gf != null ? gf.toFixed(2) : '—';
-
-            strip.innerHTML = `
-                <div class="kpi-card">
-                    <div class="kpi-label">Net GEX (window)</div>
-                    <div class="kpi-value ${netCls}">${netArrow ? `<span class="kpi-trend">${netArrow}</span>` : ''}${fmtMoneyCompact(netGex)}</div>
-                    <div class="kpi-sub">per 1% move: ${fmtMoneyCompact(hedge)}</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Regime</div>
-                    <div class="kpi-value ${regimeCls}">${regimeArrow ? `<span class="kpi-trend">${regimeArrow}</span>` : ''}${regime}</div>
-                    <div class="kpi-sub">gamma flip: ${flipTxt}</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Expected Move (±1σ)</div>
-                    <div class="kpi-value">${emValue}</div>
-                    <div class="kpi-sub">${emSub}</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Call / Put Wall</div>
-                    <div class="kpi-value">${walls}</div>
-                    <div class="kpi-sub">spot: ${spot != null ? spot.toFixed(2) : '—'}</div>
-                </div>
-            `;
-            strip.style.display = 'flex';
-
             renderRailAlerts(Array.isArray(stats.alerts) ? stats.alerts : []);
             renderRailKeyLevels(stats);
             renderDealerImpact(stats);
+            renderMarketMetrics(stats);
+            renderGammaProfile(stats);
+            renderChainActivity(stats);
             // Skip Scenario DOM work on background ticks; applyRightRailTab will
             // render it lazily on first reveal using _lastStats.
             if (activeRailTab === 'scenarios') {
@@ -9658,18 +10134,34 @@ def index():
             _updateAlertsBadge();
         }
 
+        function _relTime(iso) {
+            if (!iso) return '';
+            const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+            if (mins < 1) return 'now';
+            if (mins < 60) return mins + 'm';
+            return Math.floor(mins / 60) + 'h';
+        }
+
         function renderRailAlerts(list) {
-            _lastRailAlerts = Array.isArray(list) ? list.slice() : [];
+            const MAX_AGE_MIN = 15;
+            const now = Date.now();
+            const filtered = (Array.isArray(list) ? list : []).filter(a => {
+                if (!a.ts) return true;
+                return (now - new Date(a.ts).getTime()) / 60000 <= MAX_AGE_MIN;
+            });
+            _lastRailAlerts = filtered;
             const target = document.getElementById('right-rail-alerts');
             if (target) {
-                if (!_lastRailAlerts.length) {
+                if (!filtered.length) {
                     target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
                 } else {
-                    target.innerHTML = _lastRailAlerts.map(a => {
-                        const cls = a.level === 'warn' ? 'warn' : 'info';
-                        return '<div class="rail-alert-item ' + cls + '">' +
+                    target.innerHTML = filtered.map(a => {
+                        const lvl = ['warn', 'info', 'flow'].includes(a.level) ? a.level : 'info';
+                        const ago = _relTime(a.ts);
+                        return '<div class="rail-alert-item ' + lvl + '">' +
                                    '<span class="rail-alert-dot"></span>' +
                                    '<span class="rail-alert-text">' + _escapeHtml(a.text) + '</span>' +
+                                   (ago ? '<span class="rail-alert-ago">' + ago + '</span>' : '') +
                                '</div>';
                     }).join('');
                 }
@@ -10084,46 +10576,137 @@ def index():
             if (emRangeLocked && info && info.expected_move_range) {
                 applyEmRange(info.expected_move_range, false);
             }
-            const priceInfo = document.getElementById('price-info');
-            const selectedExpiries = lastData.selected_expiries || [];
-            const expiryText = selectedExpiries.length > 1 ? 
-                `${selectedExpiries.length} expiries selected` : 
-                selectedExpiries[0] || 'No expiry selected';
+            if (!info) return;
+            renderPriceHeader(info);
+            renderRangeScale(info);
+        }
 
-            let expectedMoveHtml = '';
-            if (info.expected_move_range && info.expected_move_range.lower && info.expected_move_range.upper) {
-                const lowPct  = info.expected_move_range.lower_pct != null ?
-                    `${info.expected_move_range.lower_pct >= 0 ? '+' : ''}${info.expected_move_range.lower_pct}%` : '';
-                const highPct = info.expected_move_range.upper_pct != null ?
-                    `${info.expected_move_range.upper_pct >= 0 ? '+' : ''}${info.expected_move_range.upper_pct}%` : '';
-                // lower bound is below spot -> use putColor, upper bound above spot -> callColor
-                const lowColor = putColor;
-                const highColor = callColor;
-                expectedMoveHtml = `<div>Expected Move: <span style="color:${lowColor}">$${info.expected_move_range.lower.toFixed(2)} ${lowPct}</span> - <span style="color:${highColor}">$${info.expected_move_range.upper.toFixed(2)} ${highPct}</span></div>`;
+        // ── Phase 3 Stage 2 — alerts rail card renderers ─────────────────
+        function _setMet(key, text) {
+            document.querySelectorAll('[data-met="' + key + '"]').forEach(n => {
+                n.textContent = text;
+            });
+        }
+
+        function renderPriceHeader(info) {
+            const p = (livePrice !== null) ? livePrice : info.current_price;
+            const priceEl = document.querySelector('#rail-card-price [data-live-price]');
+            if (priceEl && typeof p === 'number') {
+                priceEl.textContent = '$' + p.toFixed(2);
             }
+            const chgEl = document.querySelector('#rail-card-price [data-met="price_change"]');
+            if (chgEl) {
+                const pct = (typeof info.net_percent === 'number') ? info.net_percent : 0;
+                const chg = (typeof info.net_change === 'number') ? info.net_change : 0;
+                chgEl.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%  '
+                                  + '(' + (chg >= 0 ? '+' : '') + chg.toFixed(2) + ')';
+                chgEl.classList.toggle('pos', pct >= 0);
+                chgEl.classList.toggle('neg', pct < 0);
+            }
+            const expiries = lastData.selected_expiries || [];
+            const chipText = expiries.length > 1
+                ? (expiries.length + ' expiries')
+                : (expiries[0] || '—');
+            _setMet('expiry_chip', chipText);
+        }
 
-            // high/low diff coloring (use call/put colors)
-            const highDiff = info.high_diff || 0;
-            const highDiffPct = info.high_diff_pct || 0;
-            const lowDiff = info.low_diff || 0;
-            const lowDiffPct = info.low_diff_pct || 0;
-            // positive movement uses callColor, negative uses putColor
-            const highColor = highDiff >= 0 ? callColor : putColor;
-            const lowColor = lowDiff >= 0 ? callColor : putColor;
+        function renderRangeScale(info) {
+            const low = info.low, high = info.high;
+            const price = (livePrice !== null) ? livePrice : info.current_price;
+            if (typeof low !== 'number' || typeof high !== 'number' || high <= low) {
+                _setMet('range_low',  '—');
+                _setMet('range_high', '—');
+                return;
+            }
+            const range = high - low;
+            const pct = Math.max(0, Math.min(1, (price - low) / range));
+            const marker = document.querySelector('#rail-card-range [data-met="price_marker"]');
+            if (marker) marker.style.left = (pct * 100).toFixed(2) + '%';
+            _setMet('range_low',  '$' + low.toFixed(2));
+            _setMet('range_high', '$' + high.toFixed(2));
+            const band = document.querySelector('#rail-card-range [data-met="em_band"]');
+            if (info.expected_move_range && typeof info.expected_move_range.lower === 'number'
+                                         && typeof info.expected_move_range.upper === 'number') {
+                const emLo = info.expected_move_range.lower;
+                const emHi = info.expected_move_range.upper;
+                const a = Math.max(0, Math.min(1, (emLo - low) / range));
+                const b = Math.max(0, Math.min(1, (emHi - low) / range));
+                if (band) {
+                    band.style.left  = (a * 100).toFixed(2) + '%';
+                    band.style.width = ((b - a) * 100).toFixed(2) + '%';
+                    band.style.display = '';
+                }
+                const upperPct = info.expected_move_range.upper_pct;
+                _setMet('em_pct', (upperPct != null) ? ('±' + Math.abs(upperPct).toFixed(2) + '%') : '');
+            } else {
+                if (band) band.style.display = 'none';
+                _setMet('em_pct', '');
+            }
+        }
 
-            // Use the live streamer price if available, otherwise use the fetched price
-            const displayPrice = (livePrice !== null) ? livePrice : info.current_price;
-            priceInfo.innerHTML = `
-                <div data-live-price>Current Price: $${displayPrice.toFixed(2)}</div>
-                <div>High: $${info.high.toFixed(2)} <span style="color:${highColor}">(${highDiffPct>=0?'+':''}${highDiffPct.toFixed(2)}%)</span></div>
-                <div>Low:  $${info.low.toFixed(2)}  <span style="color:${lowColor}">(${lowDiffPct>=0?'+':''}${lowDiffPct.toFixed(2)}%)</span></div>
-                <div class="${info.net_change >= 0 ? 'green' : 'red'}">
-                    <span style="color:white !important">Change:</span> ${info.net_change >= 0 ? '+' : ''}${info.net_change.toFixed(2)} (${info.net_percent >= 0 ? '+' : ''}${info.net_percent.toFixed(2)}%)
-                </div>
-                <div>Vol Ratio: <span style="color: ${callColor}">${info.call_percentage.toFixed(2)}%</span>/<span style="color: ${putColor}">${info.put_percentage.toFixed(2)}%</span></div>
-                ${expectedMoveHtml}
-                <div>Expiries: ${expiryText}</div>
-            `;
+        function renderMarketMetrics(stats) {
+            if (!stats) {
+                _setMet('net_gex', '—');
+                _setMet('net_dex', '—');
+                _setMet('net_gex_delta', '');
+                _setMet('net_dex_delta', '');
+                return;
+            }
+            _setMet('net_gex', fmtMoneyCompact(stats.net_gex));
+            _setMet('net_dex', fmtMoneyCompact(stats.net_dex));
+            const sd = stats.session_deltas || {};
+            const dGex = (typeof sd.net_gex_vs_open === 'number') ? sd.net_gex_vs_open : null;
+            const dDex = (typeof sd.net_dex_vs_open === 'number') ? sd.net_dex_vs_open : null;
+            _setMet('net_gex_delta', dGex == null ? '' : ('Δ ' + (dGex > 0 ? '+' : '') + fmtMoneyCompact(dGex)));
+            _setMet('net_dex_delta', dDex == null ? '' : ('Δ ' + (dDex > 0 ? '+' : '') + fmtMoneyCompact(dDex)));
+            const dGexEl = document.querySelector('#rail-card-metrics [data-met="net_gex_delta"]');
+            if (dGexEl) {
+                dGexEl.classList.toggle('pos', dGex != null && dGex > 0);
+                dGexEl.classList.toggle('neg', dGex != null && dGex < 0);
+            }
+            const dDexEl = document.querySelector('#rail-card-metrics [data-met="net_dex_delta"]');
+            if (dDexEl) {
+                dDexEl.classList.toggle('pos', dDex != null && dDex > 0);
+                dDexEl.classList.toggle('neg', dDex != null && dDex < 0);
+            }
+        }
+
+        function renderGammaProfile(stats) {
+            if (!stats || !stats.profile) {
+                _setMet('profile_headline', '—');
+                _setMet('profile_blurb', '');
+                return;
+            }
+            const dot = document.querySelector('#rail-card-profile [data-met="profile_dot"]');
+            if (dot) {
+                const pos = stats.profile.regime === 'Long Gamma';
+                dot.classList.toggle('pos', pos);
+                dot.classList.toggle('neg', !pos);
+            }
+            _setMet('profile_headline', stats.profile.headline || '—');
+            _setMet('profile_blurb',    stats.profile.blurb    || '');
+        }
+
+        function renderChainActivity(stats) {
+            if (!stats || !stats.chain_activity) {
+                _setMet('oi_cp',  '—');
+                _setMet('vol_cp', '—');
+                return;
+            }
+            const ca = stats.chain_activity;
+            const sentiment = (typeof ca.sentiment === 'number') ? ca.sentiment : 0;
+            const pct = Math.max(0, Math.min(1, (sentiment + 1) / 2));
+            const marker = document.querySelector('#rail-card-activity [data-met="sentiment_marker"]');
+            if (marker) marker.style.left = (pct * 100).toFixed(2) + '%';
+            _setMet('oi_cp',  ca.oi_cp_ratio  == null ? '—' : ('C/P ' + ca.oi_cp_ratio.toFixed(2)));
+            _setMet('vol_cp', ca.vol_cp_ratio == null ? '—' : ('C/P ' + ca.vol_cp_ratio.toFixed(2)));
+            // Map ratio 0.5..2.0 → 0..100% fill, clamped.
+            const fillPct = r => (r == null) ? 0
+                : Math.max(0, Math.min(100, ((r - 0.5) / 1.5) * 100));
+            const oiFill  = document.querySelector('#rail-card-activity [data-met="oi_fill"]');
+            const volFill = document.querySelector('#rail-card-activity [data-met="vol_fill"]');
+            if (oiFill)  oiFill.style.width  = fillPct(ca.oi_cp_ratio)  + '%';
+            if (volFill) volFill.style.width = fillPct(ca.vol_cp_ratio) + '%';
         }
         
         function loadExpirations() {
@@ -11033,6 +11616,15 @@ def update_price():
         highlight_max_level = data.get('highlight_max_level', False)
         max_level_color = data.get('max_level_color', '#800080')
         coloring_mode = data.get('coloring_mode', 'Linear Intensity')
+        # Mirror /update_data semantics. compute_trader_stats has needed these
+        # since Phase 2 Stage 3 (commit 6fc40bb); without them every tick raised
+        # a silent NameError and trader_stats stayed None.
+        delta_adjusted = data.get('delta_adjusted', False)
+        cin_val = data.get('calculate_in_notional', True)
+        if isinstance(cin_val, str):
+            calculate_in_notional = cin_val.lower() == 'true'
+        else:
+            calculate_in_notional = bool(cin_val)
 
         price_data = get_price_history(ticker, timeframe=timeframe)
 
@@ -11092,6 +11684,7 @@ def update_price():
                     calls, puts, S_for_panel, strike_range=strike_range,
                     delta_adjusted=delta_adjusted,
                     calculate_in_notional=calculate_in_notional,
+                    ticker=ticker,
                 )
             except Exception as e:
                 print(f"[trader_stats] build failed: {e}")
