@@ -3607,12 +3607,52 @@ def _fetch_vol_spike_data(ticker, S, strike_range):
     return result
 
 
+def _extract_key_level_prices(key_levels):
+    """Flatten the active key-level payload into numeric prices for alert gating."""
+    if not isinstance(key_levels, dict):
+        return []
+    prices = []
+    for key in (
+        'call_wall', 'call_wall_2',
+        'put_wall', 'put_wall_2',
+        'gamma_flip', 'hvl',
+        'em_upper', 'em_upper_2',
+        'em_lower', 'em_lower_2',
+    ):
+        node = key_levels.get(key)
+        if not isinstance(node, dict):
+            continue
+        price = node.get('price')
+        if price is None:
+            continue
+        try:
+            prices.append(float(price))
+        except Exception:
+            continue
+    return prices
+
+
 def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
-                        call_wall=None, put_wall=None):
+                        call_wall=None, put_wall=None, key_levels=None,
+                        gate_strike_alerts=True):
     """Return list of flow-level alert dicts. Called from compute_trader_stats."""
     if not ticker or S is None:
         return []
     alerts = []
+    active_level_prices = _extract_key_level_prices(key_levels)
+
+    def _passes_key_level_gate(alert_type, strike):
+        if alert_type in ('wall_shift', 'gamma_flip_move'):
+            return True
+        if not gate_strike_alerts:
+            return True
+        if strike is None or S is None or S <= 0 or not active_level_prices:
+            return True
+        try:
+            proximity = min(abs(float(strike) - lvl) for lvl in active_level_prices) / float(S)
+        except Exception:
+            return True
+        return proximity <= 0.0025
 
     # 1. Wall shift
     prev_walls = _LAST_WALLS.get(ticker, {})
@@ -3637,7 +3677,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
             if curr_v >= max(500.0, 3.0 * avg20):
                 aid = f'vol_spike:{strike:.0f}'
                 ratio = (curr_v / avg20) if avg20 > 0 else 99.0
-                if _alert_cooldown_ok(ticker, aid, 300):
+                if _passes_key_level_gate('vol_spike', strike) and _alert_cooldown_ok(ticker, aid, 300):
                     alerts.append({
                         'id': aid, 'level': 'flow',
                         'text': f'Vol spike @ {strike:.0f} ({ratio:.1f}× avg)',
@@ -3661,7 +3701,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 if oi < 100 or vol / oi <= 0.25:
                     continue
                 aid = f'voi_ratio:{strike:.0f}'
-                if _alert_cooldown_ok(ticker, aid, 600):
+                if _passes_key_level_gate('voi_ratio', strike) and _alert_cooldown_ok(ticker, aid, 600):
                     alerts.append({
                         'id': aid, 'level': 'flow',
                         'text': f'Heavy vol/OI @ {strike:.0f} ({vol/oi:.2f})',
@@ -3698,7 +3738,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 z = (curr_iv - mu) / std
                 if z > 2.0:
                     aid = f'iv_surge:{strike:.0f}'
-                    if _alert_cooldown_ok(ticker, aid, 600):
+                    if _passes_key_level_gate('iv_surge', strike) and _alert_cooldown_ok(ticker, aid, 600):
                         alerts.append({
                             'id': aid, 'level': 'flow',
                             'text': f'IV surge @ {strike:.0f} (+{z:.1f}σ)',
@@ -3712,7 +3752,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
 
 def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None,
                          delta_adjusted: bool = False, calculate_in_notional: bool = True,
-                         ticker: str = None):
+                         ticker: str = None, gate_strike_alerts: bool = True):
     """High-level trader KPIs + a short alerts list, for the header strip.
 
     Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
@@ -3917,6 +3957,8 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
             strike_range=strike_range,
             call_wall=out.get('call_wall'),
             put_wall=out.get('put_wall'),
+            key_levels=levels,
+            gate_strike_alerts=gate_strike_alerts,
         )
         alerts.extend(flow)
     except Exception as e:
@@ -7164,6 +7206,15 @@ def index():
                         </div>
                     </div>
                 </details>
+                <details class="drawer-section" open>
+                    <summary>Alerts</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="gate_alerts" checked>
+                            <label for="gate_alerts">Only alert near key levels</label>
+                        </div>
+                    </div>
+                </details>
                 <details class="drawer-section">
                     <summary>Max Level</summary>
                     <div class="drawer-content">
@@ -7421,6 +7472,7 @@ def index():
         // Price-line overlays on the TV candle chart (not Plotly containers).
         // Share the chart-visibility store but render under a separate drawer group.
         const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2'];
+        const ALERT_GATE_KEY = 'gex.gateAlerts';
         const CHART_VISIBILITY_DEFAULTS = {
             price: true, gamma: true, delta: true, vanna: true, charm: true,
             speed: false, vomma: false, color: false,
@@ -7447,6 +7499,24 @@ def index():
             try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
         }
         function isChartVisible(id) { return !!getChartVisibility()[id]; }
+        let gateAlertsNearKeyLevels = (() => {
+            try {
+                const raw = localStorage.getItem(ALERT_GATE_KEY);
+                return raw == null ? true : raw === '1';
+            } catch (e) {
+                return true;
+            }
+        })();
+        function syncAlertGateCheckbox() {
+            const cb = document.getElementById('gate_alerts');
+            if (cb) cb.checked = !!gateAlertsNearKeyLevels;
+        }
+        function setAlertGateSetting(next, persist = true) {
+            gateAlertsNearKeyLevels = !!next;
+            syncAlertGateCheckbox();
+            if (!persist) return;
+            try { localStorage.setItem(ALERT_GATE_KEY, gateAlertsNearKeyLevels ? '1' : '0'); } catch (e) {}
+        }
 
         // List of Plotly chart div IDs that carry a current-price line shape
         const PLOTLY_PRICE_LINE_CHARTS = [
@@ -8547,6 +8617,8 @@ def index():
             const strikeRange = parseFloat(document.getElementById('strike_range').value) / 100;
             const highlightMaxLevel = document.getElementById('highlight_max_level').checked;
             const maxLevelMode = document.getElementById('max_level_mode').value;
+            const gateAlerts = !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked);
+            setAlertGateSetting(gateAlerts);
             
             // Get visible charts (server payload uses show_<id> keys for back-compat)
             const _vis = getChartVisibility();
@@ -8598,6 +8670,7 @@ def index():
                     delta_adjusted: deltaAdjusted,
                     calculate_in_notional: calculateInNotional,
                     strike_range: strikeRange,
+                    gate_alerts: gateAlerts,
                     call_color: callColor,
                     put_color: putColor,
                     highlight_max_level: highlightMaxLevel,
@@ -10632,6 +10705,7 @@ def index():
                     delta_adjusted: !!(deltaAdjustedEl && deltaAdjustedEl.checked),
                     calculate_in_notional: !!(calculateInNotionalEl && calculateInNotionalEl.checked),
                     strike_range: strikeRangeEl ? (parseFloat(strikeRangeEl.value) / 100) : 0.1,
+                    gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
                     show_gamma: false,
                     show_delta: false,
                     show_vanna: false,
@@ -10668,6 +10742,7 @@ def index():
                 highlight_max_level: document.getElementById('highlight_max_level').checked,
                 max_level_color: maxLevelColor,
                 coloring_mode: document.getElementById('coloring_mode').value,
+                gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
             };
         }
 
@@ -11287,6 +11362,14 @@ def index():
         }
         
         document.getElementById('streamToggle').addEventListener('click', toggleStreaming);
+        syncAlertGateCheckbox();
+        const gateAlertsToggle = document.getElementById('gate_alerts');
+        if (gateAlertsToggle) {
+            gateAlertsToggle.addEventListener('change', () => {
+                setAlertGateSetting(gateAlertsToggle.checked);
+                updateData();
+            });
+        }
 
         // Settings save/load functions
         function gatherSettings() {
@@ -11313,6 +11396,7 @@ def index():
                 highlight_max_level: document.getElementById('highlight_max_level').checked,
                 max_level_color: document.getElementById('max_level_color').value,
                 max_level_mode: document.getElementById('max_level_mode').value,
+                gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
                 em_range_locked: emRangeLocked,
                 // Chart visibility
                 charts: getChartVisibility()
@@ -11370,6 +11454,9 @@ def index():
             }
             if (settings.max_level_mode) {
                 document.getElementById('max_level_mode').value = settings.max_level_mode;
+            }
+            if (settings.gate_alerts !== undefined) {
+                setAlertGateSetting(settings.gate_alerts);
             }
             if (settings.em_range_locked !== undefined) {
                 setEmRangeLocked(settings.em_range_locked);
@@ -11959,6 +12046,11 @@ def update_price():
             calculate_in_notional = cin_val.lower() == 'true'
         else:
             calculate_in_notional = bool(cin_val)
+        gate_val = data.get('gate_alerts', True)
+        if isinstance(gate_val, str):
+            gate_alerts = gate_val.lower() == 'true'
+        else:
+            gate_alerts = bool(gate_val)
 
         price_data = get_price_history(ticker, timeframe=timeframe)
 
@@ -12019,6 +12111,7 @@ def update_price():
                     delta_adjusted=delta_adjusted,
                     calculate_in_notional=calculate_in_notional,
                     ticker=ticker,
+                    gate_strike_alerts=gate_alerts,
                 )
             except Exception as e:
                 print(f"[trader_stats] build failed: {e}")
@@ -12040,6 +12133,7 @@ def update_price():
                         delta_adjusted=delta_adjusted,
                         calculate_in_notional=calculate_in_notional,
                         ticker=ticker,
+                        gate_strike_alerts=gate_alerts,
                     )
             except Exception as e:
                 print(f"[0dte_bundle] build failed: {e}")
