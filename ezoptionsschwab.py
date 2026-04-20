@@ -5422,7 +5422,7 @@ def index():
             --border:#2A313B; --border-strong:#3A424F;
             --fg-0:#E5E7EB; --fg-1:#9CA3AF; --fg-2:#6B7280;
             --call:#10B981; --put:#EF4444; --accent:#3B82F6;
-            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981;
+            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37;
             --radius:6px; --radius-lg:10px;
             --font-ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
             --font-mono:"SF Mono","JetBrains Mono",Menlo,monospace;
@@ -7368,6 +7368,8 @@ def index():
         let tvExposurePriceLines = [];
         let tvExpectedMovePriceLines = [];
         let tvKeyLevelLines = [];
+        let tvTopOILines   = [];
+        let _lastTopOI     = null;
         let _lastKeyLevels = null;
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
@@ -8746,6 +8748,8 @@ def index():
             if (activeInds.has('macd')) applyMacdPane(candles, todayCandles);
             else                        destroyMacdPane();
 
+            renderTopOI(_lastTopOI);
+
             // Update legend overlay
             updateIndicatorLegend();
         }
@@ -9139,6 +9143,7 @@ def index():
                 { key:'rsi',    label:'RSI',    title:'Relative Strength Index (14) — sub-pane' },
                 { key:'macd',   label:'MACD',   title:'MACD (12, 26, 9) — sub-pane' },
                 { key:'atr',    label:'ATR',    title:'Average True Range (14) — sub-pane' },
+                { key:'oi',     label:'OI',     title:'Top 5 OI strikes (nearest expiry)' },
             ];
             indicatorDefs.forEach(def => {
                 const b = btn(def.label, def.title, () => {
@@ -10405,6 +10410,39 @@ def index():
             });
         }
 
+        // ── Top-OI overlay (dotted price lines, nearest expiry) ───────────────
+        function clearTopOILines() {
+            if (!tvCandleSeries) { tvTopOILines = []; return; }
+            tvTopOILines.forEach(l => { try { tvCandleSeries.removePriceLine(l); } catch (e) {} });
+            tvTopOILines = [];
+        }
+
+        function renderTopOI(topOi) {
+            clearTopOILines();
+            if (!tvActiveInds.has('oi') || !topOi || !tvCandleSeries || !window.LightweightCharts) return;
+            const LS = LightweightCharts.LineStyle;
+            const callColor = getComputedStyle(document.documentElement).getPropertyValue('--call').trim() || '#10B981';
+            const putColor  = getComputedStyle(document.documentElement).getPropertyValue('--put').trim()  || '#EF4444';
+            const goldColor = getComputedStyle(document.documentElement).getPropertyValue('--gold').trim() || '#D4AF37';
+
+            const map = new Map();
+            (topOi.calls || []).forEach(r => map.set(r.strike, { color: callColor, title: 'C OI ' + r.strike }));
+            (topOi.puts  || []).forEach(r => {
+                if (map.has(r.strike)) map.set(r.strike, { color: goldColor, title: '\u2605 ' + r.strike });
+                else                   map.set(r.strike, { color: putColor,  title: 'P OI ' + r.strike });
+            });
+
+            map.forEach(({ color, title }, strike) => {
+                try {
+                    const line = tvCandleSeries.createPriceLine({
+                        price: strike, color, lineWidth: 1,
+                        lineStyle: LS.Dotted, axisLabelVisible: true, title,
+                    });
+                    tvTopOILines.push(line);
+                } catch (e) { console.warn('renderTopOI createPriceLine failed:', e); }
+            });
+        }
+
         // ── Throttled price history fetcher ───────────────────────────────────
         // Fetches candle history + exposure levels from /update_price.
         // Real-time ticks come from SSE; this only handles the historical snapshot
@@ -10469,6 +10507,11 @@ def index():
         function updateCharts(data) {
             // Save scroll position before any DOM changes
             savedScrollPosition = window.scrollY || window.pageYOffset;
+
+            if (data.top_oi) {
+                _lastTopOI = data.top_oi;
+                if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
+            }
             
             const selectedCharts = getChartVisibility();
             
@@ -10506,6 +10549,7 @@ def index():
                     tvHistoricalPoints = [];
                     tvHistoricalExpectedMoveSeries = [];
                     tvKeyLevelLines = [];
+                    tvTopOILines = [];
                 }
                 if (tvResizeObserver) {
                     tvResizeObserver.disconnect();
