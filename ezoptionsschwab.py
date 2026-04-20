@@ -5929,6 +5929,18 @@ def index():
         }
         .rail-metric .d.pos { color: var(--call); }
         .rail-metric .d.neg { color: var(--put); }
+        .gex-scope-pill {
+            display: flex; gap: 4px; margin-top: 8px;
+        }
+        .gex-scope-btn {
+            flex: 1; padding: 3px 0; border-radius: var(--radius);
+            border: 1px solid var(--border); background: var(--bg-2);
+            color: var(--fg-2); font-size: 11px; cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        .gex-scope-btn.active {
+            background: var(--accent); color: #fff; border-color: var(--accent);
+        }
         .rail-range-track {
             position: relative;
             height: 6px;
@@ -7370,7 +7382,10 @@ def index():
         let tvKeyLevelLines = [];
         let tvTopOILines   = [];
         let _lastTopOI     = null;
-        let _lastKeyLevels = null;
+        let _lastKeyLevels     = null;
+        let _lastKeyLevels0dte = null;
+        let _lastStats0dte     = null;
+        let gexScope = (() => { try { return localStorage.getItem('gexScope') || 'all'; } catch(e) { return 'all'; } })();
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
         let tvHistoricalOverlayPending = false;
@@ -9763,6 +9778,10 @@ def index():
                                 '<div class="d" data-met="net_dex_delta"></div>' +
                             '</div>' +
                         '</div>' +
+                        '<div class="gex-scope-pill" id="gex-scope-pill">' +
+                            '<button class="gex-scope-btn" data-scope="all">All</button>' +
+                            '<button class="gex-scope-btn" data-scope="0dte">0DTE</button>' +
+                        '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-range">' +
                         '<div class="rail-card-header">Range · EM <span data-met="em_pct"></span></div>' +
@@ -9904,6 +9923,8 @@ def index():
                         '</div>' +
                     '</div>';
                 grid.appendChild(railPanels);
+                wireGexScopePill();
+                redrawGexScope();
                 applyRightRailTab();
             }
             return priceContainer;
@@ -10027,6 +10048,31 @@ def index():
                     applyRightRailTab();
                 });
             });
+            wireGexScopePill();
+        }
+
+        function wireGexScopePill() {
+            document.querySelectorAll('.gex-scope-btn').forEach(btn => {
+                if (btn.__scopeWired) return;
+                btn.__scopeWired = true;
+                btn.addEventListener('click', () => {
+                    gexScope = btn.dataset.scope;
+                    try { localStorage.setItem('gexScope', gexScope); } catch(e) {}
+                    redrawGexScope();
+                });
+            });
+        }
+
+        function redrawGexScope() {
+            // Sync pill active state
+            document.querySelectorAll('.gex-scope-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.scope === gexScope);
+            });
+            const is0dte = gexScope === '0dte';
+            const stats  = is0dte ? _lastStats0dte     : (_lastStats      || null);
+            const levels = is0dte ? _lastKeyLevels0dte : (_lastKeyLevels  || null);
+            renderMarketMetrics(stats);
+            renderKeyLevels(levels);
         }
 
         function renderGexSidePanel(panelJson) {
@@ -10494,11 +10540,17 @@ def index():
                 }
                 if (priceResp && priceResp.key_levels) {
                     _lastKeyLevels = priceResp.key_levels;
-                    renderKeyLevels(priceResp.key_levels);
+                }
+                if (priceResp && priceResp.key_levels_0dte) {
+                    _lastKeyLevels0dte = priceResp.key_levels_0dte;
+                }
+                if (priceResp && priceResp.stats_0dte) {
+                    _lastStats0dte = priceResp.stats_0dte;
                 }
                 if (priceResp && priceResp.trader_stats) {
                     renderTraderStats(priceResp.trader_stats);
                 }
+                redrawGexScope();
             })
             .catch(err => console.error('Error fetching price chart:', err))
             .finally(() => { _priceHistoryInFlight = false; });
@@ -11815,11 +11867,33 @@ def update_price():
                 print(f"[trader_stats] build failed: {e}")
                 trader_stats = None
 
+        # 0DTE-filtered bundles (nearest expiration only)
+        key_levels_0dte = None
+        stats_0dte = None
+        if calls is not None and puts is not None and S_for_panel is not None:
+            try:
+                nearest_exp = _nearest_expiration(calls) or _nearest_expiration(puts)
+                if nearest_exp:
+                    c0 = calls[calls['expiration_date'] == nearest_exp] if 'expiration_date' in calls.columns else calls
+                    p0 = puts[puts['expiration_date']   == nearest_exp] if 'expiration_date' in puts.columns  else puts
+                    key_levels_0dte = compute_key_levels(c0, p0, S_for_panel)
+                    stats_0dte = compute_trader_stats(
+                        c0, p0, S_for_panel,
+                        strike_range=strike_range,
+                        delta_adjusted=delta_adjusted,
+                        calculate_in_notional=calculate_in_notional,
+                        ticker=ticker,
+                    )
+            except Exception as e:
+                print(f"[0dte_bundle] build failed: {e}")
+
         return jsonify({
             'price': price_chart,
             'gex_panel': gex_panel,
             'key_levels': key_levels,
             'trader_stats': trader_stats,
+            'key_levels_0dte': key_levels_0dte,
+            'stats_0dte': stats_0dte,
         })
     except Exception as e:
         import traceback
