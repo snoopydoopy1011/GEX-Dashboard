@@ -1,6 +1,6 @@
 # GEX Dashboard — UX Stability + Decision-Speed Refinement Plan
 
-**Status:** Proposed
+**Status:** In Progress
 **Owner:** Codex
 **Created:** 2026-04-20
 **Target branch:** `feat/ux-stability-refinement`
@@ -11,6 +11,8 @@
 - [`ALERTS_RAIL_PHASE3_PLAN.md`](ALERTS_RAIL_PHASE3_PLAN.md)
 
 Read the three prior docs first. This plan assumes their layout, tokens, and no-formula-change rules remain in force.
+
+**Current state (as of 2026-04-20):** Stage 1 is landed on the active worktree branch `codex-ux-stability-refinement-plan`. Manual smoke review passed from user-provided screenshots across `1 min`, `5 min`, `15 min`, `30 min`, and `1 hour` with the timer staying on the first toolbar row and no obvious timeframe bucketing regressions visible in the captured bars.
 
 ---
 
@@ -190,6 +192,13 @@ This phase should make the dashboard read more like a trading workstation and le
 **Commit:**
 
 `fix(chart): stabilize realtime candles and compact toolbar timer`
+
+**Progress note (2026-04-20):**
+
+- Landed in `ezoptionsschwab.py`.
+- Manual smoke evidence came from captured `1 min`, `5 min`, `15 min`, `30 min`, and `1 hour` views.
+- The toolbar now keeps the timer in a dedicated right-side slot.
+- Intrabar volume is explicitly labeled as `Vol: 1m confirmed` to avoid implying quote-level volume finality.
 
 ---
 

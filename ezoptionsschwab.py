@@ -6461,6 +6461,8 @@ def index():
             font-weight: bold;
             padding: 2px 8px;
             pointer-events: none;
+            flex: 0 0 auto;
+            white-space: nowrap;
         }
         /* Chart toolbar — sits ABOVE the canvas, normal document flow */
         .tv-toolbar-container {
@@ -6469,19 +6471,40 @@ def index():
             border-radius: 10px 10px 0 0;
             padding: 2px 6px;
             display: flex;
-            flex-wrap: wrap;
-            gap: 3px;
+            flex-wrap: nowrap;
+            gap: 8px;
             align-items: center;
             min-height: 0;
+            min-width: 0;
+            overflow: hidden;
         }
         .tv-toolbar {
             display: contents; /* children flow directly into container */
+        }
+        .tv-toolbar-main {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: thin;
+        }
+        .tv-toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 0 0 auto;
+            margin-left: auto;
+            white-space: nowrap;
         }
         .tv-toolbar-sep {
             width: 1px;
             height: 16px;
             background: var(--border);
             margin: 0 2px;
+            flex: 0 0 auto;
         }
         .tv-tb-btn {
             background: #2a2a2a;
@@ -6499,6 +6522,17 @@ def index():
         .tv-tb-btn:hover  { background: #3a3a3a; color: #fff; }
         .tv-tb-btn.active { background: #1a5fac; border-color: #4b90e2; color: #fff; }
         .tv-tb-btn.danger { background: #5c1a1a; border-color: #c0392b; color: #f88; }
+        .tv-toolbar-status {
+            font-size: 10px;
+            letter-spacing: 0.03em;
+            color: var(--warn);
+            border: 1px solid rgba(245, 158, 11, 0.28);
+            background: rgba(245, 158, 11, 0.12);
+            border-radius: 4px;
+            padding: 3px 6px;
+            white-space: nowrap;
+            user-select: none;
+        }
         /* Indicator legend — inside canvas, pointer-events none so it doesn't block */
         .tv-indicator-legend {
             position: absolute;
@@ -7677,6 +7711,23 @@ def index():
             return (isFinite(m) && m > 0 ? m : 1) * 60;
         }
 
+        function tvBucketStartForUnixSec(unixSec) {
+            if (!Number.isFinite(unixSec)) return null;
+            const bucketSec = tvBucketSec();
+            return Math.floor(unixSec / bucketSec) * bucketSec;
+        }
+
+        function tvToSeriesBar(bar) {
+            return {
+                time: bar.time,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume || 0,
+            };
+        }
+
         /**
          * Update the current bucket's high/low/close from a real-time last price.
          * Bucket boundaries follow the selected timeframe (1m/5m/15m/30m/1h).
@@ -7688,9 +7739,8 @@ def index():
             plotlyPriceUpdateTimer = setTimeout(function() { updateAllPlotlyPriceLines(last); }, 500);
 
             if (!tvCandleSeries || !tvLastCandles.length) return;
-            const bucketSec = tvBucketSec();
             const nowSec = Math.floor(Date.now() / 1000);
-            const bucketStart = Math.floor(nowSec / bucketSec) * bucketSec;
+            const bucketStart = tvBucketStartForUnixSec(nowSec);
             const lastCandle = tvLastCandles[tvLastCandles.length - 1];
 
             if (lastCandle.time === bucketStart) {
@@ -7702,8 +7752,10 @@ def index():
                     low:    Math.min(lastCandle.low,  last),
                     close:  last,
                     volume: lastCandle.volume || 0,
+                    __quoteSeeded: !!lastCandle.__quoteSeeded,
+                    __quoteDirty: true,
                 };
-                try { tvCandleSeries.update(updated); } catch(e) {}
+                try { tvCandleSeries.update(tvToSeriesBar(updated)); } catch(e) {}
                 tvLastCandles[tvLastCandles.length - 1] = updated;
                 // Keep multi-day indicator candles in sync
                 const icLast = tvIndicatorCandles[tvIndicatorCandles.length - 1];
@@ -7717,19 +7769,21 @@ def index():
                 }
             } else if (bucketStart > lastCandle.time) {
                 // Clock has rolled past the bucket boundary but CHART_EQUITY hasn't
-                // pushed the new bar yet. Open a fresh bucket off the last tick so
-                // the candle keeps wiggling; applyRealtimeCandle will reconcile
-                // volume and any missed O/H/L when the 1-min bar arrives.
+                // pushed the new bar yet. Seed a provisional bucket from the last
+                // confirmed close so the candle can keep wiggling without implying
+                // any live volume; the 1-min stream merges into this bucket later.
+                const anchor = Number.isFinite(lastCandle.close) ? lastCandle.close : last;
                 const fresh = {
                     time:   bucketStart,
-                    open:   last,
-                    high:   last,
-                    low:    last,
+                    open:   anchor,
+                    high:   Math.max(anchor, last),
+                    low:    Math.min(anchor, last),
                     close:  last,
                     volume: 0,
+                    __quoteSeeded: true,
+                    __quoteDirty: false,
                 };
-                try { tvCandleSeries.update(fresh); } catch(e) {}
-                try { tvVolumeSeries.update({ time: bucketStart, value: 0, color: callColor }); } catch(e) {}
+                try { tvCandleSeries.update(tvToSeriesBar(fresh)); } catch(e) {}
                 tvLastCandles.push(fresh);
                 const icLast = tvIndicatorCandles[tvIndicatorCandles.length - 1];
                 if (!icLast || icLast.time < bucketStart) tvIndicatorCandles.push(fresh);
@@ -7744,32 +7798,21 @@ def index():
          */
         function applyRealtimeCandle(candle) {
             if (!tvCandleSeries) return;
-            const bucketSec = tvBucketSec();
-            const bucketStart = Math.floor(candle.time / bucketSec) * bucketSec;
+            const bucketStart = tvBucketStartForUnixSec(candle.time);
 
             function rollInto(arr) {
                 const idx = arr.findIndex(x => x.time === bucketStart);
                 if (idx >= 0) {
                     const b = arr[idx];
-                    const bucketWasSeededFromQuote = (b.volume || 0) === 0;
-                    if (bucketWasSeededFromQuote) {
-                        arr[idx] = {
-                            time:   b.time,
-                            open:   candle.open,
-                            high:   candle.high,
-                            low:    candle.low,
-                            close:  candle.close,
-                            volume: candle.volume || 0,
-                        };
-                        return arr[idx];
-                    }
                     arr[idx] = {
                         time:   b.time,
-                        open:   b.open,
+                        open:   b.__quoteSeeded ? candle.open : b.open,
                         high:   Math.max(b.high, candle.high),
                         low:    Math.min(b.low,  candle.low),
-                        close:  candle.close,
+                        close:  b.__quoteDirty ? b.close : candle.close,
                         volume: (b.volume || 0) + (candle.volume || 0),
+                        __quoteSeeded: false,
+                        __quoteDirty: false,
                     };
                     return arr[idx];
                 }
@@ -7781,6 +7824,8 @@ def index():
                     low:    candle.low,
                     close:  candle.close,
                     volume: candle.volume || 0,
+                    __quoteSeeded: false,
+                    __quoteDirty: false,
                 };
                 arr.push(fresh);
                 arr.sort((a, b) => a.time - b.time);
@@ -7789,7 +7834,7 @@ def index():
 
             const displayBar = rollInto(tvLastCandles);
             rollInto(tvIndicatorCandles);
-            try { tvCandleSeries.update(displayBar); } catch(e) {}
+            try { tvCandleSeries.update(tvToSeriesBar(displayBar)); } catch(e) {}
             try {
                 tvVolumeSeries.update({
                     time:  displayBar.time,
@@ -9300,6 +9345,12 @@ def index():
             toolbarContainer.innerHTML = '';
             const toolbar = toolbarContainer;
             toolbar.className = 'tv-toolbar-container';
+            const toolbarMain = document.createElement('div');
+            toolbarMain.className = 'tv-toolbar-main';
+            const toolbarRight = document.createElement('div');
+            toolbarRight.className = 'tv-toolbar-right';
+            toolbar.appendChild(toolbarMain);
+            toolbar.appendChild(toolbarRight);
 
             // Use the persistent global set so state survives data refreshes
             // (tvActiveInds is declared at page level)
@@ -9311,6 +9362,16 @@ def index():
                 b.title = title;
                 b.addEventListener('click', onClick);
                 return b;
+            }
+
+            function addLeft(node) {
+                toolbarMain.appendChild(node);
+                return node;
+            }
+
+            function addRight(node) {
+                toolbarRight.appendChild(node);
+                return node;
             }
 
             // Indicator toggles
@@ -9339,11 +9400,11 @@ def index():
                     if (def.key === 'oi' && tvActiveInds.has('oi')) ensureTopOILoaded();
                 });
                 if (tvActiveInds.has(def.key)) b.classList.add('active');
-                toolbar.appendChild(b);
+                addLeft(b);
             });
 
             // --- Separator ---
-            const sep2 = document.createElement('div'); sep2.className = 'tv-toolbar-sep'; toolbar.appendChild(sep2);
+            const sep2 = document.createElement('div'); sep2.className = 'tv-toolbar-sep'; addLeft(sep2);
 
             // Drawing tools
             const drawDefs = [
@@ -9356,7 +9417,7 @@ def index():
                 const b = btn(def.label, def.title, () => setDrawMode(def.key));
                 b.dataset.draw = def.key;
                 if (tvDrawMode === def.key) b.classList.add('active');
-                toolbar.appendChild(b);
+                addLeft(b);
             });
 
             // Draw color picker
@@ -9373,19 +9434,14 @@ def index():
             colorPicker.title = 'Drawing color';
             colorWrap.appendChild(colorLabel);
             colorWrap.appendChild(colorPicker);
-            toolbar.appendChild(colorWrap);
+            addLeft(colorWrap);
 
             // --- Separator ---
-            const sep3 = document.createElement('div'); sep3.className = 'tv-toolbar-sep'; toolbar.appendChild(sep3);
+            const sep3 = document.createElement('div'); sep3.className = 'tv-toolbar-sep'; addLeft(sep3);
 
             // Undo / Clear
-            toolbar.appendChild(btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
-            toolbar.appendChild(btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
-
-            // Push Fit / Auto-Range to far right
-            const spacer = document.createElement('div');
-            spacer.style.cssText = 'flex:1';
-            toolbar.appendChild(spacer);
+            addLeft(btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
+            addLeft(btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
@@ -9398,9 +9454,15 @@ def index():
                 arBtn.classList.toggle('active', tvAutoRange);
                 if (tvPriceChart) tvFitAll();  // always fit immediately when toggling, ON or OFF
             });
-            toolbar.appendChild(arBtn);
+            addRight(arBtn);
 
-            toolbar.appendChild(btn('⟳ Reset', 'Reset zoom and pan to fit all data', () => tvFitAll()));
+            addRight(btn('⟳ Reset', 'Reset zoom and pan to fit all data', () => tvFitAll()));
+
+            const volumeStatusEl = document.createElement('span');
+            volumeStatusEl.className = 'tv-toolbar-status';
+            volumeStatusEl.textContent = 'Vol: 1m confirmed';
+            volumeStatusEl.title = 'Intrabar volume is confirmed from 1-minute CHART_EQUITY bars. Quote ticks do not carry live volume.';
+            addRight(volumeStatusEl);
 
             // Candle close timer
             const timerEl = document.createElement('span');
@@ -9408,7 +9470,7 @@ def index():
             timerEl.className = 'candle-close-timer';
             timerEl.title = 'Time remaining until the current candle closes';
             timerEl.textContent = '⏱ --:--';
-            toolbar.appendChild(timerEl);
+            addRight(timerEl);
             startCandleCloseTimer();
 
             // Wire up click handler for drawing
