@@ -1616,6 +1616,33 @@ CALL_COLOR = '#10B981'
 PUT_COLOR = '#EF4444'
 
 
+def apply_plotly_theme(fig) -> None:
+    """Apply shared visual theme to a Plotly figure. Call at the END of every chart builder."""
+    fig.update_layout(
+        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
+        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
+        font=dict(
+            family=PLOT_THEME['font']['family'],
+            size=PLOT_THEME['font']['size'],
+            color=PLOT_THEME['font']['color'],
+        ),
+        xaxis=dict(
+            gridcolor=PLOT_THEME['xaxis']['gridcolor'],
+            zerolinecolor=PLOT_THEME['xaxis']['zerolinecolor'],
+            nticks=10,
+        ),
+        yaxis=dict(
+            gridcolor=PLOT_THEME['yaxis']['gridcolor'],
+            zerolinecolor=PLOT_THEME['yaxis']['zerolinecolor'],
+        ),
+        hoverlabel=dict(
+            bgcolor=PLOT_THEME['paper_bgcolor'],
+            bordercolor=PLOT_THEME['xaxis']['gridcolor'],
+            font=dict(family=PLOT_THEME['font']['family'], size=12, color=PLOT_THEME['font']['color']),
+        ),
+    )
+
+
 def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.02, show_calls=True, show_puts=True, show_net=True, coloring_mode='Solid', call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None, horizontal=False, show_abs_gex_area=False, abs_gex_opacity=0.2, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
     # Ensure the exposure_type column exists
     if exposure_type not in calls.columns or exposure_type not in puts.columns:
@@ -2041,6 +2068,7 @@ def create_exposure_chart(calls, puts, exposure_type, title, S, strike_range=0.0
         except Exception as e:
             print(f"Error highlighting max level: {e}")
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def create_volume_chart(call_volume, put_volume, use_itm=True, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
@@ -2063,7 +2091,7 @@ def create_volume_chart(call_volume, put_volume, use_itm=True, call_color=CALL_C
         font=dict(color='white'),
         height=500
     )
-    
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
@@ -2356,6 +2384,7 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
         except Exception as e:
             print(f"Error highlighting max level in options volume: {e}")
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def update_options_chain(ticker, expiration_date=None):
@@ -4832,6 +4861,7 @@ def create_open_interest_chart(calls, puts, S, strike_range=0.02, call_color=CAL
         except Exception as e:
             print(f"Error highlighting max level in open interest chart: {e}")
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def create_premium_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
@@ -5124,6 +5154,7 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLO
         except Exception as e:
             print(f"Error highlighting max level in premium chart: {e}")
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def create_centroid_chart(ticker, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
@@ -5289,6 +5320,7 @@ def create_centroid_chart(ticker, call_color=CALL_COLOR, put_color=PUT_COLOR, se
     fig.update_xaxes(showspikes=True, spikecolor='#CCCCCC', spikethickness=1)
     fig.update_yaxes(showspikes=True, spikecolor='#CCCCCC', spikethickness=1)
 
+    apply_plotly_theme(fig)
     return fig.to_json()
 
 def infer_side(last, bid, ask):
@@ -7332,7 +7364,7 @@ def index():
         const CHART_VISIBILITY_DEFAULTS = {
             price: true, gamma: true, delta: true, vanna: true, charm: true,
             speed: false, vomma: false, color: false,
-            options_volume: true, open_interest: false, volume: true,
+            options_volume: true, open_interest: true, volume: true,
             large_trades: true, premium: true, centroid: true,
             hvl: true, em_2s: true, walls_2: true
         };
