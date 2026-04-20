@@ -7593,8 +7593,18 @@ def index():
         }
 
         /**
-         * Update or extend the chart's current minute candle from a real-time last price.
-         * Uses UTC second-aligned minute boundaries to match the chart's time axis.
+         * Bucket size in seconds for the currently selected chart timeframe.
+         * The SSE stream is always 1-minute; we aggregate into the displayed bucket.
+         */
+        function tvBucketSec() {
+            const el = document.getElementById('timeframe');
+            const m = parseInt(el && el.value, 10);
+            return (isFinite(m) && m > 0 ? m : 1) * 60;
+        }
+
+        /**
+         * Update the current bucket's high/low/close from a real-time last price.
+         * Bucket boundaries follow the selected timeframe (1m/5m/15m/30m/1h).
          */
         function applyRealtimeQuote(last) {
             // Track live price and debounce Plotly chart updates
@@ -7603,12 +7613,13 @@ def index():
             plotlyPriceUpdateTimer = setTimeout(function() { updateAllPlotlyPriceLines(last); }, 500);
 
             if (!tvCandleSeries || !tvLastCandles.length) return;
+            const bucketSec = tvBucketSec();
             const nowSec = Math.floor(Date.now() / 1000);
-            const minuteStart = Math.floor(nowSec / 60) * 60;
+            const bucketStart = Math.floor(nowSec / bucketSec) * bucketSec;
             const lastCandle = tvLastCandles[tvLastCandles.length - 1];
 
-            if (lastCandle.time === minuteStart) {
-                // Update the existing in-progress candle
+            if (lastCandle.time === bucketStart) {
+                // Update the existing in-progress bucket
                 const updated = {
                     time:   lastCandle.time,
                     open:   lastCandle.open,
@@ -7629,36 +7640,77 @@ def index():
                     clearTimeout(tvIndicatorRefreshTimer);
                     tvIndicatorRefreshTimer = setTimeout(() => applyIndicators(tvIndicatorCandles, tvActiveInds), 2000);
                 }
-            } else if (minuteStart > lastCandle.time) {
-                // New minute – open a new candle and immediately refresh indicators
-                const newCandle = { time: minuteStart, open: last, high: last, low: last, close: last, volume: 0 };
-                try { tvCandleSeries.update(newCandle); } catch(e) {}
-                tvLastCandles.push(newCandle);
-                tvIndicatorCandles.push(newCandle);
-                if (tvActiveInds.size > 0) {
-                    clearTimeout(tvIndicatorRefreshTimer);
-                    applyIndicators(tvIndicatorCandles, tvActiveInds);
-                }
+            } else if (bucketStart > lastCandle.time) {
+                // Clock has rolled past the bucket boundary but CHART_EQUITY hasn't
+                // pushed the new bar yet. Open a fresh bucket off the last tick so
+                // the candle keeps wiggling; applyRealtimeCandle will reconcile
+                // volume and any missed O/H/L when the 1-min bar arrives.
+                const fresh = {
+                    time:   bucketStart,
+                    open:   last,
+                    high:   last,
+                    low:    last,
+                    close:  last,
+                    volume: 0,
+                };
+                try { tvCandleSeries.update(fresh); } catch(e) {}
+                try { tvVolumeSeries.update({ time: bucketStart, value: 0, color: callColor }); } catch(e) {}
+                tvLastCandles.push(fresh);
+                const icLast = tvIndicatorCandles[tvIndicatorCandles.length - 1];
+                if (!icLast || icLast.time < bucketStart) tvIndicatorCandles.push(fresh);
             }
         }
 
         /**
-         * Apply a completed 1-minute candle from CHART_EQUITY streaming.
+         * Apply a 1-minute candle from CHART_EQUITY streaming, rolled into the
+         * currently selected timeframe bucket. Schwab always pushes 1-min bars;
+         * on a 5-min/15-min/etc chart we merge into the containing bucket instead
+         * of appending the raw 1-min bar (which would render as a tiny sliver).
          */
         function applyRealtimeCandle(candle) {
             if (!tvCandleSeries) return;
-            const c = { time: candle.time, open: candle.open, high: candle.high,
-                        low: candle.low, close: candle.close, volume: candle.volume || 0 };
-            try { tvCandleSeries.update(c); } catch(e) {}
-            // Update display candles (current-day)
-            const idx = tvLastCandles.findIndex(x => x.time === c.time);
-            if (idx >= 0) { tvLastCandles[idx] = c; }
-            else { tvLastCandles.push(c); tvLastCandles.sort((a, b) => a.time - b.time); }
-            // Update multi-day indicator candles
-            const icIdx = tvIndicatorCandles.findIndex(x => x.time === c.time);
-            if (icIdx >= 0) { tvIndicatorCandles[icIdx] = c; }
-            else { tvIndicatorCandles.push(c); tvIndicatorCandles.sort((a, b) => a.time - b.time); }
-            // Refresh indicators with the full multi-day history
+            const bucketSec = tvBucketSec();
+            const bucketStart = Math.floor(candle.time / bucketSec) * bucketSec;
+
+            function rollInto(arr) {
+                const idx = arr.findIndex(x => x.time === bucketStart);
+                if (idx >= 0) {
+                    const b = arr[idx];
+                    const bucketWasSeededFromQuote = (b.volume || 0) === 0;
+                    arr[idx] = {
+                        time:   b.time,
+                        open:   bucketWasSeededFromQuote ? candle.open : b.open,
+                        high:   Math.max(b.high, candle.high),
+                        low:    Math.min(b.low,  candle.low),
+                        close:  candle.close,
+                        volume: (b.volume || 0) + (candle.volume || 0),
+                    };
+                    return arr[idx];
+                }
+                // First 1-min candle of a new bucket — open the bucket with it.
+                const fresh = {
+                    time:   bucketStart,
+                    open:   candle.open,
+                    high:   candle.high,
+                    low:    candle.low,
+                    close:  candle.close,
+                    volume: candle.volume || 0,
+                };
+                arr.push(fresh);
+                arr.sort((a, b) => a.time - b.time);
+                return fresh;
+            }
+
+            const displayBar = rollInto(tvLastCandles);
+            rollInto(tvIndicatorCandles);
+            try { tvCandleSeries.update(displayBar); } catch(e) {}
+            try {
+                tvVolumeSeries.update({
+                    time:  displayBar.time,
+                    value: displayBar.volume || 0,
+                    color: displayBar.close >= displayBar.open ? callColor : putColor,
+                });
+            } catch(e) {}
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
         }
 
@@ -7840,6 +7892,7 @@ def index():
   var lineStyleMap={};
   var popoutTimeframe=1;
   var popoutCandleTimerInterval=null;
+  var popoutUpColor='#10B981', popoutDownColor='#EF4444';
     var historicalDomBound=false;
     var tvHistoricalRenderedPoints=[];
         var historicalBubbleDrawPending=false;
@@ -7993,6 +8046,7 @@ def index():
   function renderPriceChart(priceData){
     var candles=priceData.candles||[];
     var upColor=priceData.call_color||'#10B981',downColor=priceData.put_color||'#EF4444';
+    popoutUpColor=upColor; popoutDownColor=downColor;
     popoutTimeframe=parseInt(priceData.timeframe)||1;
     lineStyleMap={dashed:LightweightCharts.LineStyle.Dashed,dotted:LightweightCharts.LineStyle.Dotted,large_dashed:LightweightCharts.LineStyle.LargeDashed};
     if(!tvChart){
@@ -8037,27 +8091,42 @@ def index():
   }
 
   // ── Real-time quote / candle application ─────────────────────────────────
+  // SSE is always 1-minute; we aggregate into the selected timeframe bucket.
+  function tvBucketSec(){return (parseInt(popoutTimeframe,10)||1)*60;}
   function applyRealtimeQuote(last){
     if(!tvCandle||!tvLastCandles.length)return;
+    var bucketSec=tvBucketSec();
     var nowSec=Math.floor(Date.now()/1000);
-    var minuteStart=Math.floor(nowSec/60)*60;
+    var bucketStart=Math.floor(nowSec/bucketSec)*bucketSec;
     var lc=tvLastCandles[tvLastCandles.length-1];
-    if(lc.time===minuteStart){
+    if(lc.time===bucketStart){
       var updated={time:lc.time,open:lc.open,high:Math.max(lc.high,last),low:Math.min(lc.low,last),close:last,volume:lc.volume||0};
       try{tvCandle.update(updated);}catch(e){}
       tvLastCandles[tvLastCandles.length-1]=updated;
-    }else if(minuteStart>lc.time){
-      var newC={time:minuteStart,open:last,high:last,low:last,close:last,volume:0};
-      try{tvCandle.update(newC);}catch(e){}
-      tvLastCandles.push(newC);
+    } else if(bucketStart>lc.time){
+      var fresh={time:bucketStart,open:last,high:last,low:last,close:last,volume:0};
+      try{tvCandle.update(fresh);}catch(e){}
+      try{if(tvVol)tvVol.update({time:bucketStart,value:0,color:popoutUpColor});}catch(e){}
+      tvLastCandles.push(fresh);
     }
   }
   function applyRealtimeCandle(candle){
     if(!tvCandle)return;
-    var c={time:candle.time,open:candle.open,high:candle.high,low:candle.low,close:candle.close,volume:candle.volume||0};
-    try{tvCandle.update(c);}catch(e){}
-    var idx=tvLastCandles.findIndex(function(x){return x.time===c.time;});
-    if(idx>=0){tvLastCandles[idx]=c;}else{tvLastCandles.push(c);tvLastCandles.sort(function(a,b){return a.time-b.time;});}
+    var bucketSec=tvBucketSec();
+    var bucketStart=Math.floor(candle.time/bucketSec)*bucketSec;
+    var idx=tvLastCandles.findIndex(function(x){return x.time===bucketStart;});
+    var merged;
+    if(idx>=0){
+      var b=tvLastCandles[idx];
+      var bucketWasSeededFromQuote=(b.volume||0)===0;
+      merged={time:b.time,open:bucketWasSeededFromQuote?candle.open:b.open,high:Math.max(b.high,candle.high),low:Math.min(b.low,candle.low),close:candle.close,volume:(b.volume||0)+(candle.volume||0)};
+      tvLastCandles[idx]=merged;
+    }else{
+      merged={time:bucketStart,open:candle.open,high:candle.high,low:candle.low,close:candle.close,volume:candle.volume||0};
+      tvLastCandles.push(merged);tvLastCandles.sort(function(a,b){return a.time-b.time;});
+    }
+    try{tvCandle.update(merged);}catch(e){}
+    try{if(tvVol)tvVol.update({time:merged.time,value:merged.volume||0,color:merged.close>=merged.open?popoutUpColor:popoutDownColor});}catch(e){}
     if(activeInds.size>0)applyIndicators(tvLastCandles);
   }
 
@@ -8413,7 +8482,9 @@ def index():
             updateInProgress = true;
             
             const ticker = document.getElementById('ticker').value;
-            const tickerChanged = tvLastTicker !== null && ticker.toUpperCase() !== tvLastTicker.toUpperCase();
+            const isFirstLoad = tvLastTicker === null;
+            const tickerChanged = !isFirstLoad && ticker.toUpperCase() !== tvLastTicker.toUpperCase();
+            const shouldRefreshPriceLevels = isFirstLoad || tickerChanged;
 
             // Reset chart state when the ticker changes
             if (tickerChanged) {
@@ -8536,7 +8607,10 @@ def index():
                 // Options cache is now populated — refresh price levels immediately.
                 // This fixes the delay where levels were missing right after a ticker change
                 // because /update_price fired before the options chain was cached.
-                if (isChartVisible('price')) {
+                // Gate on ticker-change / first-load only: running this every tick
+                // forces a full setData rebuild at 1Hz, which flashes the candle and
+                // level lines as the axis snaps back to the historical-only snapshot.
+                if (shouldRefreshPriceLevels && isChartVisible('price')) {
                     _priceHistoryLastKey = ''; // force cache-miss so fetchPriceHistory re-fetches
                     fetchPriceHistory(true);
                 }
@@ -9166,6 +9240,10 @@ def index():
                     else                           tvActiveInds.add(def.key);
                     b.classList.toggle('active', tvActiveInds.has(def.key));
                     applyIndicators(tvIndicatorCandles, tvActiveInds);
+                    // Top-OI lives in the main /update payload, not /update_price. When the user
+                    // toggles OI on before the first /update cycle lands, _lastTopOI is still null;
+                    // kick off a one-shot fetch so the overlay shows immediately.
+                    if (def.key === 'oi' && tvActiveInds.has('oi')) ensureTopOILoaded();
                 });
                 if (tvActiveInds.has(def.key)) b.classList.add('active');
                 toolbar.appendChild(b);
@@ -10072,6 +10150,7 @@ def index():
             const stats  = is0dte ? _lastStats0dte     : (_lastStats      || null);
             const levels = is0dte ? _lastKeyLevels0dte : (_lastKeyLevels  || null);
             renderMarketMetrics(stats);
+            renderRailKeyLevels(stats);
             renderKeyLevels(levels);
         }
 
@@ -10417,8 +10496,8 @@ def index():
         }
 
         function renderKeyLevels(levels) {
-            if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
             clearKeyLevels();
+            if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
             const LS = LightweightCharts.LineStyle;
             const vis = getChartVisibility();
             const showWalls2 = vis.walls_2 !== false;
@@ -10457,25 +10536,37 @@ def index():
         }
 
         // ── Top-OI overlay (dotted price lines, nearest expiry) ───────────────
+        let tvTopOIPrices = [];
+
         function clearTopOILines() {
+            const hadLines = tvTopOILines.length > 0 || tvTopOIPrices.length > 0;
+            if (tvTopOIPrices.length) {
+                const drop = new Set(tvTopOIPrices);
+                tvAllLevelPrices = tvAllLevelPrices.filter(p => !drop.has(p));
+                tvTopOIPrices = [];
+            }
             if (!tvCandleSeries) { tvTopOILines = []; return; }
             tvTopOILines.forEach(l => { try { tvCandleSeries.removePriceLine(l); } catch (e) {} });
             tvTopOILines = [];
+            return hadLines;
         }
 
         function renderTopOI(topOi) {
-            clearTopOILines();
-            if (!tvActiveInds.has('oi') || !topOi || !tvCandleSeries || !window.LightweightCharts) return;
+            const cleared = clearTopOILines();
+            if (!tvActiveInds.has('oi') || !topOi || !tvCandleSeries || !window.LightweightCharts) {
+                if (cleared && tvCandleSeries) tvApplyAutoscale();
+                return;
+            }
             const LS = LightweightCharts.LineStyle;
-            const callColor = getComputedStyle(document.documentElement).getPropertyValue('--call').trim() || '#10B981';
-            const putColor  = getComputedStyle(document.documentElement).getPropertyValue('--put').trim()  || '#EF4444';
+            const callC = getComputedStyle(document.documentElement).getPropertyValue('--call').trim() || '#10B981';
+            const putC  = getComputedStyle(document.documentElement).getPropertyValue('--put').trim()  || '#EF4444';
             const goldColor = getComputedStyle(document.documentElement).getPropertyValue('--gold').trim() || '#D4AF37';
 
             const map = new Map();
-            (topOi.calls || []).forEach(r => map.set(r.strike, { color: callColor, title: 'C OI ' + r.strike }));
+            (topOi.calls || []).forEach(r => map.set(r.strike, { color: callC, title: 'C OI ' + r.strike }));
             (topOi.puts  || []).forEach(r => {
                 if (map.has(r.strike)) map.set(r.strike, { color: goldColor, title: '\u2605 ' + r.strike });
-                else                   map.set(r.strike, { color: putColor,  title: 'P OI ' + r.strike });
+                else                   map.set(r.strike, { color: putC,  title: 'P OI ' + r.strike });
             });
 
             map.forEach(({ color, title }, strike) => {
@@ -10485,9 +10576,49 @@ def index():
                         lineStyle: LS.Dotted, axisLabelVisible: true, title,
                     });
                     tvTopOILines.push(line);
+                    tvTopOIPrices.push(strike);
+                    tvAllLevelPrices.push(strike);
                 } catch (e) { console.warn('renderTopOI createPriceLine failed:', e); }
             });
+            if (tvTopOILines.length) tvApplyAutoscale();
         }
+
+        // Fetch top-OI from /update when user toggles on before /update has populated it
+        function ensureTopOILoaded() {
+            if (_lastTopOI || _topOIFetchInFlight) return;
+            const t = (document.getElementById('ticker') && document.getElementById('ticker').value || '').trim();
+            const expiry = Array.from(
+                document.querySelectorAll('.expiry-option input[type="checkbox"]:checked')
+            ).map(cb => cb.value);
+            if (!t || !expiry.length) return;
+            const exposureMetricEl = document.getElementById('exposure_metric');
+            const deltaAdjustedEl = document.getElementById('delta_adjusted_exposures');
+            const calculateInNotionalEl = document.getElementById('calculate_in_notional');
+            const strikeRangeEl = document.getElementById('strike_range');
+            _topOIFetchInFlight = true;
+            fetch('/update', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    ticker: t,
+                    expiry,
+                    exposure_metric: exposureMetricEl ? exposureMetricEl.value : 'Open Interest',
+                    delta_adjusted: !!(deltaAdjustedEl && deltaAdjustedEl.checked),
+                    calculate_in_notional: !!(calculateInNotionalEl && calculateInNotionalEl.checked),
+                    strike_range: strikeRangeEl ? (parseFloat(strikeRangeEl.value) / 100) : 0.1,
+                    show_gamma: false,
+                    show_delta: false,
+                    show_vanna: false,
+                    show_charm: false,
+                }),
+            }).then(r => r.json()).then(d => {
+                if (d && d.top_oi) {
+                    _lastTopOI = d.top_oi;
+                    if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
+                }
+            }).catch(() => {}).finally(() => { _topOIFetchInFlight = false; });
+        }
+        let _topOIFetchInFlight = false;
 
         // ── Throttled price history fetcher ───────────────────────────────────
         // Fetches candle history + exposure levels from /update_price.
