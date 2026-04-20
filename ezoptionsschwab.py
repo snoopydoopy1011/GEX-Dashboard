@@ -3307,6 +3307,49 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     return fig.to_json()
 
 
+def _nearest_expiration(df):
+    """Return the nearest expiration date string from a calls or puts DataFrame."""
+    if df is None or df.empty or 'expiration_date' not in df.columns:
+        return None
+    from datetime import date
+    today_str = date.today().isoformat()
+    future = df.loc[df['expiration_date'] >= today_str, 'expiration_date']
+    if not future.empty:
+        return future.min()
+    return df['expiration_date'].min()
+
+
+def compute_top_oi_strikes(calls, puts, n=5):
+    """Return top-N OI strikes per side for the nearest expiration.
+
+    Returns dict with keys 'calls' (list of {strike, oi}), 'puts', 'both' (overlap strikes).
+    Tolerates empty DataFrames — returns empty lists rather than raising.
+    """
+    empty = {'calls': [], 'puts': [], 'both': []}
+    if (calls is None or calls.empty) and (puts is None or puts.empty):
+        return empty
+
+    nearest = _nearest_expiration(calls if (calls is not None and not calls.empty) else puts)
+    if nearest is None:
+        return empty
+
+    def top_oi(df):
+        if df is None or df.empty or 'openInterest' not in df.columns:
+            return []
+        subset = df[df['expiration_date'] == nearest] if 'expiration_date' in df.columns else df
+        if subset.empty:
+            return []
+        agg = subset.groupby('strike')['openInterest'].sum().nlargest(n).reset_index()
+        return [{'strike': float(row['strike']), 'oi': int(row['openInterest'])} for _, row in agg.iterrows()]
+
+    top_calls = top_oi(calls)
+    top_puts = top_oi(puts)
+    call_strikes = {r['strike'] for r in top_calls}
+    put_strikes = {r['strike'] for r in top_puts}
+    overlap = sorted(call_strikes & put_strikes)
+    return {'calls': top_calls, 'puts': top_puts, 'both': overlap}
+
+
 def compute_key_levels(calls, puts, S, selected_expiries=None):
     """Return the key dealer-flow levels to draw on the price chart.
 
@@ -11468,7 +11511,13 @@ def update():
  
         
         response = {}
-        
+
+        try:
+            response['top_oi'] = compute_top_oi_strikes(calls, puts)
+        except Exception as e:
+            print(f"[top_oi] build failed: {e}")
+            response['top_oi'] = {'calls': [], 'puts': [], 'both': []}
+
         # Create charts based on visibility settings
         # NOTE: price chart is handled by /update_price (separate concurrent request)
 
