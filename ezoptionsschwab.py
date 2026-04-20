@@ -1166,11 +1166,14 @@ def fetch_options_for_date(ticker, date, exposure_metric="Open Interest", delta_
                             'lastPrice': float(option['last']),
                             'bid': float(option['bid']),
                             'ask': float(option['ask']),
+                            'mark': float(option.get('mark', 0) or 0),
                             'volume': int(option['totalVolume']),
                             'openInterest': int(option['openInterest']),
                             'impliedVolatility': vol,
                             'inTheMoney': option['inTheMoney'],
                             'expiration': datetime.strptime(exp_date.split(':')[0], '%Y-%m-%d').date(),
+                            'quoteTimeInLong': _coerce_epoch_ms(option.get('quoteTimeInLong')),
+                            'tradeTimeInLong': _coerce_epoch_ms(option.get('tradeTimeInLong')),
                             'delta': delta,
                             'gamma': gamma,
                             'theta': theta,
@@ -1202,11 +1205,14 @@ def fetch_options_for_date(ticker, date, exposure_metric="Open Interest", delta_
                             'lastPrice': float(option['last']),
                             'bid': float(option['bid']),
                             'ask': float(option['ask']),
+                            'mark': float(option.get('mark', 0) or 0),
                             'volume': int(option['totalVolume']),
                             'openInterest': int(option['openInterest']),
                             'impliedVolatility': vol,
                             'inTheMoney': option['inTheMoney'],
                             'expiration': datetime.strptime(exp_date.split(':')[0], '%Y-%m-%d').date(),
+                            'quoteTimeInLong': _coerce_epoch_ms(option.get('quoteTimeInLong')),
+                            'tradeTimeInLong': _coerce_epoch_ms(option.get('tradeTimeInLong')),
                             'delta': delta,
                             'gamma': gamma,
                             'theta': theta,
@@ -3307,16 +3313,31 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     return fig.to_json()
 
 
+def _expiration_series_iso(df):
+    """Return an ISO-date Series for whichever expiration column the chain carries."""
+    if df is None or df.empty:
+        return None
+    if 'expiration_date' in df.columns:
+        return pd.to_datetime(df['expiration_date'], errors='coerce').dt.date.astype(str)
+    if 'expiration' in df.columns:
+        return pd.to_datetime(df['expiration'], errors='coerce').dt.date.astype(str)
+    return None
+
+
 def _nearest_expiration(df):
     """Return the nearest expiration date string from a calls or puts DataFrame."""
-    if df is None or df.empty or 'expiration_date' not in df.columns:
+    expiries = _expiration_series_iso(df)
+    if expiries is None:
+        return None
+    expiries = expiries.dropna()
+    if expiries.empty:
         return None
     from datetime import date
     today_str = date.today().isoformat()
-    future = df.loc[df['expiration_date'] >= today_str, 'expiration_date']
+    future = expiries[expiries >= today_str]
     if not future.empty:
         return future.min()
-    return df['expiration_date'].min()
+    return expiries.min()
 
 
 def compute_top_oi_strikes(calls, puts, n=5):
@@ -3325,6 +3346,10 @@ def compute_top_oi_strikes(calls, puts, n=5):
     Returns dict with keys 'calls' (list of {strike, oi}), 'puts', 'both' (overlap strikes).
     Tolerates empty DataFrames — returns empty lists rather than raising.
     """
+    try:
+        n = max(1, min(10, int(n)))
+    except Exception:
+        n = 5
     empty = {'calls': [], 'puts': [], 'both': []}
     if (calls is None or calls.empty) and (puts is None or puts.empty):
         return empty
@@ -3336,7 +3361,8 @@ def compute_top_oi_strikes(calls, puts, n=5):
     def top_oi(df):
         if df is None or df.empty or 'openInterest' not in df.columns:
             return []
-        subset = df[df['expiration_date'] == nearest] if 'expiration_date' in df.columns else df
+        expiries = _expiration_series_iso(df)
+        subset = df[expiries == nearest] if expiries is not None else df
         if subset.empty:
             return []
         agg = subset.groupby('strike')['openInterest'].sum().nlargest(n).reset_index()
@@ -3348,6 +3374,65 @@ def compute_top_oi_strikes(calls, puts, n=5):
     put_strikes = {r['strike'] for r in top_puts}
     overlap = sorted(call_strikes & put_strikes)
     return {'calls': top_calls, 'puts': top_puts, 'both': overlap}
+
+
+def _coerce_epoch_ms(value):
+    """Normalize optional Schwab epoch timestamps to integer milliseconds."""
+    try:
+        if value is None or pd.isna(value):
+            return None
+        ts = int(float(value))
+    except Exception:
+        return None
+    if ts <= 0:
+        return None
+    if ts < 10_000_000_000:
+        ts *= 1000
+    return ts
+
+
+def _format_flow_blotter_time(ts_ms):
+    if not ts_ms:
+        return '—'
+    try:
+        local_dt = datetime.fromtimestamp(ts_ms / 1000, tz=pytz.UTC).astimezone()
+        today = datetime.now(local_dt.tzinfo).date()
+        if local_dt.date() == today:
+            return local_dt.strftime('%H:%M:%S')
+        return local_dt.strftime('%b %d %H:%M')
+    except Exception:
+        return '—'
+
+
+def _format_flow_blotter_expiry(expiry_value):
+    if expiry_value is None or pd.isna(expiry_value):
+        return '—'
+    try:
+        expiry_dt = pd.to_datetime(expiry_value, errors='coerce')
+        if pd.isna(expiry_dt):
+            return '—'
+        return expiry_dt.strftime('%b %d')
+    except Exception:
+        return '—'
+
+
+def _flow_blotter_market_text(bid, mid, ask):
+    if bid <= 0 and ask <= 0:
+        return '—'
+    bid_text = f"{bid:.2f}" if bid > 0 else '—'
+    mid_text = f"{mid:.2f}" if mid > 0 else '—'
+    ask_text = f"{ask:.2f}" if ask > 0 else '—'
+    return f"{bid_text} / {mid_text} / {ask_text}"
+
+
+def _flow_blotter_side_label(side_code, bid, ask):
+    if bid <= 0 and ask <= 0:
+        return 'unknown'
+    if side_code > 0:
+        return 'ask'
+    if side_code < 0:
+        return 'bid'
+    return 'mid'
 
 
 def compute_key_levels(calls, puts, S, selected_expiries=None):
@@ -3535,6 +3620,7 @@ def compute_scenario_gex(calls, puts, S, spot_shift=0.0, iv_shift=0.0,
 # tick of the trading session captures the baseline; subsequent ticks emit
 # (current - baseline). In-process dict — acceptable to lose state on restart.
 _SESSION_BASELINE = {}
+_SESSION_LEVEL_BASELINE = {}
 
 def _compute_session_deltas(ticker, net_gex, net_dex):
     if ticker is None or net_gex is None:
@@ -3551,6 +3637,26 @@ def _compute_session_deltas(ticker, net_gex, net_dex):
         'net_gex_vs_open': (net_gex - base['net_gex']) if base.get('net_gex') is not None else None,
         'net_dex_vs_open': (net_dex - base['net_dex']) if (net_dex is not None and base.get('net_dex') is not None) else None,
     }
+
+
+def _compute_level_session_deltas(ticker, levels):
+    if ticker is None or not isinstance(levels, dict):
+        return None
+    try:
+        today = datetime.now(pytz.timezone('US/Eastern')).date()
+    except Exception:
+        return None
+    keys = ('call_wall', 'put_wall', 'gamma_flip', 'em_upper', 'em_lower')
+    key = (ticker, today)
+    if key not in _SESSION_LEVEL_BASELINE:
+        _SESSION_LEVEL_BASELINE[key] = {name: levels.get(name) for name in keys}
+    base = _SESSION_LEVEL_BASELINE[key]
+    out = {}
+    for name in keys:
+        cur = levels.get(name)
+        ref = base.get(name)
+        out[name] = (cur - ref) if (cur is not None and ref is not None) else None
+    return out
 
 
 # Phase 3 Stage 3 — Live flow alerts engine
@@ -3778,6 +3884,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'chain_activity': None,
         'profile':        None,
         'session_deltas': None,
+        'level_deltas':   None,
     }
     if S is None:
         return out
@@ -3882,6 +3989,12 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     except Exception as e:
         print(f"[compute_trader_stats] session_deltas failed: {e}")
         out['session_deltas'] = None
+
+    try:
+        out['level_deltas'] = _compute_level_session_deltas(ticker, out)
+    except Exception as e:
+        print(f"[compute_trader_stats] level_deltas failed: {e}")
+        out['level_deltas'] = None
 
     # Scenario GEX table (Stage 3). Seven rows: current + ±2% spot + ±5 vol pts
     # + two diagonals. "Current" mirrors out['net_gex'] exactly so the table can't
@@ -4189,162 +4302,423 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
 
 
 def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
-    """Create a sortable options chain table showing all options within the strike range"""
-    # Calculate strike range boundaries
-    min_strike = S * (1 - strike_range)
-    max_strike = S * (1 + strike_range)
-    
-    # Filter options within strike range
-    calls = calls[(calls['strike'] >= min_strike) & (calls['strike'] <= max_strike)]
-    puts = puts[(puts['strike'] >= min_strike) & (puts['strike'] <= max_strike)]
-    
-    def analyze_options(df, is_put=False):
-        options = []
-        for _, row in df.iterrows():
-            options.append({
-                'type': 'Put' if is_put else 'Call',
-                'strike': float(row['strike']),
-                'bid': float(row['bid']),
-                'ask': float(row['ask']),
-                'last': float(row['lastPrice']),
-                'volume': int(row['volume']),
-                'openInterest': int(row['openInterest']),
-                'iv': float(row['impliedVolatility'])
+    """Create a flow-oriented blotter from the option chain snapshot."""
+    try:
+        spot = float(S)
+    except Exception:
+        spot = None
+
+    max_rows = 120
+    min_strike = spot * (1 - strike_range) if spot and np.isfinite(spot) else None
+    max_strike = spot * (1 + strike_range) if spot and np.isfinite(spot) else None
+
+    def build_rows(df, is_put=False):
+        if df is None or df.empty:
+            return []
+        working = df.copy()
+        if 'volume' in working.columns:
+            working = working[pd.to_numeric(working['volume'], errors='coerce').fillna(0) > 0]
+        if min_strike is not None and max_strike is not None and 'strike' in working.columns:
+            strikes = pd.to_numeric(working['strike'], errors='coerce')
+            working = working[(strikes >= min_strike) & (strikes <= max_strike)]
+
+        rows = []
+        for _, row in working.iterrows():
+            strike = float(row.get('strike', 0) or 0)
+            bid = float(row.get('bid', 0) or 0)
+            ask = float(row.get('ask', 0) or 0)
+            last = float(row.get('lastPrice', 0) or 0)
+            volume = int(float(row.get('volume', 0) or 0))
+            open_interest = int(float(row.get('openInterest', 0) or 0))
+            mid = ((bid + ask) / 2.0) if bid > 0 and ask > 0 else (bid if bid > 0 else ask)
+            ref_price = last if last > 0 else mid
+            premium = max(ref_price, 0) * max(volume, 0) * 100
+            if premium <= 0:
+                continue
+
+            expiry_value = row.get('expiration', row.get('expiration_date'))
+            expiry_value_norm = pd.to_datetime(expiry_value, errors='coerce')
+            expiry_iso = expiry_value_norm.strftime('%Y-%m-%d') if not pd.isna(expiry_value_norm) else ''
+            trade_ts = _coerce_epoch_ms(row.get('tradeTimeInLong'))
+            quote_ts = _coerce_epoch_ms(row.get('quoteTimeInLong'))
+            event_ts = trade_ts or quote_ts
+            voi = (volume / open_interest) if open_interest > 0 else float(volume)
+            side_label = _flow_blotter_side_label(int(row.get('side', 0) or 0), bid, ask)
+            side_text = {'ask': 'Ask', 'bid': 'Bid', 'mid': 'Mid', 'unknown': 'Unknown'}[side_label]
+            distance = abs(strike - spot) if spot and np.isfinite(spot) else 0.0
+            option_type = 'put' if is_put else 'call'
+            time_title = 'Latest trade time from chain snapshot' if trade_ts else (
+                'Latest quote time from chain snapshot' if quote_ts else 'Chain snapshot does not include per-contract time here'
+            )
+            rows.append({
+                'time_text': _format_flow_blotter_time(event_ts),
+                'time_value': event_ts or 0,
+                'time_title': time_title,
+                'type_key': option_type,
+                'type_label': 'Put' if is_put else 'Call',
+                'type_color': put_color if is_put else call_color,
+                'strike': strike,
+                'expiry_text': _format_flow_blotter_expiry(expiry_value),
+                'expiry_value': expiry_iso,
+                'last': last,
+                'market_text': _flow_blotter_market_text(bid, mid, ask),
+                'market_value': mid,
+                'volume': volume,
+                'open_interest': open_interest,
+                'voi': voi,
+                'voi_text': 'new' if open_interest <= 0 and volume > 0 else f"{voi:.2f}x",
+                'premium': premium,
+                'premium_text': f"${format_large_number(premium)}",
+                'side_key': side_label,
+                'side_text': side_text,
+                'distance': distance,
             })
-        return options
-    
-    # Get options for both calls and puts
-    options_chain = analyze_options(calls) + analyze_options(puts, is_put=True)
-    
-    # Sort by strike price (default)
-    options_chain.sort(key=lambda x: x['strike'])
-    
-    # Add expiry info to title if multiple expiries are selected
-    chart_title = 'Options Chain'
+        return rows
+
+    flow_rows = build_rows(calls, is_put=False) + build_rows(puts, is_put=True)
+    has_event_times = any(row['time_value'] > 0 for row in flow_rows)
+    if has_event_times:
+        flow_rows.sort(
+            key=lambda row: (
+                row['time_value'],
+                row['premium'],
+                row['voi'],
+                row['volume'],
+                -row['distance'],
+            ),
+            reverse=True,
+        )
+        default_sort = 'time'
+        sort_note = 'Sorted by latest chain timestamp, then premium.'
+    else:
+        flow_rows.sort(
+            key=lambda row: (
+                row['premium'],
+                row['voi'],
+                row['volume'],
+                -row['distance'],
+            ),
+            reverse=True,
+        )
+        default_sort = 'premium'
+        sort_note = 'No per-contract timestamps in this chain snapshot, so rows rank by premium.'
+
+    visible_rows = flow_rows[:max_rows]
+    total_premium = sum(row['premium'] for row in visible_rows)
+    hidden_count = max(0, len(flow_rows) - len(visible_rows))
+
+    chart_title = 'Flow Blotter'
     if selected_expiries and len(selected_expiries) > 1:
-        chart_title = f"Options Chain ({len(selected_expiries)} expiries)"
-    
-    # Create HTML table with sorting functionality
-    html_content = f'''
-    <div style="background-color: #1E1E1E; padding: 10px; border-radius: 10px; height: 100%; overflow: hidden; display: flex; flex-direction: column;">
-        <h3 style="color: #CCCCCC; text-align: center; margin: 0 0 10px 0; font-size: 14px;">{chart_title}</h3>
-        <div style="flex: 1; overflow: auto;">
-            <table id="optionsChainTable" style="width: 100%; border-collapse: collapse; background-color: #1E1E1E; color: white; font-family: Arial, sans-serif; font-size: 10px; table-layout: fixed;">
+        chart_title = f"Flow Blotter ({len(selected_expiries)} expiries)"
+
+    subtitle_parts = [f"{len(flow_rows):,} active contracts in range"]
+    if hidden_count:
+        subtitle_parts.append(f"showing top {len(visible_rows):,} by signal")
+    subtitle_parts.append(sort_note)
+    subtitle = ' · '.join(subtitle_parts)
+
+    rows_html = []
+    for row in visible_rows:
+        rows_html.append(f'''
+                    <tr data-flow-row="1"
+                        data-option-type="{row['type_key']}"
+                        data-time="{row['time_value']}"
+                        data-strike="{row['strike']}"
+                        data-expiry="{row['expiry_value']}"
+                        data-last="{row['last']}"
+                        data-market="{row['market_value']}"
+                        data-volume="{row['volume']}"
+                        data-open-interest="{row['open_interest']}"
+                        data-voi="{row['voi']}"
+                        data-premium="{row['premium']}"
+                        data-side="{row['side_key']}">
+                        <td class="flow-blotter__time" title="{row['time_title']}">{row['time_text']}</td>
+                        <td><span class="flow-blotter__badge flow-blotter__badge--{row['type_key']}" style="--flow-badge-color:{row['type_color']};">{row['type_label']}</span></td>
+                        <td class="num">{row['strike']:.0f}</td>
+                        <td>{row['expiry_text']}</td>
+                        <td class="num">{row['last']:.2f}</td>
+                        <td class="flow-blotter__market num">{row['market_text']}</td>
+                        <td class="num">{row['volume']:,}</td>
+                        <td class="num">{row['open_interest']:,}</td>
+                        <td class="num">{row['voi_text']}</td>
+                        <td class="num">{row['premium_text']}</td>
+                        <td><span class="flow-blotter__side flow-blotter__side--{row['side_key']}">{row['side_text']}</span></td>
+                    </tr>
+        ''')
+
+    if not rows_html:
+        rows_html.append('''
+                    <tr>
+                        <td colspan="11" class="flow-blotter__empty">
+                            No in-range contracts with non-zero day volume are available for this snapshot.
+                        </td>
+                    </tr>
+        ''')
+
+    return f'''
+    <style>
+        .flow-blotter {{
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+        }}
+        .flow-blotter__header {{
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 14px 10px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(180deg, rgba(59,130,246,0.08), rgba(59,130,246,0));
+            flex-wrap: wrap;
+        }}
+        .flow-blotter__title {{
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--fg-0);
+        }}
+        .flow-blotter__meta,
+        .flow-blotter__summary,
+        .flow-blotter__note {{
+            font-size: 11px;
+            color: var(--fg-1);
+        }}
+        .flow-blotter__controls {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }}
+        .flow-blotter__segmented {{
+            display: inline-flex;
+            background: var(--bg-0);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 2px;
+            gap: 2px;
+        }}
+        .flow-blotter__chip,
+        .flow-blotter__reset {{
+            border: 1px solid var(--border);
+            background: var(--bg-2);
+            color: var(--fg-1);
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        }}
+        .flow-blotter__segmented .flow-blotter__chip {{
+            border: none;
+            background: transparent;
+        }}
+        .flow-blotter__chip:hover,
+        .flow-blotter__reset:hover {{
+            color: var(--fg-0);
+            border-color: var(--border-strong);
+        }}
+        .flow-blotter__chip.active {{
+            background: var(--accent);
+            color: var(--fg-0);
+        }}
+        .flow-blotter__threshold {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--fg-1);
+            background: var(--bg-0);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 0 8px;
+            min-height: 30px;
+        }}
+        .flow-blotter__threshold input {{
+            width: 96px;
+            border: none;
+            outline: none;
+            background: transparent;
+            color: var(--fg-0);
+            font: inherit;
+        }}
+        .flow-blotter__summary,
+        .flow-blotter__note {{
+            padding: 0 14px 10px;
+        }}
+        .flow-blotter__table-wrap {{
+            flex: 1;
+            min-height: 0;
+            overflow: auto;
+        }}
+        .flow-blotter table {{
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }}
+        .flow-blotter thead th {{
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: var(--bg-2);
+            border-bottom: 1px solid var(--border);
+            text-align: left;
+            padding: 0;
+        }}
+        .flow-blotter__sort {{
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+            background: transparent;
+            border: none;
+            color: var(--fg-1);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            padding: 8px 10px;
+            cursor: pointer;
+        }}
+        .flow-blotter__sort:hover {{
+            color: var(--fg-0);
+        }}
+        .flow-blotter__sort-indicator {{
+            color: var(--fg-2);
+            font-size: 11px;
+        }}
+        .flow-blotter tbody td {{
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--border);
+            color: var(--fg-0);
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .flow-blotter tbody tr:hover td {{
+            background: rgba(59,130,246,0.06);
+        }}
+        .flow-blotter__badge,
+        .flow-blotter__side {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 44px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+        .flow-blotter__badge {{
+            color: var(--flow-badge-color);
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border-strong);
+        }}
+        .flow-blotter__side--ask {{
+            color: var(--call);
+            background: rgba(16,185,129,0.10);
+            border: 1px solid rgba(16,185,129,0.28);
+        }}
+        .flow-blotter__side--bid {{
+            color: var(--put);
+            background: rgba(239,68,68,0.10);
+            border: 1px solid rgba(239,68,68,0.28);
+        }}
+        .flow-blotter__side--mid {{
+            color: var(--warn);
+            background: rgba(245,158,11,0.10);
+            border: 1px solid rgba(245,158,11,0.28);
+        }}
+        .flow-blotter__side--unknown {{
+            color: var(--fg-1);
+            background: var(--bg-2);
+            border: 1px solid var(--border);
+        }}
+        .flow-blotter__market,
+        .flow-blotter__time {{
+            color: var(--fg-1);
+        }}
+        .flow-blotter__empty {{
+            text-align: center;
+            color: var(--fg-1);
+            padding: 24px 12px;
+        }}
+        .flow-blotter__empty-state {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 14px;
+            color: var(--fg-1);
+            font-size: 11px;
+            border-top: 1px solid var(--border);
+        }}
+        .flow-blotter__empty-state[hidden] {{
+            display: none;
+        }}
+        @media (max-width: 900px) {{
+            .flow-blotter__header {{
+                flex-direction: column;
+                align-items: stretch;
+            }}
+            .flow-blotter__controls {{
+                justify-content: flex-start;
+            }}
+        }}
+    </style>
+    <div class="flow-blotter" data-default-sort="{default_sort}" data-default-dir="desc" data-initial-type="all">
+        <div class="flow-blotter__header">
+            <div>
+                <div class="flow-blotter__title">{chart_title}</div>
+                <div class="flow-blotter__meta">{subtitle}</div>
+            </div>
+            <div class="flow-blotter__controls">
+                <div class="flow-blotter__segmented" role="tablist" aria-label="Flow blotter contract type filter">
+                    <button type="button" class="flow-blotter__chip active" data-flow-type="all" aria-pressed="true">All</button>
+                    <button type="button" class="flow-blotter__chip" data-flow-type="call" aria-pressed="false">Calls</button>
+                    <button type="button" class="flow-blotter__chip" data-flow-type="put" aria-pressed="false">Puts</button>
+                </div>
+                <label class="flow-blotter__threshold">
+                    <span>Min prem</span>
+                    <input type="number" min="0" step="25000" value="0" data-flow-min-premium>
+                </label>
+                <button type="button" class="flow-blotter__reset" data-flow-reset>Reset</button>
+            </div>
+        </div>
+        <div class="flow-blotter__summary" data-flow-summary">
+            {len(visible_rows):,} shown · Approx premium ${format_large_number(total_premium)}
+        </div>
+        <div class="flow-blotter__note">
+            Chain snapshot view: premium is estimated as last x day volume x 100. Side is inferred from last vs. bid/ask and is not a tape classification.
+        </div>
+        <div class="flow-blotter__empty-state" data-flow-empty hidden>No rows match the current filters.</div>
+        <div class="flow-blotter__table-wrap">
+            <table>
                 <thead>
-                    <tr style="background-color: #2D2D2D; position: sticky; top: 0; z-index: 10;">
-                        <th onclick="sortTable(0, 'string')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 8%;">
-                            Type <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(1, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 12%;">
-                            Strike <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(2, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 12%;">
-                            Bid <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(3, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 12%;">
-                            Ask <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(4, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 12%;">
-                            Last <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(5, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 14%;">
-                            Vol <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(6, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 22%;">
-                            OI <span style="font-size: 8px;">▼▲</span>
-                        </th>
-                        <th onclick="sortTable(7, 'number')" style="padding: 4px 2px; border: 1px solid #444444; cursor: pointer; user-select: none; font-size: 10px; width: 8%;">
-                            IV <span style="font-size: 8px;">▼▲</span>
-                        </th>
+                    <tr>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="time" data-sort-type="number">Time <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="optionType" data-sort-type="string">Type <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="strike" data-sort-type="number">Strike <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="expiry" data-sort-type="string">Expiry <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="last" data-sort-type="number">Last <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="market" data-sort-type="number">Bid / Mid / Ask <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="volume" data-sort-type="number">Vol <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="openInterest" data-sort-type="number">OI <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="voi" data-sort-type="number">V/OI <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="premium" data-sort-type="number">Premium <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="side" data-sort-type="string">Side <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
                     </tr>
                 </thead>
                 <tbody>
-    '''
-    
-    # Add table rows
-    for option in options_chain:
-        row_color = call_color if option['type'] == 'Call' else put_color
-        html_content += f'''
-                    <tr style="border-bottom: 1px solid #333333;" onmouseover="this.style.backgroundColor='#333333'" onmouseout="this.style.backgroundColor='transparent'">
-                        <td style="padding: 3px 2px; border: 1px solid #444444; color: {row_color}; font-weight: bold; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{option['type'][0]}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['strike']}">{option['strike']:.0f}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['bid']}">{option['bid']:.2f}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['ask']}">{option['ask']:.2f}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['last']}">{option['last']:.2f}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['volume']}">{option['volume']:,}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['openInterest']}">{option['openInterest']:,}</td>
-                        <td style="padding: 3px 2px; border: 1px solid #444444; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" data-sort="{option['iv']}">{option['iv']:.0%}</td>
-                    </tr>
-        '''
-    
-    html_content += '''
+                    {''.join(rows_html)}
                 </tbody>
             </table>
         </div>
     </div>
-    
-    <script>
-    let sortDirection = {};
-    
-    function sortTable(columnIndex, dataType) {
-        const table = document.getElementById('optionsChainTable');
-        const tbody = table.tBodies[0];
-        const rows = Array.from(tbody.rows);
-        
-        // Toggle sort direction
-        if (!sortDirection[columnIndex]) {
-            sortDirection[columnIndex] = 'asc';
-        } else {
-            sortDirection[columnIndex] = sortDirection[columnIndex] === 'asc' ? 'desc' : 'asc';
-        }
-        
-        const direction = sortDirection[columnIndex];
-        
-        rows.sort((a, b) => {
-            let aVal, bVal;
-            
-            if (dataType === 'number') {
-                aVal = parseFloat(a.cells[columnIndex].getAttribute('data-sort') || a.cells[columnIndex].textContent.replace(/[$,%]/g, ''));
-                bVal = parseFloat(b.cells[columnIndex].getAttribute('data-sort') || b.cells[columnIndex].textContent.replace(/[$,%]/g, ''));
-                
-                if (isNaN(aVal)) aVal = 0;
-                if (isNaN(bVal)) bVal = 0;
-            } else {
-                aVal = a.cells[columnIndex].textContent.toLowerCase();
-                bVal = b.cells[columnIndex].textContent.toLowerCase();
-            }
-            
-            if (direction === 'asc') {
-                return aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
-            } else {
-                return aVal > bVal ? -1 : aVal < bVal ? 1 : 0;
-            }
-        });
-        
-        // Clear tbody and append sorted rows
-        while (tbody.firstChild) {
-            tbody.removeChild(tbody.firstChild);
-        }
-        
-        rows.forEach(row => tbody.appendChild(row));
-        
-        // Update header indicators
-        const headers = table.querySelectorAll('th');
-        headers.forEach((header, index) => {
-            const span = header.querySelector('span');
-            if (index === columnIndex) {
-                span.textContent = direction === 'asc' ? '▲' : '▼';
-                span.style.color = '#10B981';
-            } else {
-                span.textContent = '▼▲';
-                span.style.color = '#666';
-            }
-        });
-    }
-    </script>
     '''
-    
-    return html_content
 
 
 
@@ -5780,7 +6154,7 @@ def index():
         }
         .chart-grid {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) var(--gex-col-w, 300px) 320px;
+            grid-template-columns: minmax(0, 1fr) var(--gex-col-w, 340px) 320px;
             column-gap: 4px;
             row-gap: 5px;
             width: 100%;
@@ -5890,21 +6264,41 @@ def index():
 
         /* Dealer Hedge Impact block (lives above the GEX chart inside the GEX rail panel) */
         .dealer-impact {
-            display: grid;
-            grid-template-columns: 1fr auto;
-            gap: 4px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
             padding: 10px 12px;
             border-bottom: 1px solid var(--border);
             font-size: 12px;
             flex: 0 0 auto;
         }
-        .dealer-impact .label { color: var(--fg-1); line-height: 1.25; }
-        .dealer-impact .sub   { color: var(--fg-2); font-size: 11px; margin-top: -1px; }
+        .dealer-impact-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 10px;
+            align-items: center;
+        }
+        .dealer-impact-copy { min-width: 0; }
+        .dealer-impact .label {
+            color: var(--fg-1);
+            line-height: 1.2;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .dealer-impact .sub {
+            color: var(--fg-2);
+            font-size: 11px;
+            margin-top: 2px;
+            line-height: 1.3;
+        }
         .dealer-impact .val   {
             font-variant-numeric: tabular-nums;
             text-align: right;
             align-self: center;
             color: var(--fg-0);
+            font-size: 13px;
+            font-weight: 600;
         }
         .dealer-impact .val.pos { color: var(--call); }
         .dealer-impact .val.neg { color: var(--put); }
@@ -5914,11 +6308,18 @@ def index():
             background: var(--bg-1);
             border: 1px solid var(--border);
             border-radius: var(--radius-lg);
-            padding: 10px 12px;
+            padding: 12px 14px;
             margin: 8px 10px 0 10px;
             flex: 0 0 auto;
         }
         .rail-card:last-child { margin-bottom: 8px; }
+        .rail-card-header-row {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
         .rail-card-header {
             font-size: 10px;
             text-transform: uppercase;
@@ -5926,9 +6327,17 @@ def index():
             color: var(--fg-2);
             margin-bottom: 6px;
         }
+        .rail-card-header-row .rail-card-header { margin-bottom: 0; }
+        .rail-card-note {
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
         .rail-card-price-big {
-            font-size: 22px;
-            font-weight: 600;
+            font-size: 24px;
+            font-weight: 650;
             color: var(--fg-0);
             font-variant-numeric: tabular-nums;
             line-height: 1.1;
@@ -5956,24 +6365,33 @@ def index():
         .rail-metric-pair {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 10px;
+            gap: 12px;
+        }
+        .rail-metric {
+            min-width: 0;
         }
         .rail-metric .v {
-            font-size: 18px;
+            font-size: 19px;
             color: var(--fg-0);
             font-variant-numeric: tabular-nums;
+            font-weight: 600;
+            line-height: 1.15;
         }
+        .rail-metric .v.pos { color: var(--call); }
+        .rail-metric .v.neg { color: var(--put); }
         .rail-metric .d {
             font-size: 11px;
             color: var(--fg-2);
             font-variant-numeric: tabular-nums;
-            margin-top: 2px;
+            margin-top: 3px;
+            white-space: nowrap;
         }
         .rail-metric .d.pos { color: var(--call); }
         .rail-metric .d.neg { color: var(--put); }
         .gex-scope-pill {
             display: flex; gap: 4px; margin-top: 8px;
         }
+        .gex-scope-pill.hidden { display: none; }
         .gex-scope-btn {
             flex: 1; padding: 3px 0; border-radius: var(--radius);
             border: 1px solid var(--border); background: var(--bg-2);
@@ -6028,14 +6446,36 @@ def index():
         .rail-profile-headline {
             font-size: 13px;
             color: var(--fg-0);
-            font-weight: 500;
+            font-weight: 600;
+            line-height: 1.3;
         }
         .rail-profile-blurb {
             color: var(--fg-1);
             font-size: 11px;
-            margin-top: 4px;
+            margin-top: 5px;
             line-height: 1.35;
         }
+        .rail-activity-bias {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .rail-activity-bias-label {
+            color: var(--fg-2);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .rail-activity-bias-value {
+            color: var(--fg-0);
+            font-size: 13px;
+            font-weight: 600;
+            text-align: right;
+        }
+        .rail-activity-bias-value.pos { color: var(--call); }
+        .rail-activity-bias-value.neg { color: var(--put); }
         .rail-sentiment-labels {
             display: flex;
             justify-content: space-between;
@@ -6043,14 +6483,14 @@ def index():
             color: var(--fg-2);
             letter-spacing: 0.04em;
             text-transform: uppercase;
-            margin-bottom: 4px;
+            margin-bottom: 5px;
         }
         .rail-sentiment-track {
             position: relative;
             height: 4px;
             background: linear-gradient(90deg, var(--put), var(--bg-2) 50%, var(--call));
             border-radius: 2px;
-            margin: 0 0 10px 0;
+            margin: 0 0 12px 0;
         }
         .rail-sentiment-marker {
             position: absolute;
@@ -6064,7 +6504,7 @@ def index():
         }
         .rail-bar {
             display: grid;
-            grid-template-columns: 32px 1fr 80px;
+            grid-template-columns: 36px 1fr auto;
             gap: 8px;
             align-items: center;
             font-size: 11px;
@@ -6082,10 +6522,13 @@ def index():
             background: var(--accent);
             transition: width 180ms ease;
         }
+        .rail-bar-fill.pos { background: var(--call); }
+        .rail-bar-fill.neg { background: var(--put); }
         .rail-bar .num {
             text-align: right;
             color: var(--fg-0);
             font-variant-numeric: tabular-nums;
+            min-width: 60px;
         }
         /* Dealer-impact block nested inside a rail-card — drop redundant
            padding and the divider it carries when standalone. */
@@ -6118,33 +6561,75 @@ def index():
             color: var(--fg-2);
             font-size: 12px;
             text-align: center;
-            padding: 16px;
+            padding: 18px 12px;
             line-height: 1.4;
         }
         .rail-alert-item {
             display: flex;
-            gap: 8px;
-            padding: 8px 10px;
-            background: var(--bg-1);
+            flex-direction: column;
+            gap: 5px;
+            padding: 9px 10px;
+            background: var(--bg-0);
             border: 1px solid var(--border);
             border-left: 3px solid var(--fg-2);
             border-radius: var(--radius);
             font-size: 11px;
             color: var(--fg-0);
             line-height: 1.35;
+            transition: opacity 0.15s ease, transform 0.15s ease;
         }
         .rail-alert-item.warn { border-left-color: var(--warn); }
         .rail-alert-item.info { border-left-color: var(--info); }
-        .rail-alert-item .rail-alert-dot {
-            flex: 0 0 auto;
-            width: 6px;
-            height: 6px;
-            margin-top: 5px;
-            border-radius: 50%;
-            background: var(--fg-2);
+        .rail-alert-item.flow { border-left-color: var(--accent); }
+        .rail-alert-item.top {
+            padding: 12px;
+            background: var(--bg-1);
+            box-shadow: inset 0 0 0 1px var(--border);
         }
-        .rail-alert-item.warn .rail-alert-dot { background: var(--warn); }
-        .rail-alert-item.info .rail-alert-dot { background: var(--info); }
+        .rail-alert-item.muted {
+            opacity: 0.7;
+        }
+        .rail-alert-item.stale:not(.top) {
+            background: var(--bg-0);
+        }
+        .rail-alert-topline {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            color: var(--fg-2);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .rail-alert-tag {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: var(--bg-2);
+            color: var(--fg-1);
+        }
+        .rail-alert-item.warn .rail-alert-tag {
+            color: var(--warn);
+        }
+        .rail-alert-item.info .rail-alert-tag {
+            color: var(--info);
+        }
+        .rail-alert-item.flow .rail-alert-tag {
+            color: var(--accent);
+        }
+        .rail-alert-ago {
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-alert-text {
+            color: var(--fg-0);
+        }
+        .rail-alert-item.top .rail-alert-text {
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 1.4;
+        }
 
         /* Key Levels table */
         .rail-levels-table {
@@ -6153,48 +6638,142 @@ def index():
             padding: 10px;
             min-height: 0;
             font-variant-numeric: tabular-nums;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
         }
-        .rail-levels-table table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 11px;
+        .rail-levels-summary {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background: var(--bg-1);
         }
-        .rail-levels-table th {
+        .rail-levels-summary .spot-label {
             color: var(--fg-2);
-            font-weight: 500;
-            text-align: left;
-            padding: 6px 4px;
-            border-bottom: 1px solid var(--border);
             letter-spacing: 0.05em;
             text-transform: uppercase;
             font-size: 10px;
         }
-        .rail-levels-table th.num { text-align: right; }
-        .rail-levels-table td {
-            padding: 8px 4px;
-            border-bottom: 1px solid var(--bg-2);
+        .rail-levels-summary .spot-price {
+            color: var(--fg-0);
+            font-size: 18px;
+            font-weight: 650;
+            line-height: 1.15;
+        }
+        .rail-levels-summary .spot-regime {
+            font-size: 12px;
+            font-weight: 600;
+            text-align: right;
+        }
+        .rail-levels-summary .spot-regime.pos { color: var(--call); }
+        .rail-levels-summary .spot-regime.neg { color: var(--put); }
+        .rail-level-item {
+            --level-tone: var(--fg-2);
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background: var(--bg-1);
             color: var(--fg-0);
         }
-        .rail-levels-table td.num { text-align: right; }
-        .rail-levels-table .lvl-label {
+        .rail-level-item.nearest {
+            background: var(--bg-0);
+            box-shadow: inset 0 0 0 1px var(--accent);
+        }
+        .rail-level-item.call { --level-tone: var(--call); }
+        .rail-level-item.put  { --level-tone: var(--put); }
+        .rail-level-item.flip { --level-tone: var(--warn); }
+        .rail-level-item.em   { --level-tone: var(--fg-2); }
+        .rail-level-main {
+            min-width: 0;
+        }
+        .rail-level-top {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 10px;
+            align-items: start;
+        }
+        .rail-level-title-row {
             display: flex;
             align-items: center;
             gap: 8px;
+            flex-wrap: wrap;
         }
-        .rail-levels-table .lvl-swatch {
+        .rail-level-swatch {
             width: 8px;
             height: 8px;
-            border-radius: 2px;
-            background: var(--fg-2);
+            border-radius: 50%;
+            background: var(--level-tone);
             flex: 0 0 auto;
         }
-        .rail-levels-table .lvl-dist.pos { color: var(--call); }
-        .rail-levels-table .lvl-dist.neg { color: var(--put); }
+        .rail-level-name {
+            min-width: 0;
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .rail-level-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: var(--bg-2);
+            color: var(--fg-1);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .rail-level-price {
+            text-align: right;
+            min-width: 0;
+        }
+        .rail-level-price .primary,
+        .rail-level-stat .primary {
+            display: block;
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 1.25;
+        }
+        .rail-level-price .secondary,
+        .rail-level-stat .secondary {
+            display: block;
+            margin-top: 2px;
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.2;
+        }
+        .rail-level-metrics {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border);
+        }
+        .rail-level-stat {
+            min-width: 0;
+        }
+        .rail-level-stat-label {
+            display: block;
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+        }
+        .rail-level-stat.pos .primary,
+        .rail-level-stat.pos .secondary { color: var(--call); }
+        .rail-level-stat.neg .primary,
+        .rail-level-stat.neg .secondary { color: var(--put); }
         .rail-levels-table .lvl-empty {
             color: var(--fg-2);
             text-align: center;
-            padding: 16px 4px;
-            font-size: 11px;
+            padding: 20px 8px;
+            font-size: 12px;
         }
 
         /* Scenario GEX table (Stage 3) */
@@ -6254,20 +6833,26 @@ def index():
         }
         #gex-side-panel { flex: 1; min-height: 0; }
 
-        /* GEX column (always-on, collapsible) — lives between chart and rail */
+        /* Strike rail (always-on, collapsible) — lives between chart and rail */
         .gex-col-header {
             display: flex;
-            align-items: center;
-            gap: 6px;
+            align-items: stretch;
+            gap: 8px;
             background: #1a1a1a;
             border-bottom: 1px solid var(--bg-2);
             border-radius: 10px 10px 0 0;
-            padding: 0 8px;
+            padding: 8px 10px;
             overflow: hidden;
             min-width: 0;
         }
-        .gex-col-header .gex-col-title {
+        .strike-rail-header-main {
             flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .gex-col-header .gex-col-title {
             font-size: 10px;
             font-weight: 600;
             letter-spacing: 0.08em;
@@ -6276,6 +6861,31 @@ def index():
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+        }
+        .strike-rail-tabs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            min-width: 0;
+        }
+        .strike-rail-tab {
+            background: var(--bg-2);
+            color: var(--fg-2);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 3px 8px;
+            font-size: 10px;
+            line-height: 1.2;
+            letter-spacing: 0.04em;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+        }
+        .strike-rail-tab:hover { color: var(--fg-0); border-color: var(--fg-2); }
+        .strike-rail-tab.active {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
         }
         .gex-col-toggle {
             background: transparent;
@@ -6297,7 +6907,19 @@ def index():
             min-width: 0;
             overflow: hidden;
         }
+        .strike-rail-empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            padding: 18px 14px;
+            text-align: center;
+            color: var(--fg-2);
+            font-size: 12px;
+            line-height: 1.45;
+        }
         .chart-grid.gex-collapsed .gex-col-header .gex-col-title,
+        .chart-grid.gex-collapsed .gex-col-header .strike-rail-tabs,
         .chart-grid.gex-collapsed .gex-column > .gex-side-panel-wrap {
             display: none;
         }
@@ -6461,6 +7083,8 @@ def index():
             font-weight: bold;
             padding: 2px 8px;
             pointer-events: none;
+            flex: 0 0 auto;
+            white-space: nowrap;
         }
         /* Chart toolbar — sits ABOVE the canvas, normal document flow */
         .tv-toolbar-container {
@@ -6469,19 +7093,40 @@ def index():
             border-radius: 10px 10px 0 0;
             padding: 2px 6px;
             display: flex;
-            flex-wrap: wrap;
-            gap: 3px;
+            flex-wrap: nowrap;
+            gap: 8px;
             align-items: center;
             min-height: 0;
+            min-width: 0;
+            overflow: hidden;
         }
         .tv-toolbar {
             display: contents; /* children flow directly into container */
+        }
+        .tv-toolbar-main {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: thin;
+        }
+        .tv-toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 0 0 auto;
+            margin-left: auto;
+            white-space: nowrap;
         }
         .tv-toolbar-sep {
             width: 1px;
             height: 16px;
             background: var(--border);
             margin: 0 2px;
+            flex: 0 0 auto;
         }
         .tv-tb-btn {
             background: #2a2a2a;
@@ -6499,6 +7144,17 @@ def index():
         .tv-tb-btn:hover  { background: #3a3a3a; color: #fff; }
         .tv-tb-btn.active { background: #1a5fac; border-color: #4b90e2; color: #fff; }
         .tv-tb-btn.danger { background: #5c1a1a; border-color: #c0392b; color: #f88; }
+        .tv-toolbar-status {
+            font-size: 10px;
+            letter-spacing: 0.03em;
+            color: var(--warn);
+            border: 1px solid rgba(245, 158, 11, 0.28);
+            background: rgba(245, 158, 11, 0.12);
+            border-radius: 4px;
+            padding: 3px 6px;
+            white-space: nowrap;
+            user-select: none;
+        }
         /* Indicator legend — inside canvas, pointer-events none so it doesn't block */
         .tv-indicator-legend {
             position: absolute;
@@ -6863,6 +7519,23 @@ def index():
             font-size: 18px;
         }
         
+        /* Drop the strike rail below price on laptop widths before going single-column. */
+        @media screen and (max-width: 1400px) {
+            .chart-grid {
+                grid-template-columns: minmax(0, 1fr) 320px;
+            }
+            .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
+            .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
+            .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
+            .chart-grid > .right-rail-panels     { grid-column: 2; grid-row: 2 / span 3; }
+            .chart-grid > .gex-col-header        { grid-column: 1; grid-row: 3; }
+            .chart-grid > .gex-column            { grid-column: 1; grid-row: 4; height: 420px; }
+            .chart-grid > #secondary-tabs,
+            .chart-grid > .charts-grid {
+                grid-column: 1 / -1;
+            }
+        }
+
         /* Collapse right rail below the main chart on narrow widths */
         @media screen and (max-width: 1024px) {
             .chart-grid {
@@ -7125,6 +7798,10 @@ def index():
                                 <option value="OI + Volume">OI + Volume</option>
                             </select>
                         </div>
+                        <div class="control-group" title="Number of top call and put OI strikes to draw on the price chart.">
+                            <label for="top_oi_count">Top OI lines / side:</label>
+                            <input type="number" id="top_oi_count" min="1" max="10" value="5" style="width: 60px;">
+                        </div>
                         <div class="control-group" title="When enabled, exposure formulas are adjusted by delta.">
                             <input type="checkbox" id="delta_adjusted_exposures">
                             <label for="delta_adjusted_exposures">Delta-Adjusted Exposures</label>
@@ -7268,7 +7945,10 @@ def index():
         <div class="chart-grid" id="chart-grid">
             <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
             <div class="gex-col-header" id="gex-col-header">
-                <div class="gex-col-title">GEX</div>
+                <div class="strike-rail-header-main">
+                    <div class="gex-col-title">Strike Rail</div>
+                    <div class="strike-rail-tabs" id="strike-rail-tabs"></div>
+                </div>
                 <button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>
             </div>
             <div class="right-rail-tabs" id="right-rail-tabs">
@@ -7314,6 +7994,10 @@ def index():
                                 <div class="d" data-met="net_dex_delta"></div>
                             </div>
                         </div>
+                        <div class="gex-scope-pill" id="gex-scope-pill">
+                            <button class="gex-scope-btn" data-scope="all">All</button>
+                            <button class="gex-scope-btn" data-scope="0dte">0DTE</button>
+                        </div>
                     </div>
                     <div class="rail-card" id="rail-card-range">
                         <div class="rail-card-header">Range · EM <span data-met="em_pct"></span></div>
@@ -7335,17 +8019,39 @@ def index():
                         <div class="rail-profile-blurb" data-met="profile_blurb">—</div>
                     </div>
                     <div class="rail-card" id="rail-card-dealer">
-                        <div class="rail-card-header">Dealer Impact</div>
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Dealer Impact</div>
+                            <div class="rail-card-note">Compact hedge read</div>
+                        </div>
                         <div class="dealer-impact" id="dealer-impact">
-                            <div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>
-                            <div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>
-                            <div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>
-                            <div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>
-                            <div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>
+                            <div class="dealer-impact-row">
+                                <div class="dealer-impact-copy"><div class="label">Spot +1%</div><div class="sub">dealers buy / sell</div></div>
+                                <div class="val" data-di="hedge_on_up_1pct">—</div>
+                            </div>
+                            <div class="dealer-impact-row">
+                                <div class="dealer-impact-copy"><div class="label">Spot −1%</div><div class="sub">dealers buy / sell</div></div>
+                                <div class="val" data-di="hedge_on_down_1pct">—</div>
+                            </div>
+                            <div class="dealer-impact-row">
+                                <div class="dealer-impact-copy"><div class="label">Vol +1 pt</div><div class="sub">vanna delta shift</div></div>
+                                <div class="val" data-di="vanna_up_1">—</div>
+                            </div>
+                            <div class="dealer-impact-row">
+                                <div class="dealer-impact-copy"><div class="label">Vol −1 pt</div><div class="sub">vanna delta shift</div></div>
+                                <div class="val" data-di="vanna_down_1">—</div>
+                            </div>
+                            <div class="dealer-impact-row">
+                                <div class="dealer-impact-copy"><div class="label">Charm by close</div><div class="sub">intraday delta decay</div></div>
+                                <div class="val" data-di="charm_by_close">—</div>
+                            </div>
                         </div>
                     </div>
                     <div class="rail-card" id="rail-card-activity">
                         <div class="rail-card-header">Chain Activity</div>
+                        <div class="rail-activity-bias">
+                            <span class="rail-activity-bias-label">Bias</span>
+                            <span class="rail-activity-bias-value" data-met="activity_bias">—</span>
+                        </div>
                         <div class="rail-sentiment-labels"><span>bearish</span><span>bullish</span></div>
                         <div class="rail-sentiment-track">
                             <div class="rail-sentiment-marker" data-met="sentiment_marker"></div>
@@ -7433,6 +8139,7 @@ def index():
         let tvKeyLevelLines = [];
         let tvTopOILines   = [];
         let _lastTopOI     = null;
+        let _lastTopOIContextKey = '';
         let _lastKeyLevels     = null;
         let _lastKeyLevels0dte = null;
         let _lastStats0dte     = null;
@@ -7461,27 +8168,45 @@ def index():
 
         // ── Chart visibility (replaces the deleted .chart-selector checkbox row) ──
         // Source of truth for which secondary charts render. Defaults below mirror the
-        // checked/unchecked state of the old chart-selector markup so behavior on a
-        // fresh browser is identical. Until the Stage-4 drawer ships, the only UI to
-        // toggle a chart on/off is via a saved settings file (gatherSettings/applySettings)
-        // — Stage 4 wires the drawer to setChartVisibility().
+        // legacy checked/unchecked chart state so a fresh browser keeps the same
+        // surfaces visible before any saved settings are loaded.
         const CHART_IDS = [
             'price','gamma','delta','vanna','charm','speed','vomma','color',
             'options_volume','open_interest','volume','large_trades','premium','centroid'
         ];
-        // Price-line overlays on the TV candle chart (not Plotly containers).
+        // TradingView overlays on the price chart (not Plotly containers).
         // Share the chart-visibility store but render under a separate drawer group.
-        const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2'];
+        const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2', 'historical_dots'];
         const ALERT_GATE_KEY = 'gex.gateAlerts';
         const CHART_VISIBILITY_DEFAULTS = {
             price: true, gamma: true, delta: true, vanna: true, charm: true,
             speed: false, vomma: false, color: false,
             options_volume: true, open_interest: true, volume: true,
             large_trades: true, premium: true, centroid: true,
-            hvl: true, em_2s: true, walls_2: true
+            hvl: true, em_2s: true, walls_2: true, historical_dots: true
         };
         const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
         const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
+        const STRIKE_RAIL_TAB_KEY = 'gex.strikeRailTab';
+        const STRIKE_RAIL_CHART_IDS = ['gamma', 'delta', 'vanna', 'charm', 'open_interest', 'options_volume', 'premium'];
+        const STRIKE_RAIL_LABELS = {
+            gex: 'GEX',
+            gamma: 'Gamma',
+            delta: 'Delta',
+            vanna: 'Vanna',
+            charm: 'Charm',
+            open_interest: 'OI',
+            options_volume: 'Options Vol',
+            premium: 'Premium',
+        };
+        let activeStrikeRailTab = (() => {
+            try {
+                const saved = localStorage.getItem(STRIKE_RAIL_TAB_KEY);
+                return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'gex';
+            } catch (e) {
+                return 'gex';
+            }
+        })();
         function getChartVisibility() {
             let stored = {};
             try { stored = JSON.parse(localStorage.getItem(CHART_VISIBILITY_KEY) || '{}'); } catch(e) {}
@@ -7499,6 +8224,36 @@ def index():
             try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
         }
         function isChartVisible(id) { return !!getChartVisibility()[id]; }
+        function getSelectedExpiryValues() {
+            return Array.from(
+                document.querySelectorAll('.expiry-option input[type="checkbox"]:checked')
+            ).map(cb => cb.value);
+        }
+        function getTopOICountSetting() {
+            const input = document.getElementById('top_oi_count');
+            const parsed = input ? parseInt(input.value, 10) : 5;
+            const count = Number.isFinite(parsed) ? parsed : 5;
+            return Math.min(10, Math.max(1, count));
+        }
+        function normalizeTopOICountInput() {
+            const input = document.getElementById('top_oi_count');
+            if (!input) return 5;
+            const clamped = getTopOICountSetting();
+            input.value = String(clamped);
+            return clamped;
+        }
+        function buildTopOIContextKey(ticker, expiryValues, topOiCount = getTopOICountSetting()) {
+            const symbol = (ticker || '').trim().toUpperCase();
+            const expiries = (Array.isArray(expiryValues) ? expiryValues : [])
+                .slice()
+                .sort()
+                .join('|');
+            return symbol + '::' + expiries + '::' + String(topOiCount);
+        }
+        function getTopOIContextKey() {
+            const tickerEl = document.getElementById('ticker');
+            return buildTopOIContextKey(tickerEl ? tickerEl.value : '', getSelectedExpiryValues(), getTopOICountSetting());
+        }
         let gateAlertsNearKeyLevels = (() => {
             try {
                 const raw = localStorage.getItem(ALERT_GATE_KEY);
@@ -7532,7 +8287,9 @@ def index():
         function updateAllPlotlyPriceLines(price) {
             const priceStr = price.toFixed(2);
 
-            PLOTLY_PRICE_LINE_CHARTS.forEach(function(id) {
+            const plotIds = PLOTLY_PRICE_LINE_CHARTS.concat(['gex-side-panel']);
+
+            plotIds.forEach(function(id) {
                 const div = document.getElementById(id);
                 if (!div || !div._fullLayout) return;
 
@@ -7677,6 +8434,23 @@ def index():
             return (isFinite(m) && m > 0 ? m : 1) * 60;
         }
 
+        function tvBucketStartForUnixSec(unixSec) {
+            if (!Number.isFinite(unixSec)) return null;
+            const bucketSec = tvBucketSec();
+            return Math.floor(unixSec / bucketSec) * bucketSec;
+        }
+
+        function tvToSeriesBar(bar) {
+            return {
+                time: bar.time,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume || 0,
+            };
+        }
+
         /**
          * Update the current bucket's high/low/close from a real-time last price.
          * Bucket boundaries follow the selected timeframe (1m/5m/15m/30m/1h).
@@ -7688,9 +8462,8 @@ def index():
             plotlyPriceUpdateTimer = setTimeout(function() { updateAllPlotlyPriceLines(last); }, 500);
 
             if (!tvCandleSeries || !tvLastCandles.length) return;
-            const bucketSec = tvBucketSec();
             const nowSec = Math.floor(Date.now() / 1000);
-            const bucketStart = Math.floor(nowSec / bucketSec) * bucketSec;
+            const bucketStart = tvBucketStartForUnixSec(nowSec);
             const lastCandle = tvLastCandles[tvLastCandles.length - 1];
 
             if (lastCandle.time === bucketStart) {
@@ -7702,8 +8475,10 @@ def index():
                     low:    Math.min(lastCandle.low,  last),
                     close:  last,
                     volume: lastCandle.volume || 0,
+                    __quoteSeeded: !!lastCandle.__quoteSeeded,
+                    __quoteDirty: true,
                 };
-                try { tvCandleSeries.update(updated); } catch(e) {}
+                try { tvCandleSeries.update(tvToSeriesBar(updated)); } catch(e) {}
                 tvLastCandles[tvLastCandles.length - 1] = updated;
                 // Keep multi-day indicator candles in sync
                 const icLast = tvIndicatorCandles[tvIndicatorCandles.length - 1];
@@ -7717,19 +8492,21 @@ def index():
                 }
             } else if (bucketStart > lastCandle.time) {
                 // Clock has rolled past the bucket boundary but CHART_EQUITY hasn't
-                // pushed the new bar yet. Open a fresh bucket off the last tick so
-                // the candle keeps wiggling; applyRealtimeCandle will reconcile
-                // volume and any missed O/H/L when the 1-min bar arrives.
+                // pushed the new bar yet. Seed a provisional bucket from the last
+                // confirmed close so the candle can keep wiggling without implying
+                // any live volume; the 1-min stream merges into this bucket later.
+                const anchor = Number.isFinite(lastCandle.close) ? lastCandle.close : last;
                 const fresh = {
                     time:   bucketStart,
-                    open:   last,
-                    high:   last,
-                    low:    last,
+                    open:   anchor,
+                    high:   Math.max(anchor, last),
+                    low:    Math.min(anchor, last),
                     close:  last,
                     volume: 0,
+                    __quoteSeeded: true,
+                    __quoteDirty: false,
                 };
-                try { tvCandleSeries.update(fresh); } catch(e) {}
-                try { tvVolumeSeries.update({ time: bucketStart, value: 0, color: callColor }); } catch(e) {}
+                try { tvCandleSeries.update(tvToSeriesBar(fresh)); } catch(e) {}
                 tvLastCandles.push(fresh);
                 const icLast = tvIndicatorCandles[tvIndicatorCandles.length - 1];
                 if (!icLast || icLast.time < bucketStart) tvIndicatorCandles.push(fresh);
@@ -7744,32 +8521,21 @@ def index():
          */
         function applyRealtimeCandle(candle) {
             if (!tvCandleSeries) return;
-            const bucketSec = tvBucketSec();
-            const bucketStart = Math.floor(candle.time / bucketSec) * bucketSec;
+            const bucketStart = tvBucketStartForUnixSec(candle.time);
 
             function rollInto(arr) {
                 const idx = arr.findIndex(x => x.time === bucketStart);
                 if (idx >= 0) {
                     const b = arr[idx];
-                    const bucketWasSeededFromQuote = (b.volume || 0) === 0;
-                    if (bucketWasSeededFromQuote) {
-                        arr[idx] = {
-                            time:   b.time,
-                            open:   candle.open,
-                            high:   candle.high,
-                            low:    candle.low,
-                            close:  candle.close,
-                            volume: candle.volume || 0,
-                        };
-                        return arr[idx];
-                    }
                     arr[idx] = {
                         time:   b.time,
-                        open:   b.open,
+                        open:   b.__quoteSeeded ? candle.open : b.open,
                         high:   Math.max(b.high, candle.high),
                         low:    Math.min(b.low,  candle.low),
-                        close:  candle.close,
+                        close:  b.__quoteDirty ? b.close : candle.close,
                         volume: (b.volume || 0) + (candle.volume || 0),
+                        __quoteSeeded: false,
+                        __quoteDirty: false,
                     };
                     return arr[idx];
                 }
@@ -7781,6 +8547,8 @@ def index():
                     low:    candle.low,
                     close:  candle.close,
                     volume: candle.volume || 0,
+                    __quoteSeeded: false,
+                    __quoteDirty: false,
                 };
                 arr.push(fresh);
                 arr.sort((a, b) => a.time - b.time);
@@ -7789,7 +8557,7 @@ def index():
 
             const displayBar = rollInto(tvLastCandles);
             rollInto(tvIndicatorCandles);
-            try { tvCandleSeries.update(displayBar); } catch(e) {}
+            try { tvCandleSeries.update(tvToSeriesBar(displayBar)); } catch(e) {}
             try {
                 tvVolumeSeries.update({
                     time:  displayBar.time,
@@ -8535,6 +9303,10 @@ def index():
         document.getElementById('exposure_metric').addEventListener('change', updateData);
         document.getElementById('levels_count').addEventListener('input', updateData);
         document.getElementById('abs_gex_opacity').addEventListener('input', updateData);
+        document.getElementById('top_oi_count').addEventListener('input', function() {
+            normalizeTopOICountInput();
+            updateData();
+        });
 
         // Levels dropdown handlers
         function updateLevelsDisplay() {
@@ -8576,11 +9348,20 @@ def index():
             const tickerChanged = !isFirstLoad && ticker.toUpperCase() !== tvLastTicker.toUpperCase();
             const shouldRefreshPriceLevels = isFirstLoad || tickerChanged;
 
+            const selectedCheckboxes = document.querySelectorAll('.expiry-option input[type="checkbox"]:checked');
+            const expiry = Array.from(selectedCheckboxes).map(checkbox => checkbox.value);
+            const topOiCount = normalizeTopOICountInput();
+            const topOiContextKey = buildTopOIContextKey(ticker, expiry, topOiCount);
+
             // Reset chart state when the ticker changes
             if (tickerChanged) {
                 // Clear drawings
                 tvClearDrawings();
                 tvDrawingDefs = [];
+                // Reset symbol-scoped overlay caches
+                _lastTopOI = null;
+                _lastTopOIContextKey = '';
+                clearTopOILines();
                 // Reset zoom on the next render
                 tvLastCandles = [];
                 tvIndicatorCandles = [];
@@ -8590,9 +9371,6 @@ def index():
                 disconnectPriceStream();
             }
             tvLastTicker = ticker;
-
-            const selectedCheckboxes = document.querySelectorAll('.expiry-option input[type="checkbox"]:checked');
-            const expiry = Array.from(selectedCheckboxes).map(checkbox => checkbox.value);
             
             // Ensure at least one expiry is selected
             if (expiry.length === 0) {
@@ -8637,7 +9415,8 @@ def index():
                 strike_range: strikeRange,
                 highlight_max_level: highlightMaxLevel,
                 max_level_color: maxLevelColor,
-                coloring_mode: coloringMode
+                coloring_mode: coloringMode,
+                top_oi_count: topOiCount
             };
 
             // Fetch price history: immediate on ticker/settings change, throttled to 30s otherwise.
@@ -8694,7 +9473,7 @@ def index():
                 // Only update if data has changed
                 if (JSON.stringify(data) !== JSON.stringify(lastData)) {
                     lastData = data;  // Update before rendering so popout windows get fresh data
-                    updateCharts(data);
+                    updateCharts(data, topOiContextKey);
                     updatePriceInfo(data.price_info);
                 }
                 // Options cache is now populated — refresh price levels immediately.
@@ -9300,6 +10079,12 @@ def index():
             toolbarContainer.innerHTML = '';
             const toolbar = toolbarContainer;
             toolbar.className = 'tv-toolbar-container';
+            const toolbarMain = document.createElement('div');
+            toolbarMain.className = 'tv-toolbar-main';
+            const toolbarRight = document.createElement('div');
+            toolbarRight.className = 'tv-toolbar-right';
+            toolbar.appendChild(toolbarMain);
+            toolbar.appendChild(toolbarRight);
 
             // Use the persistent global set so state survives data refreshes
             // (tvActiveInds is declared at page level)
@@ -9311,6 +10096,16 @@ def index():
                 b.title = title;
                 b.addEventListener('click', onClick);
                 return b;
+            }
+
+            function addLeft(node) {
+                toolbarMain.appendChild(node);
+                return node;
+            }
+
+            function addRight(node) {
+                toolbarRight.appendChild(node);
+                return node;
             }
 
             // Indicator toggles
@@ -9325,7 +10120,7 @@ def index():
                 { key:'rsi',    label:'RSI',    title:'Relative Strength Index (14) — sub-pane' },
                 { key:'macd',   label:'MACD',   title:'MACD (12, 26, 9) — sub-pane' },
                 { key:'atr',    label:'ATR',    title:'Average True Range (14) — sub-pane' },
-                { key:'oi',     label:'OI',     title:'Top 5 OI strikes (nearest expiry)' },
+                { key:'oi',     label:'OI',     title:'Top OI strikes (nearest expiry)' },
             ];
             indicatorDefs.forEach(def => {
                 const b = btn(def.label, def.title, () => {
@@ -9339,11 +10134,11 @@ def index():
                     if (def.key === 'oi' && tvActiveInds.has('oi')) ensureTopOILoaded();
                 });
                 if (tvActiveInds.has(def.key)) b.classList.add('active');
-                toolbar.appendChild(b);
+                addLeft(b);
             });
 
             // --- Separator ---
-            const sep2 = document.createElement('div'); sep2.className = 'tv-toolbar-sep'; toolbar.appendChild(sep2);
+            const sep2 = document.createElement('div'); sep2.className = 'tv-toolbar-sep'; addLeft(sep2);
 
             // Drawing tools
             const drawDefs = [
@@ -9356,7 +10151,7 @@ def index():
                 const b = btn(def.label, def.title, () => setDrawMode(def.key));
                 b.dataset.draw = def.key;
                 if (tvDrawMode === def.key) b.classList.add('active');
-                toolbar.appendChild(b);
+                addLeft(b);
             });
 
             // Draw color picker
@@ -9373,19 +10168,14 @@ def index():
             colorPicker.title = 'Drawing color';
             colorWrap.appendChild(colorLabel);
             colorWrap.appendChild(colorPicker);
-            toolbar.appendChild(colorWrap);
+            addLeft(colorWrap);
 
             // --- Separator ---
-            const sep3 = document.createElement('div'); sep3.className = 'tv-toolbar-sep'; toolbar.appendChild(sep3);
+            const sep3 = document.createElement('div'); sep3.className = 'tv-toolbar-sep'; addLeft(sep3);
 
             // Undo / Clear
-            toolbar.appendChild(btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
-            toolbar.appendChild(btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
-
-            // Push Fit / Auto-Range to far right
-            const spacer = document.createElement('div');
-            spacer.style.cssText = 'flex:1';
-            toolbar.appendChild(spacer);
+            addLeft(btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
+            addLeft(btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
@@ -9398,9 +10188,15 @@ def index():
                 arBtn.classList.toggle('active', tvAutoRange);
                 if (tvPriceChart) tvFitAll();  // always fit immediately when toggling, ON or OFF
             });
-            toolbar.appendChild(arBtn);
+            addRight(arBtn);
 
-            toolbar.appendChild(btn('⟳ Reset', 'Reset zoom and pan to fit all data', () => tvFitAll()));
+            addRight(btn('⟳ Reset', 'Reset zoom and pan to fit all data', () => tvFitAll()));
+
+            const volumeStatusEl = document.createElement('span');
+            volumeStatusEl.className = 'tv-toolbar-status';
+            volumeStatusEl.textContent = 'Vol: 1m confirmed';
+            volumeStatusEl.title = 'Intrabar volume is confirmed from 1-minute CHART_EQUITY bars. Quote ticks do not carry live volume.';
+            addRight(volumeStatusEl);
 
             // Candle close timer
             const timerEl = document.createElement('span');
@@ -9408,7 +10204,7 @@ def index():
             timerEl.className = 'candle-close-timer';
             timerEl.title = 'Time remaining until the current candle closes';
             timerEl.textContent = '⏱ --:--';
-            toolbar.appendChild(timerEl);
+            addRight(timerEl);
             startCandleCloseTimer();
 
             // Wire up click handler for drawing
@@ -9587,6 +10383,12 @@ def index():
 
             tvHistoricalRenderedPoints = [];
             if (!tvHistoricalPoints.length) {
+                overlay.replaceChildren();
+                overlay.style.display = 'none';
+                if (tooltip) tooltip.style.display = 'none';
+                return;
+            }
+            if (!isChartVisible('historical_dots')) {
                 overlay.replaceChildren();
                 overlay.style.display = 'none';
                 if (tooltip) tooltip.style.display = 'none';
@@ -9974,17 +10776,39 @@ def index():
                         '<div class="rail-profile-blurb" data-met="profile_blurb">—</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-dealer">' +
-                        '<div class="rail-card-header">Dealer Impact</div>' +
+                        '<div class="rail-card-header-row">' +
+                            '<div class="rail-card-header">Dealer Impact</div>' +
+                            '<div class="rail-card-note">Compact hedge read</div>' +
+                        '</div>' +
                         '<div class="dealer-impact" id="dealer-impact">' +
-                            '<div class="label">Spot +1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_up_1pct">—</div>' +
-                            '<div class="label">Spot −1%<div class="sub">dealers buy/sell</div></div><div class="val" data-di="hedge_on_down_1pct">—</div>' +
-                            '<div class="label">Vol +1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_up_1">—</div>' +
-                            '<div class="label">Vol −1 pt<div class="sub">vanna delta shift</div></div><div class="val" data-di="vanna_down_1">—</div>' +
-                            '<div class="label">Charm by close<div class="sub">intraday delta decay</div></div><div class="val" data-di="charm_by_close">—</div>' +
+                            '<div class="dealer-impact-row">' +
+                                '<div class="dealer-impact-copy"><div class="label">Spot +1%</div><div class="sub">dealers buy / sell</div></div>' +
+                                '<div class="val" data-di="hedge_on_up_1pct">—</div>' +
+                            '</div>' +
+                            '<div class="dealer-impact-row">' +
+                                '<div class="dealer-impact-copy"><div class="label">Spot −1%</div><div class="sub">dealers buy / sell</div></div>' +
+                                '<div class="val" data-di="hedge_on_down_1pct">—</div>' +
+                            '</div>' +
+                            '<div class="dealer-impact-row">' +
+                                '<div class="dealer-impact-copy"><div class="label">Vol +1 pt</div><div class="sub">vanna delta shift</div></div>' +
+                                '<div class="val" data-di="vanna_up_1">—</div>' +
+                            '</div>' +
+                            '<div class="dealer-impact-row">' +
+                                '<div class="dealer-impact-copy"><div class="label">Vol −1 pt</div><div class="sub">vanna delta shift</div></div>' +
+                                '<div class="val" data-di="vanna_down_1">—</div>' +
+                            '</div>' +
+                            '<div class="dealer-impact-row">' +
+                                '<div class="dealer-impact-copy"><div class="label">Charm by close</div><div class="sub">intraday delta decay</div></div>' +
+                                '<div class="val" data-di="charm_by_close">—</div>' +
+                            '</div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-activity">' +
                         '<div class="rail-card-header">Chain Activity</div>' +
+                        '<div class="rail-activity-bias">' +
+                            '<span class="rail-activity-bias-label">Bias</span>' +
+                            '<span class="rail-activity-bias-value" data-met="activity_bias">—</span>' +
+                        '</div>' +
                         '<div class="rail-sentiment-labels"><span>bearish</span><span>bullish</span></div>' +
                         '<div class="rail-sentiment-track">' +
                             '<div class="rail-sentiment-marker" data-met="sentiment_marker"></div>' +
@@ -10032,11 +10856,24 @@ def index():
                 gexHeader.className = 'gex-col-header';
                 gexHeader.id = 'gex-col-header';
                 gexHeader.innerHTML =
-                    '<div class="gex-col-title">GEX</div>' +
+                    '<div class="strike-rail-header-main">' +
+                        '<div class="gex-col-title">Strike Rail</div>' +
+                        '<div class="strike-rail-tabs" id="strike-rail-tabs"></div>' +
+                    '</div>' +
                     '<button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>';
                 grid.appendChild(gexHeader);
                 wireGexColumnToggle();
             }
+            if (!document.getElementById('strike-rail-tabs')) {
+                const main = gexHeader.querySelector('.strike-rail-header-main');
+                if (main) {
+                    const tabs = document.createElement('div');
+                    tabs.className = 'strike-rail-tabs';
+                    tabs.id = 'strike-rail-tabs';
+                    main.appendChild(tabs);
+                }
+            }
+            applyStrikeRailTabs();
             let tabs = grid.querySelector('.right-rail-tabs');
             if (!tabs) {
                 tabs = document.createElement('div');
@@ -10098,6 +10935,7 @@ def index():
                 redrawGexScope();
                 applyRightRailTab();
             }
+            renderStrikeRailPanel();
             return priceContainer;
         }
 
@@ -10121,20 +10959,12 @@ def index():
             grid.classList.toggle('gex-collapsed', !!collapsed);
             if (btn) {
                 btn.textContent = collapsed ? '›' : '‹';
-                btn.title = collapsed ? 'Expand GEX' : 'Collapse GEX';
+                btn.title = collapsed ? 'Expand Strike Rail' : 'Collapse Strike Rail';
             }
             if (!collapsed) {
-                // Re-render last GEX data (renders were skipped while collapsed) then resize + sync
-                const target = document.getElementById('gex-side-panel');
-                if (target && _lastGexPanelJson) {
-                    try {
-                        const parsed = typeof _lastGexPanelJson === 'string'
-                            ? JSON.parse(_lastGexPanelJson) : _lastGexPanelJson;
-                        const config = { displayModeBar: false, responsive: true };
-                        Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
-                            .then(() => syncGexPanelYAxisToTV());
-                    } catch (e) {}
-                }
+                // Re-render the active strike rail after expanding.
+                const target = getStrikeRailTarget();
+                renderStrikeRailPanel();
                 if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
                 scheduleGexPanelSync();
             }
@@ -10222,6 +11052,107 @@ def index():
             wireGexScopePill();
         }
 
+        function getVisibleStrikeRailTabs(selectedCharts = getChartVisibility()) {
+            const tabs = ['gex'];
+            STRIKE_RAIL_CHART_IDS.forEach(id => {
+                if (selectedCharts[id] !== false) tabs.push(id);
+            });
+            return tabs;
+        }
+
+        function applyStrikeRailTabs(selectedCharts = getChartVisibility()) {
+            const tabsEl = document.getElementById('strike-rail-tabs');
+            if (!tabsEl) return;
+            const availableTabs = getVisibleStrikeRailTabs(selectedCharts);
+            if (!availableTabs.includes(activeStrikeRailTab)) {
+                activeStrikeRailTab = availableTabs[0] || 'gex';
+                try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
+            }
+            tabsEl.innerHTML = availableTabs.map(tab =>
+                '<button type="button" class="strike-rail-tab' + (tab === activeStrikeRailTab ? ' active' : '') +
+                '" data-strike-rail-tab="' + tab + '">' + (STRIKE_RAIL_LABELS[tab] || tab) + '</button>'
+            ).join('');
+            wireStrikeRailTabs();
+        }
+
+        function wireStrikeRailTabs() {
+            document.querySelectorAll('.strike-rail-tab').forEach(btn => {
+                if (btn.__strikeRailWired) return;
+                btn.__strikeRailWired = true;
+                btn.addEventListener('click', () => {
+                    const next = btn.dataset.strikeRailTab;
+                    if (!next || next === activeStrikeRailTab) return;
+                    activeStrikeRailTab = next;
+                    try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
+                    applyStrikeRailTabs();
+                    renderStrikeRailPanel();
+                });
+            });
+        }
+
+        function getStrikeRailTarget() {
+            return document.getElementById('gex-side-panel');
+        }
+
+        function renderStrikeRailEmpty(message) {
+            const target = getStrikeRailTarget();
+            if (!target) return;
+            try { Plotly.purge(target); } catch (e) {}
+            target.replaceChildren();
+            const empty = document.createElement('div');
+            empty.className = 'strike-rail-empty';
+            empty.textContent = message || 'Strike rail data loads with chart updates.';
+            target.appendChild(empty);
+        }
+
+        function buildStrikeRailFigure(tab, payload) {
+            const parsed = typeof payload === 'string' ? JSON.parse(payload) : payload;
+            parsed.layout = parsed.layout || {};
+            parsed.layout.autosize = true;
+            parsed.layout.width = null;
+            parsed.layout.height = null;
+            parsed.layout.title = { text: '' };
+            parsed.layout.margin = { l: 12, r: 12, t: 10, b: 28 };
+            parsed.layout.showlegend = false;
+            parsed.layout.plot_bgcolor = parsed.layout.plot_bgcolor || '#1E1E1E';
+            parsed.layout.paper_bgcolor = parsed.layout.paper_bgcolor || '#1E1E1E';
+            if (parsed.layout.xaxis) parsed.layout.xaxis.automargin = true;
+            if (parsed.layout.yaxis) {
+                parsed.layout.yaxis.automargin = true;
+                parsed.layout.yaxis.side = 'right';
+            }
+            return parsed;
+        }
+
+        function renderStrikeRailPanel() {
+            const target = getStrikeRailTarget();
+            if (!target || isGexColumnCollapsed()) return;
+            const payload = activeStrikeRailTab === 'gex'
+                ? _lastGexPanelJson
+                : (lastData && lastData[activeStrikeRailTab]);
+            if (!payload) {
+                renderStrikeRailEmpty((STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike rail') + ' data loads with the next refresh.');
+                return;
+            }
+            try {
+                const fig = activeStrikeRailTab === 'gex' ? (typeof payload === 'string' ? JSON.parse(payload) : payload)
+                                                          : buildStrikeRailFigure(activeStrikeRailTab, payload);
+                const config = { displayModeBar: false, responsive: true };
+                target.style.width = '100%';
+                target.style.height = '100%';
+                const hasMountedPlot = !!target._fullLayout;
+                if (!hasMountedPlot) {
+                    target.replaceChildren();
+                }
+                const renderer = hasMountedPlot ? Plotly.react : Plotly.newPlot;
+                renderer(target, fig.data || [], fig.layout || {}, config)
+                    .then(() => syncGexPanelYAxisToTV());
+            } catch (e) {
+                console.warn('strike rail render failed', activeStrikeRailTab, e);
+                renderStrikeRailEmpty('Could not render ' + (STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'strike rail') + '.');
+            }
+        }
+
         function wireGexScopePill() {
             document.querySelectorAll('.gex-scope-btn').forEach(btn => {
                 if (btn.__scopeWired) return;
@@ -10234,41 +11165,61 @@ def index():
             });
         }
 
+        function getScopedStats() {
+            return gexScope === '0dte' ? (_lastStats0dte || null) : (_lastStats || null);
+        }
+
+        function getScopedKeyLevels() {
+            return gexScope === '0dte' ? (_lastKeyLevels0dte || null) : (_lastKeyLevels || null);
+        }
+
+        function scopePillShouldShow() {
+            const selected = getSelectedExpiryValues();
+            return selected.length > 1 && !!_lastStats && !!_lastStats0dte;
+        }
+
+        function syncGexScopePillVisibility() {
+            const show = scopePillShouldShow();
+            document.querySelectorAll('.gex-scope-pill').forEach(pill => {
+                pill.classList.toggle('hidden', !show);
+            });
+            if (!show && gexScope !== 'all') {
+                gexScope = 'all';
+                try { localStorage.setItem('gexScope', gexScope); } catch(e) {}
+            }
+            return show;
+        }
+
         function redrawGexScope() {
+            syncGexScopePillVisibility();
             // Sync pill active state
             document.querySelectorAll('.gex-scope-btn').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.scope === gexScope);
             });
-            const is0dte = gexScope === '0dte';
-            const stats  = is0dte ? _lastStats0dte     : (_lastStats      || null);
-            const levels = is0dte ? _lastKeyLevels0dte : (_lastKeyLevels  || null);
+            const stats = getScopedStats();
+            const levels = getScopedKeyLevels();
             renderMarketMetrics(stats);
             renderRailKeyLevels(stats);
             renderKeyLevels(levels);
         }
 
         function renderGexSidePanel(panelJson) {
-            if (!panelJson) return;
-            _lastGexPanelJson = panelJson;
-            const target = document.getElementById('gex-side-panel');
-            if (!target) return;
-            if (isGexColumnCollapsed()) return; // skip render while column is collapsed
-            try {
-                const parsed = typeof panelJson === 'string' ? JSON.parse(panelJson) : panelJson;
-                const config = { displayModeBar: false, responsive: true };
-                Plotly.react(target, parsed.data || [], parsed.layout || {}, config)
-                    .then(() => syncGexPanelYAxisToTV());
-            } catch (e) {
-                console.warn('gex side panel render failed', e);
+            _lastGexPanelJson = panelJson || null;
+            if (!_lastGexPanelJson) {
+                if (activeStrikeRailTab === 'gex') {
+                    renderStrikeRailEmpty('GEX data loads with the next refresh.');
+                }
+                return;
             }
+            if (activeStrikeRailTab === 'gex') renderStrikeRailPanel();
         }
 
         // Mirror the TradingView chart's visible price range onto the Plotly
-        // side panel so bars line up with candles at the same strike.
+        // strike rail so bars line up with candles at the same strike.
         let _gexSyncScheduled = false;
         function syncGexPanelYAxisToTV() {
             if (isGexColumnCollapsed()) return;
-            const panel = document.getElementById('gex-side-panel');
+            const panel = getStrikeRailTarget();
             const tvEl  = document.getElementById('price-chart');
             if (!panel || !tvEl || !tvPriceChart || !tvCandleSeries) return;
             try {
@@ -10443,23 +11394,42 @@ def index():
         function renderRailAlerts(list) {
             const MAX_AGE_MIN = 15;
             const now = Date.now();
-            const filtered = (Array.isArray(list) ? list : []).filter(a => {
-                if (!a.ts) return true;
-                return (now - new Date(a.ts).getTime()) / 60000 <= MAX_AGE_MIN;
-            });
+            const priority = { warn: 0, flow: 1, info: 2 };
+            const filtered = (Array.isArray(list) ? list : [])
+                .map(a => {
+                    const src = (a && typeof a === 'object') ? a : { text: String(a == null ? '' : a) };
+                    const ts = src.ts ? new Date(src.ts).getTime() : null;
+                    const ageMin = ts == null ? null : Math.max(0, (now - ts) / 60000);
+                    return Object.assign({}, src, { _tsMs: ts, _ageMin: ageMin });
+                })
+                .filter(a => a._ageMin == null || a._ageMin <= MAX_AGE_MIN)
+                .sort((a, b) => {
+                    const pa = priority[a.level] != null ? priority[a.level] : 9;
+                    const pb = priority[b.level] != null ? priority[b.level] : 9;
+                    if (pa !== pb) return pa - pb;
+                    return (b._tsMs || 0) - (a._tsMs || 0);
+                });
             _lastRailAlerts = filtered;
             const target = document.getElementById('right-rail-alerts');
             if (target) {
                 if (!filtered.length) {
                     target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
                 } else {
-                    target.innerHTML = filtered.map(a => {
+                    target.innerHTML = filtered.map((a, idx) => {
                         const lvl = ['warn', 'info', 'flow'].includes(a.level) ? a.level : 'info';
                         const ago = _relTime(a.ts);
-                        return '<div class="rail-alert-item ' + lvl + '">' +
-                                   '<span class="rail-alert-dot"></span>' +
-                                   '<span class="rail-alert-text">' + _escapeHtml(a.text) + '</span>' +
-                                   (ago ? '<span class="rail-alert-ago">' + ago + '</span>' : '') +
+                        const tag = lvl === 'warn' ? 'active' : (lvl === 'flow' ? 'flow' : 'info');
+                        const stale = a._ageMin != null && a._ageMin >= 8;
+                        const classes = ['rail-alert-item', lvl];
+                        if (idx === 0) classes.push('top');
+                        if (stale) classes.push('stale');
+                        if (idx > 0 && (stale || lvl === 'info')) classes.push('muted');
+                        return '<div class="' + classes.join(' ') + '">' +
+                                   '<div class="rail-alert-topline">' +
+                                       '<span class="rail-alert-tag">' + tag + '</span>' +
+                                       (ago ? '<span class="rail-alert-ago">' + ago + '</span>' : '') +
+                                   '</div>' +
+                                   '<div class="rail-alert-text">' + _escapeHtml(a.text) + '</div>' +
                                '</div>';
                     }).join('');
                 }
@@ -10473,15 +11443,34 @@ def index():
 
         // ── Right-rail Key Levels table ──────────────────────────────────
         function _fmtLvlPrice(n) {
-            return (n == null || !isFinite(n)) ? '—' : n.toFixed(2);
+            return (n == null || !isFinite(n)) ? '—' : ('$' + n.toFixed(2));
+        }
+        function _fmtSignedDollar(n) {
+            if (n == null || !isFinite(n)) return '—';
+            if (Math.abs(n) < 0.005) return '$0.00';
+            return (n > 0 ? '+' : '-') + '$' + Math.abs(n).toFixed(2);
         }
         function _fmtLvlDist(price, spot) {
             if (price == null || spot == null || !isFinite(price) || !isFinite(spot) || spot === 0) {
-                return { text: '—', cls: '' };
+                return { primary: '—', secondary: '', cls: '' };
             }
+            const delta = price - spot;
             const pct = (price - spot) / spot * 100;
             const sign = pct > 0 ? '+' : '';
-            return { text: sign + pct.toFixed(2) + '%', cls: pct >= 0 ? 'pos' : 'neg' };
+            return {
+                primary: _fmtSignedDollar(delta),
+                secondary: sign + pct.toFixed(2) + '%',
+                cls: pct >= 0 ? 'pos' : 'neg',
+            };
+        }
+        function _fmtLvlDrift(delta) {
+            if (delta == null || !isFinite(delta)) return { primary: '—', secondary: '', cls: '' };
+            if (Math.abs(delta) < 0.005) return { primary: 'flat', secondary: '', cls: '' };
+            return {
+                primary: _fmtSignedDollar(delta),
+                secondary: '',
+                cls: delta > 0 ? 'pos' : 'neg',
+            };
         }
         function renderRailKeyLevels(stats) {
             const target = document.getElementById('right-rail-levels');
@@ -10491,50 +11480,79 @@ def index():
                 return;
             }
             const spot = stats.spot;
+            const levelDeltas = (stats && stats.level_deltas) || {};
             const rows = [
-                { label: 'Call Wall',  price: stats.call_wall,  color: '#10B981' },
-                { label: 'Put Wall',   price: stats.put_wall,   color: '#EF4444' },
-                { label: 'Gamma Flip', price: stats.gamma_flip, color: '#FFC400' },
-                { label: '+1σ EM',     price: stats.em_upper,   color: '#9CA3AF' },
-                { label: '-1σ EM',     price: stats.em_lower,   color: '#9CA3AF' },
+                { key: 'call_wall',  label: 'Call Wall',  price: stats.call_wall,  tone: 'call' },
+                { key: 'put_wall',   label: 'Put Wall',   price: stats.put_wall,   tone: 'put'  },
+                { key: 'gamma_flip', label: 'Gamma Flip', price: stats.gamma_flip, tone: 'flip' },
+                { key: 'em_upper',   label: '+1σ EM',     price: stats.em_upper,   tone: 'em'   },
+                { key: 'em_lower',   label: '-1σ EM',     price: stats.em_lower,   tone: 'em'   },
             ];
-            const hasAny = rows.some(r => r.price != null && isFinite(r.price));
+            const validRows = rows
+                .filter(r => r.price != null && isFinite(r.price))
+                .map(r => Object.assign({}, r, {
+                    absDist: (spot != null && isFinite(spot)) ? Math.abs(r.price - spot) : Number.POSITIVE_INFINITY,
+                }))
+                .sort((a, b) => a.absDist - b.absDist);
+            const hasAny = validRows.length > 0;
             if (!hasAny) {
                 target.innerHTML = '<div class="lvl-empty">Key levels load with stream data.</div>';
                 return;
             }
-            const body = rows.map(r => {
+            const body = validRows.map((r, idx) => {
                 const d = _fmtLvlDist(r.price, spot);
-                return '<tr>' +
-                       '<td><span class="lvl-label">' +
-                           '<span class="lvl-swatch" style="background:' + r.color + '"></span>' +
-                           _escapeHtml(r.label) +
-                       '</span></td>' +
-                       '<td class="num">' + _fmtLvlPrice(r.price) + '</td>' +
-                       '<td class="num lvl-dist ' + d.cls + '">' + d.text + '</td>' +
-                       '</tr>';
+                const drift = _fmtLvlDrift(levelDeltas[r.key]);
+                return '<div class="rail-level-item ' + r.tone + (idx === 0 ? ' nearest' : '') + '">' +
+                           '<div class="rail-level-top">' +
+                               '<div class="rail-level-main">' +
+                                   '<div class="rail-level-title-row">' +
+                                       '<span class="rail-level-swatch"></span>' +
+                                       '<span class="rail-level-name">' + _escapeHtml(r.label) + '</span>' +
+                                       (idx === 0 ? '<span class="rail-level-chip">Nearest</span>' : '') +
+                                   '</div>' +
+                               '</div>' +
+                               '<div class="rail-level-price">' +
+                                   '<span class="secondary">Price</span>' +
+                                   '<span class="primary">' + _fmtLvlPrice(r.price) + '</span>' +
+                               '</div>' +
+                           '</div>' +
+                           '<div class="rail-level-metrics">' +
+                               '<div class="rail-level-stat ' + d.cls + '">' +
+                                   '<span class="rail-level-stat-label">Δ Spot</span>' +
+                                   '<span class="primary">' + d.primary + '</span>' +
+                                   (d.secondary ? '<span class="secondary">' + d.secondary + '</span>' : '') +
+                               '</div>' +
+                               '<div class="rail-level-stat ' + drift.cls + '">' +
+                                   '<span class="rail-level-stat-label">Since Open</span>' +
+                                   '<span class="primary">' + drift.primary + '</span>' +
+                                   (drift.secondary ? '<span class="secondary">' + drift.secondary + '</span>' : '') +
+                               '</div>' +
+                           '</div>' +
+                       '</div>';
             }).join('');
+            const regimeCls = stats.regime === 'Long Gamma' ? 'pos' : (stats.regime === 'Short Gamma' ? 'neg' : '');
             target.innerHTML =
-                '<table>' +
-                    '<thead><tr>' +
-                        '<th>Level</th>' +
-                        '<th class="num">Price</th>' +
-                        '<th class="num">Δ Spot</th>' +
-                    '</tr></thead>' +
-                    '<tbody>' + body + '</tbody>' +
-                '</table>';
+                '<div class="rail-levels-summary">' +
+                    '<div>' +
+                        '<div class="spot-label">Spot</div>' +
+                        '<div class="spot-price">' + _fmtLvlPrice(spot) + '</div>' +
+                    '</div>' +
+                    '<div class="spot-regime ' + regimeCls + '">' + _escapeHtml(stats.regime || '—') + '</div>' +
+                '</div>' +
+                body;
         }
 
         // ── Secondary chart tabs ───────────────────────────────────────────
         let secondaryActiveTab = (() => {
             try { return localStorage.getItem(SECONDARY_TAB_KEY) || null; } catch(e) { return null; }
         })();
+        const FLOW_BLOTTER_STATE_KEY = 'gex.flowBlotterState';
         const secondaryTabLabels = {
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
             volume: 'Volume', volume_ratio: 'Vol Ratio', options_chain: 'Chain',
-            premium: 'Premium', large_trades: 'Large Trades', centroid: 'Centroid',
+            premium: 'Premium', large_trades: 'Flow Blotter', centroid: 'Centroid',
         };
         function updateSecondaryTabs(chartIds) {
             const grid = document.querySelector('.charts-grid');
@@ -10577,6 +11595,175 @@ def index():
                     try { Plotly.Plots.resize(el); } catch (e) {}
                 }
             });
+        }
+        function initFlowBlotter(container) {
+            if (!container) return;
+            const root = container.querySelector('.flow-blotter');
+            if (!root || root.dataset.bound === '1') return;
+            root.dataset.bound = '1';
+
+            const tbody = root.querySelector('tbody');
+            if (!tbody) return;
+            const rows = Array.from(tbody.querySelectorAll('tr[data-flow-row="1"]'));
+            const filterButtons = Array.from(root.querySelectorAll('[data-flow-type]'));
+            const minPremiumInput = root.querySelector('[data-flow-min-premium]');
+            const resetButton = root.querySelector('[data-flow-reset]');
+            const summaryEl = root.querySelector('[data-flow-summary]');
+            const emptyStateEl = root.querySelector('[data-flow-empty]');
+            const sortButtons = Array.from(root.querySelectorAll('[data-sort-key]'));
+
+            function loadFlowState() {
+                try {
+                    const raw = localStorage.getItem(FLOW_BLOTTER_STATE_KEY);
+                    const parsed = raw ? JSON.parse(raw) : null;
+                    return parsed && typeof parsed === 'object' ? parsed : {};
+                } catch (e) {
+                    return {};
+                }
+            }
+            function saveFlowState() {
+                try {
+                    localStorage.setItem(FLOW_BLOTTER_STATE_KEY, JSON.stringify({
+                        activeType,
+                        sortKey,
+                        sortDir,
+                        minPremium: minPremiumInput ? (parseFloat(minPremiumInput.value) || 0) : 0,
+                    }));
+                } catch (e) {}
+            }
+
+            const savedState = loadFlowState();
+            let activeType = savedState.activeType || root.dataset.initialType || 'all';
+            let sortKey = savedState.sortKey || root.dataset.defaultSort || 'premium';
+            let sortDir = savedState.sortDir || root.dataset.defaultDir || 'desc';
+            if (minPremiumInput) {
+                minPremiumInput.value = String(Math.max(0, Number(savedState.minPremium) || 0));
+            }
+
+            function compactUsd(value) {
+                const amount = Number(value) || 0;
+                if (Math.abs(amount) >= 1e9) return '$' + (amount / 1e9).toFixed(2) + 'B';
+                if (Math.abs(amount) >= 1e6) return '$' + (amount / 1e6).toFixed(2) + 'M';
+                if (Math.abs(amount) >= 1e3) return '$' + (amount / 1e3).toFixed(1) + 'K';
+                return '$' + amount.toFixed(0);
+            }
+
+            function readSortValue(row, key, type) {
+                const raw = row.dataset[key] || '';
+                if (type === 'string') return raw.toLowerCase();
+                const num = parseFloat(raw);
+                return Number.isFinite(num) ? num : 0;
+            }
+
+            function updateFilterButtons() {
+                filterButtons.forEach(btn => {
+                    const active = btn.dataset.flowType === activeType;
+                    btn.classList.toggle('active', active);
+                    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+                });
+            }
+
+            function updateSortIndicators() {
+                sortButtons.forEach(btn => {
+                    const indicator = btn.querySelector('[data-sort-indicator]');
+                    if (!indicator) return;
+                    if (btn.dataset.sortKey === sortKey) {
+                        indicator.textContent = sortDir === 'desc' ? '↓' : '↑';
+                        indicator.style.color = 'var(--accent)';
+                    } else {
+                        indicator.textContent = '↕';
+                        indicator.style.color = 'var(--fg-2)';
+                    }
+                });
+            }
+
+            function applyFiltersAndSort() {
+                const minPremium = minPremiumInput ? Math.max(0, parseFloat(minPremiumInput.value) || 0) : 0;
+                const activeSortButton = root.querySelector(`[data-sort-key="${sortKey}"]`);
+                const sortType = activeSortButton ? (activeSortButton.dataset.sortType || 'number') : 'number';
+                const visibleRows = [];
+                const hiddenRows = [];
+
+                rows.forEach(row => {
+                    const matchesType = activeType === 'all' || row.dataset.optionType === activeType;
+                    const premium = parseFloat(row.dataset.premium) || 0;
+                    const matchesPremium = premium >= minPremium;
+                    if (matchesType && matchesPremium) visibleRows.push(row);
+                    else hiddenRows.push(row);
+                });
+
+                visibleRows.sort((a, b) => {
+                    const aVal = readSortValue(a, sortKey, sortType);
+                    const bVal = readSortValue(b, sortKey, sortType);
+                    let cmp = 0;
+                    if (sortType === 'string') cmp = aVal.localeCompare(bVal);
+                    else if (aVal !== bVal) cmp = aVal < bVal ? -1 : 1;
+                    if (cmp !== 0) return sortDir === 'desc' ? -cmp : cmp;
+                    return (parseFloat(b.dataset.premium) || 0) - (parseFloat(a.dataset.premium) || 0);
+                });
+
+                visibleRows.forEach(row => {
+                    row.hidden = false;
+                    tbody.appendChild(row);
+                });
+                hiddenRows.forEach(row => {
+                    row.hidden = true;
+                    tbody.appendChild(row);
+                });
+
+                const visiblePremium = visibleRows.reduce((sum, row) => sum + (parseFloat(row.dataset.premium) || 0), 0);
+                if (summaryEl) {
+                    const shownText = `${visibleRows.length.toLocaleString()} shown` +
+                        (rows.length !== visibleRows.length ? ` of ${rows.length.toLocaleString()}` : '');
+                    const premiumText = `Approx premium ${compactUsd(visiblePremium)}`;
+                    const thresholdText = minPremium > 0 ? ` · Min prem ${compactUsd(minPremium)}` : '';
+                    summaryEl.textContent = shownText + ' · ' + premiumText + thresholdText;
+                }
+                if (emptyStateEl) {
+                    emptyStateEl.hidden = !(rows.length > 0 && visibleRows.length === 0);
+                }
+
+                saveFlowState();
+                updateFilterButtons();
+                updateSortIndicators();
+            }
+
+            filterButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    activeType = btn.dataset.flowType || 'all';
+                    applyFiltersAndSort();
+                });
+            });
+
+            sortButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const nextKey = btn.dataset.sortKey || 'premium';
+                    if (sortKey === nextKey) {
+                        sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+                    } else {
+                        sortKey = nextKey;
+                        sortDir = 'desc';
+                    }
+                    applyFiltersAndSort();
+                });
+            });
+
+            if (minPremiumInput) {
+                minPremiumInput.addEventListener('input', applyFiltersAndSort);
+                minPremiumInput.addEventListener('change', applyFiltersAndSort);
+            }
+
+            if (resetButton) {
+                resetButton.addEventListener('click', () => {
+                    activeType = root.dataset.initialType || 'all';
+                    sortKey = root.dataset.defaultSort || 'premium';
+                    sortDir = root.dataset.defaultDir || 'desc';
+                    if (minPremiumInput) minPremiumInput.value = '0';
+                    applyFiltersAndSort();
+                });
+            }
+
+            applyFiltersAndSort();
         }
 
         // ── Key levels (Call Wall / Put Wall / Gamma Flip / ±1σ EM) ──────────
@@ -10633,11 +11820,7 @@ def index():
 
         function clearTopOILines() {
             const hadLines = tvTopOILines.length > 0 || tvTopOIPrices.length > 0;
-            if (tvTopOIPrices.length) {
-                const drop = new Set(tvTopOIPrices);
-                tvAllLevelPrices = tvAllLevelPrices.filter(p => !drop.has(p));
-                tvTopOIPrices = [];
-            }
+            tvTopOIPrices = [];
             if (!tvCandleSeries) { tvTopOILines = []; return; }
             tvTopOILines.forEach(l => { try { tvCandleSeries.removePriceLine(l); } catch (e) {} });
             tvTopOILines = [];
@@ -10647,7 +11830,7 @@ def index():
         function renderTopOI(topOi) {
             const cleared = clearTopOILines();
             if (!tvActiveInds.has('oi') || !topOi || !tvCandleSeries || !window.LightweightCharts) {
-                if (cleared && tvCandleSeries) {
+                if (cleared && tvCandleSeries && tvAutoRange) {
                     tvApplyAutoscale();
                     tvRefreshPriceScale();
                 }
@@ -10659,10 +11842,10 @@ def index():
             const goldColor = getComputedStyle(document.documentElement).getPropertyValue('--gold').trim() || '#D4AF37';
 
             const map = new Map();
-            (topOi.calls || []).forEach(r => map.set(r.strike, { color: callC, title: 'C OI ' + r.strike }));
-            (topOi.puts  || []).forEach(r => {
+            (topOi.calls || []).forEach((r, idx) => map.set(r.strike, { color: callC, title: 'C OI #' + (idx + 1) + ' ' + r.strike }));
+            (topOi.puts  || []).forEach((r, idx) => {
                 if (map.has(r.strike)) map.set(r.strike, { color: goldColor, title: '\u2605 ' + r.strike });
-                else                   map.set(r.strike, { color: putC,  title: 'P OI ' + r.strike });
+                else                   map.set(r.strike, { color: putC,  title: 'P OI #' + (idx + 1) + ' ' + r.strike });
             });
 
             map.forEach(({ color, title }, strike) => {
@@ -10673,10 +11856,9 @@ def index():
                     });
                     tvTopOILines.push(line);
                     tvTopOIPrices.push(strike);
-                    tvAllLevelPrices.push(strike);
                 } catch (e) { console.warn('renderTopOI createPriceLine failed:', e); }
             });
-            if (tvTopOILines.length) {
+            if (tvTopOILines.length && tvAutoRange) {
                 tvApplyAutoscale();
                 tvRefreshPriceScale();
             }
@@ -10684,11 +11866,10 @@ def index():
 
         // Fetch top-OI from /update when user toggles on before /update has populated it
         function ensureTopOILoaded() {
-            if (_lastTopOI || _topOIFetchInFlight) return;
+            const requestTopOIContextKey = getTopOIContextKey();
+            if ((_lastTopOI && _lastTopOIContextKey === requestTopOIContextKey) || _topOIFetchInFlight) return;
             const t = (document.getElementById('ticker') && document.getElementById('ticker').value || '').trim();
-            const expiry = Array.from(
-                document.querySelectorAll('.expiry-option input[type="checkbox"]:checked')
-            ).map(cb => cb.value);
+            const expiry = getSelectedExpiryValues();
             if (!t || !expiry.length) return;
             const exposureMetricEl = document.getElementById('exposure_metric');
             const deltaAdjustedEl = document.getElementById('delta_adjusted_exposures');
@@ -10704,6 +11885,7 @@ def index():
                     exposure_metric: exposureMetricEl ? exposureMetricEl.value : 'Open Interest',
                     delta_adjusted: !!(deltaAdjustedEl && deltaAdjustedEl.checked),
                     calculate_in_notional: !!(calculateInNotionalEl && calculateInNotionalEl.checked),
+                    top_oi_count: getTopOICountSetting(),
                     strike_range: strikeRangeEl ? (parseFloat(strikeRangeEl.value) / 100) : 0.1,
                     gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
                     show_gamma: false,
@@ -10712,8 +11894,9 @@ def index():
                     show_charm: false,
                 }),
             }).then(r => r.json()).then(d => {
-                if (d && d.top_oi) {
+                if (d && d.top_oi && requestTopOIContextKey === getTopOIContextKey()) {
                     _lastTopOI = d.top_oi;
+                    _lastTopOIContextKey = requestTopOIContextKey;
                     if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
                 }
             }).catch(() => {}).finally(() => { _topOIFetchInFlight = false; });
@@ -10742,6 +11925,7 @@ def index():
                 highlight_max_level: document.getElementById('highlight_max_level').checked,
                 max_level_color: maxLevelColor,
                 coloring_mode: document.getElementById('coloring_mode').value,
+                top_oi_count: getTopOICountSetting(),
                 gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
             };
         }
@@ -10751,6 +11935,7 @@ def index():
             if (_priceHistoryInFlight) return;
             const payload = buildPricePayload();
             const key = JSON.stringify(payload);
+            const requestTopOIContextKey = getTopOIContextKey();
             const now = Date.now();
             // Skip if nothing changed and it's been less than 30 seconds
             if (!force && key === _priceHistoryLastKey && now - _priceHistoryLastMs < 30000) return;
@@ -10767,37 +11952,34 @@ def index():
                 if (!priceResp.error && priceResp.price) {
                     applyPriceData(priceResp.price);
                 }
-                if (priceResp && priceResp.gex_panel) {
-                    renderGexSidePanel(priceResp.gex_panel);
+                if (priceResp && priceResp.top_oi && requestTopOIContextKey === getTopOIContextKey()) {
+                    _lastTopOI = priceResp.top_oi;
+                    _lastTopOIContextKey = requestTopOIContextKey;
+                    if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
                 }
-                if (priceResp && priceResp.key_levels) {
-                    _lastKeyLevels = priceResp.key_levels;
-                }
-                if (priceResp && priceResp.key_levels_0dte) {
-                    _lastKeyLevels0dte = priceResp.key_levels_0dte;
-                }
-                if (priceResp && priceResp.stats_0dte) {
-                    _lastStats0dte = priceResp.stats_0dte;
-                }
-                if (priceResp && priceResp.trader_stats) {
-                    renderTraderStats(priceResp.trader_stats);
-                }
+                renderGexSidePanel(priceResp ? priceResp.gex_panel : null);
+                _lastKeyLevels = priceResp ? (priceResp.key_levels || null) : null;
+                _lastKeyLevels0dte = priceResp ? (priceResp.key_levels_0dte || null) : null;
+                _lastStats0dte = priceResp ? (priceResp.stats_0dte || null) : null;
+                renderTraderStats(priceResp ? (priceResp.trader_stats || null) : null);
                 redrawGexScope();
             })
             .catch(err => console.error('Error fetching price chart:', err))
             .finally(() => { _priceHistoryInFlight = false; });
         }
 
-        function updateCharts(data) {
+        function updateCharts(data, topOiContextKey = getTopOIContextKey()) {
             // Save scroll position before any DOM changes
             savedScrollPosition = window.scrollY || window.pageYOffset;
 
-            if (data.top_oi) {
+            if (data.top_oi && topOiContextKey === getTopOIContextKey()) {
                 _lastTopOI = data.top_oi;
+                _lastTopOIContextKey = topOiContextKey;
                 if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
             }
             
             const selectedCharts = getChartVisibility();
+            applyStrikeRailTabs(selectedCharts);
             
             // Handle price chart separately (TradingView Lightweight Charts)
             if (selectedCharts.price && data.price) {
@@ -10856,13 +12038,14 @@ def index():
             const regularCharts = Object.entries(selectedCharts).filter(([key, selected]) => 
                 selected && !['price'].includes(key) && data[key]
             );
-            
-            const regularChartIds = regularCharts.map(([key]) => key);
-            const needsGridRebuild = regularChartIds.length !== currentChartIds.length ||
-                                     !regularChartIds.every((id, i) => currentChartIds[i] === id);
+
+            const utilityCharts = regularCharts.filter(([key]) => !STRIKE_RAIL_CHART_IDS.includes(key));
+            const utilityChartIds = utilityCharts.map(([key]) => key);
+            const needsGridRebuild = utilityChartIds.length !== currentChartIds.length ||
+                                     !utilityChartIds.every((id, i) => currentChartIds[i] === id);
             
             // Hide the charts grid if no regular charts are enabled
-            if (regularCharts.length === 0) {
+            if (utilityCharts.length === 0) {
                 chartsGrid.style.display = 'none';
                 chartsGrid.innerHTML = '';
                 updateSecondaryTabs([]);
@@ -10873,7 +12056,7 @@ def index():
                 if (needsGridRebuild) {
                     chartsGrid.innerHTML = '';
                     chartsGrid.className = 'charts-grid tabbed';
-                    regularCharts.forEach(([key, selected]) => {
+                    utilityCharts.forEach(([key, selected]) => {
                         const newContainer = document.createElement('div');
                         newContainer.className = 'chart-container';
                         newContainer.id = `${key}-chart`;
@@ -10881,10 +12064,10 @@ def index():
                         chartContainerCache[key] = newContainer;
                     });
                 }
-                updateSecondaryTabs(regularChartIds);
+                updateSecondaryTabs(utilityChartIds);
                 
                 // Update chart data
-                regularCharts.forEach(([key, selected]) => {
+                utilityCharts.forEach(([key, selected]) => {
                     let container = document.getElementById(`${key}-chart`);
                     if (!container) {
                         container = document.createElement('div');
@@ -10894,12 +12077,13 @@ def index():
                     }
                     
                     try {
-                        // Special handling for options chain (HTML table)
+                        // Flow blotter is HTML, not a Plotly figure.
                         if (key === 'large_trades') {
                             // Only update if content changed
                             if (container.innerHTML !== data[key]) {
                                 container.innerHTML = data[key];
                             }
+                            initFlowBlotter(container);
                         } else {
                             const chartData = JSON.parse(data[key]);
                             
@@ -10940,10 +12124,11 @@ def index():
                     }
                 });
             }
+            renderStrikeRailPanel();
             
             // Clean up disabled regular charts from charts object
             Object.keys(selectedCharts).forEach(key => {
-                if (!selectedCharts[key] && !['price'].includes(key)) {
+                if ((!selectedCharts[key] || STRIKE_RAIL_CHART_IDS.includes(key)) && !['price'].includes(key)) {
                     const container = document.getElementById(`${key}-chart`);
                     if (container) {
                         container.remove();
@@ -11053,10 +12238,21 @@ def index():
                 _setMet('net_dex', '—');
                 _setMet('net_gex_delta', '');
                 _setMet('net_dex_delta', '');
+                document.querySelectorAll('#rail-card-metrics .v').forEach(el => el.classList.remove('pos', 'neg'));
                 return;
             }
             _setMet('net_gex', fmtMoneyCompact(stats.net_gex));
             _setMet('net_dex', fmtMoneyCompact(stats.net_dex));
+            const gexValueEl = document.querySelector('#rail-card-metrics [data-met="net_gex"]');
+            if (gexValueEl) {
+                gexValueEl.classList.toggle('pos', typeof stats.net_gex === 'number' && stats.net_gex > 0);
+                gexValueEl.classList.toggle('neg', typeof stats.net_gex === 'number' && stats.net_gex < 0);
+            }
+            const dexValueEl = document.querySelector('#rail-card-metrics [data-met="net_dex"]');
+            if (dexValueEl) {
+                dexValueEl.classList.toggle('pos', typeof stats.net_dex === 'number' && stats.net_dex > 0);
+                dexValueEl.classList.toggle('neg', typeof stats.net_dex === 'number' && stats.net_dex < 0);
+            }
             const sd = stats.session_deltas || {};
             const dGex = (typeof sd.net_gex_vs_open === 'number') ? sd.net_gex_vs_open : null;
             const dDex = (typeof sd.net_dex_vs_open === 'number') ? sd.net_dex_vs_open : null;
@@ -11091,9 +12287,22 @@ def index():
         }
 
         function renderChainActivity(stats) {
+            const biasEl = document.querySelector('#rail-card-activity [data-met="activity_bias"]');
+            const oiFill  = document.querySelector('#rail-card-activity [data-met="oi_fill"]');
+            const volFill = document.querySelector('#rail-card-activity [data-met="vol_fill"]');
             if (!stats || !stats.chain_activity) {
+                _setMet('activity_bias', '—');
                 _setMet('oi_cp',  '—');
                 _setMet('vol_cp', '—');
+                if (biasEl) biasEl.classList.remove('pos', 'neg');
+                if (oiFill) {
+                    oiFill.style.width = '0%';
+                    oiFill.classList.remove('pos', 'neg');
+                }
+                if (volFill) {
+                    volFill.style.width = '0%';
+                    volFill.classList.remove('pos', 'neg');
+                }
                 return;
             }
             const ca = stats.chain_activity;
@@ -11101,15 +12310,35 @@ def index():
             const pct = Math.max(0, Math.min(1, (sentiment + 1) / 2));
             const marker = document.querySelector('#rail-card-activity [data-met="sentiment_marker"]');
             if (marker) marker.style.left = (pct * 100).toFixed(2) + '%';
+            if (biasEl) {
+                let biasText = 'Balanced';
+                biasEl.classList.remove('pos', 'neg');
+                if (sentiment >= 0.2) {
+                    biasText = 'Calls in control';
+                    biasEl.classList.add('pos');
+                } else if (sentiment <= -0.2) {
+                    biasText = 'Puts in control';
+                    biasEl.classList.add('neg');
+                } else {
+                    biasText = 'Two-way flow';
+                }
+                biasEl.textContent = biasText;
+            }
             _setMet('oi_cp',  ca.oi_cp_ratio  == null ? '—' : ('C/P ' + ca.oi_cp_ratio.toFixed(2)));
             _setMet('vol_cp', ca.vol_cp_ratio == null ? '—' : ('C/P ' + ca.vol_cp_ratio.toFixed(2)));
             // Map ratio 0.5..2.0 → 0..100% fill, clamped.
             const fillPct = r => (r == null) ? 0
                 : Math.max(0, Math.min(100, ((r - 0.5) / 1.5) * 100));
-            const oiFill  = document.querySelector('#rail-card-activity [data-met="oi_fill"]');
-            const volFill = document.querySelector('#rail-card-activity [data-met="vol_fill"]');
-            if (oiFill)  oiFill.style.width  = fillPct(ca.oi_cp_ratio)  + '%';
-            if (volFill) volFill.style.width = fillPct(ca.vol_cp_ratio) + '%';
+            if (oiFill) {
+                oiFill.style.width  = fillPct(ca.oi_cp_ratio)  + '%';
+                oiFill.classList.toggle('pos', ca.oi_cp_ratio != null && ca.oi_cp_ratio >= 1);
+                oiFill.classList.toggle('neg', ca.oi_cp_ratio != null && ca.oi_cp_ratio < 1);
+            }
+            if (volFill) {
+                volFill.style.width = fillPct(ca.vol_cp_ratio) + '%';
+                volFill.classList.toggle('pos', ca.vol_cp_ratio != null && ca.vol_cp_ratio >= 1);
+                volFill.classList.toggle('neg', ca.vol_cp_ratio != null && ca.vol_cp_ratio < 1);
+            }
         }
         
         function loadExpirations() {
@@ -11378,6 +12607,7 @@ def index():
                 timeframe: document.getElementById('timeframe').value,
                 strike_range: document.getElementById('strike_range').value,
                 exposure_metric: document.getElementById('exposure_metric').value,
+                top_oi_count: normalizeTopOICountInput(),
                 delta_adjusted_exposures: document.getElementById('delta_adjusted_exposures').checked,
                 calculate_in_notional: document.getElementById('calculate_in_notional').checked,
                 show_calls: document.getElementById('show_calls').checked,
@@ -11411,6 +12641,10 @@ def index():
                 document.getElementById('strike_range_value').textContent = settings.strike_range + '%';
             }
             if (settings.exposure_metric) document.getElementById('exposure_metric').value = settings.exposure_metric;
+            if (settings.top_oi_count !== undefined) {
+                document.getElementById('top_oi_count').value = settings.top_oi_count;
+                normalizeTopOICountInput();
+            }
             if (settings.delta_adjusted_exposures !== undefined) document.getElementById('delta_adjusted_exposures').checked = settings.delta_adjusted_exposures;
             if (settings.calculate_in_notional !== undefined) document.getElementById('calculate_in_notional').checked = settings.calculate_in_notional;
             if (settings.show_calls !== undefined) document.getElementById('show_calls').checked = settings.show_calls;
@@ -11540,9 +12774,10 @@ def index():
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
-            volume: 'Volume Ratio', large_trades: 'Options Chain',
+            volume: 'Volume', large_trades: 'Flow Blotter',
             premium: 'Premium', centroid: 'Centroid',
-            hvl: 'HVL line', em_2s: '±2σ EM lines', walls_2: 'Secondary walls'
+            hvl: 'HVL line', em_2s: '±2σ EM lines', walls_2: 'Secondary walls',
+            historical_dots: 'Historical dots'
         };
         function renderChartVisibilitySection() {
             const list = document.getElementById('chart-visibility-list');
@@ -11562,8 +12797,9 @@ def index():
                     const id = cb.dataset.chartId;
                     setAllChartVisibility({ [id]: cb.checked });
                     if (LINE_OVERLAY_IDS.includes(id)) {
-                        // Line overlays just need a redraw against cached levels — no refetch.
-                        if (_lastKeyLevels) renderKeyLevels(_lastKeyLevels);
+                        // Price-chart overlays redraw from cache — no refetch needed.
+                        renderKeyLevels(getScopedKeyLevels());
+                        scheduleTVHistoricalOverlayDraw();
                     } else {
                         updateData();
                     }
@@ -11843,17 +13079,19 @@ def update():
         exposure_levels_count = int(data.get('levels_count', 3))
         use_heikin_ashi = data.get('use_heikin_ashi', False)
         horizontal = data.get('horizontal_bars', False)
+        strike_rail_horizontal = True
         show_abs_gex = data.get('show_abs_gex', False)
         abs_gex_opacity = float(data.get('abs_gex_opacity', 0.2))
         highlight_max_level = data.get('highlight_max_level', False)
         max_level_color = data.get('max_level_color', '#800080')
         max_level_mode = data.get('max_level_mode', 'Absolute')
+        top_oi_count = data.get('top_oi_count', 5)
  
         
         response = {}
 
         try:
-            response['top_oi'] = compute_top_oi_strikes(calls, puts)
+            response['top_oi'] = compute_top_oi_strikes(calls, puts, n=top_oi_count)
         except Exception as e:
             print(f"[top_oi] build failed: {e}")
             response['top_oi'] = {'calls': [], 'puts': [], 'both': []}
@@ -11862,16 +13100,16 @@ def update():
         # NOTE: price chart is handled by /update_price (separate concurrent request)
 
         if data.get('show_gamma', True):
-            response['gamma'] = create_exposure_chart(calls, puts, "GEX", "Gamma Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, show_abs_gex_area=show_abs_gex, abs_gex_opacity=abs_gex_opacity, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            response['gamma'] = create_exposure_chart(calls, puts, "GEX", "Gamma Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, show_abs_gex_area=show_abs_gex, abs_gex_opacity=abs_gex_opacity, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_delta', True):
-            response['delta'] = create_exposure_chart(calls, puts, "DEX", "Delta Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            response['delta'] = create_exposure_chart(calls, puts, "DEX", "Delta Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_vanna', True):
-            response['vanna'] = create_exposure_chart(calls, puts, "VEX", "Vanna Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            response['vanna'] = create_exposure_chart(calls, puts, "VEX", "Vanna Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_charm', True):
-            response['charm'] = create_exposure_chart(calls, puts, "Charm", "Charm Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            response['charm'] = create_exposure_chart(calls, puts, "Charm", "Charm Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_speed', True):
             response['speed'] = create_exposure_chart(calls, puts, "Speed", "Speed Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
@@ -11886,13 +13124,13 @@ def update():
             response['volume'] = create_volume_chart(call_volume, put_volume, use_range, call_color, put_color, expiry_dates)
         
         if data.get('show_options_volume', True):
-            response['options_volume'] = create_options_volume_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            response['options_volume'] = create_options_volume_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_open_interest', True):
-            response['open_interest'] = create_open_interest_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            response['open_interest'] = create_open_interest_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_premium', True):
-            response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_large_trades', True):
             response['large_trades'] = create_large_trades_table(calls, puts, S, strike_range, call_color, put_color, expiry_dates)
@@ -12037,6 +13275,7 @@ def update_price():
         highlight_max_level = data.get('highlight_max_level', False)
         max_level_color = data.get('max_level_color', '#800080')
         coloring_mode = data.get('coloring_mode', 'Linear Intensity')
+        top_oi_count = data.get('top_oi_count', 5)
         # Mirror /update_data semantics. compute_trader_stats has needed these
         # since Phase 2 Stage 3 (commit 6fc40bb); without them every tick raised
         # a silent NameError and trader_stats stayed None.
@@ -12087,6 +13326,7 @@ def update_price():
 
         gex_panel = None
         key_levels = None
+        top_oi = {'calls': [], 'puts': [], 'both': []}
         S_for_panel = cached.get('S')
         if calls is not None and puts is not None and S_for_panel is not None:
             try:
@@ -12102,6 +13342,11 @@ def update_price():
             except Exception as e:
                 print(f"[key_levels] build failed: {e}")
                 key_levels = None
+            try:
+                top_oi = compute_top_oi_strikes(calls, puts, n=top_oi_count)
+            except Exception as e:
+                print(f"[top_oi] cached build failed: {e}")
+                top_oi = {'calls': [], 'puts': [], 'both': []}
 
         trader_stats = None
         if calls is not None and puts is not None and S_for_panel is not None:
@@ -12142,6 +13387,7 @@ def update_price():
             'price': price_chart,
             'gex_panel': gex_panel,
             'key_levels': key_levels,
+            'top_oi': top_oi,
             'trader_stats': trader_stats,
             'key_levels_0dte': key_levels_0dte,
             'stats_0dte': stats_0dte,

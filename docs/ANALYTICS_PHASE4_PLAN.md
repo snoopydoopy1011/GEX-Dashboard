@@ -42,16 +42,17 @@ Phase 3 wrapped the alerts rail into 7 glanceable cards and added a live flow-al
 1. **Open Interest has no visual surface.** `create_open_interest_chart()` is fully implemented (line 4557) and already returned from `/update` (line 11471), but the OI tab is hidden by default (`open_interest: false`, line 7335). Users get no OI context alongside Gamma/Delta/Vanna/Charm.
 2. **No price-chart context for the dominant OI strikes.** At dealer close and expiration, SPY pins toward the top-OI strikes of the nearest expiration. Currently there's no overlay for them — users have to eyeball the GEX bars, which are sorted by notional, not OI.
 3. **Net GEX/DEX blends all expirations.** SPY intraday price action is dominated by 0DTE flow; showing a blended Net GEX hides whether same-day speculators are fighting longer-dated dealer positioning.
-4. **Bottom exposure tabs are palette-inconsistent.** Each `create_*_chart()` writes its own Plotly styling (colors, gridlines, margins, hover format). Switching tabs feels visually jumpy.
+4. **Strike/exposure tabs are palette-inconsistent.** Each `create_*_chart()` writes its own Plotly styling (colors, gridlines, margins, hover format). Switching tabs feels visually jumpy.
 5. **Flow alerts fire on any strike.** As Gemini noted, vol-spike / IV-surge / V-OI alerts are noisy away from structural levels. Gating them to key-level proximity (HVL, ±σ EM, Walls, Gamma Flip) keeps signal density high.
 
 **Note on Black-Scholes (addresses user question):** Schwab's options-chain response returns `volatility` (IV) per contract but **not** greeks. The app already uses Schwab's IV as input (see lines 1152, 1188) and plugs it into Black-Scholes to compute delta/gamma/vanna/charm/vomma/speed. Second-order greeks are never available from any vendor API — they must be computed. The current pipeline is correct; no change in this phase.
 
 **Three independent goals:**
 
-1. **OI visibility.** Default-on the existing OI bottom tab + one shared Plotly theme helper so every exposure tab looks identical. Add a Price Chart toolbar `OI` button that renders the top-5 call-OI strikes (green) and top-5 put-OI strikes (red) at the nearest expiration, with overlap strikes drawn as a single gold line.
+1. **OI visibility.** Default-on the existing OI tab + one shared Plotly theme helper so every strike/exposure tab looks identical. Add a Price Chart toolbar `OI` button that renders the top-5 call-OI strikes (green) and top-5 put-OI strikes (red) at the nearest expiration, with overlap strikes drawn as a single gold line.
 2. **0DTE isolation.** Precompute a second stats/key-levels bundle on the backend filtered to the nearest expiration; add a `All | 0DTE` pill to the KPI card that swaps displayed numbers and chart price lines instantly.
 3. **Alert focus.** Gate strike-origin flow alerts (vol spike, IV surge, V/OI, sweep) to within 0.25% of spot of any key level. Wall-shift and gamma-flip-move alerts are themselves key-level events — they remain ungated. A settings toggle lets power users turn the gate off.
+4. **Forward layout compatibility.** The `All | 0DTE` bundle introduced here should not be wired only to the current GEX side panel. The later UX/layout phase will promote strike-aligned tabs into a shared center strike rail, and this phase's 0DTE state needs to feed that future surface too.
 
 **No analytical-formula changes.** No new Greeks, no new data sources, no new endpoints. Every new signal reuses data the backend already has. Single-file `ezoptionsschwab.py`, vanilla JS, CSS tokens only.
 
@@ -99,6 +100,8 @@ Single click on `OI` toggles all ≤10 top-OI price lines on/off. Lines are dott
 ```
 
 Clicking `0DTE` swaps Net GEX, Net DEX, Call Wall, Put Wall, Gamma Flip in-place from the `stats_0dte` / `key_levels_0dte` bundles. No network round-trip. The price-chart lines (Call Wall, Put Wall, Gamma Flip, HVL, ±σ EM) also redraw from the active bundle.
+
+**Forward note:** in the follow-on UX/layout phase, the same `All | 0DTE` state should also drive the active strike-aligned rail tab (`GEX`, `Gamma`, `Delta`, `Vanna`, `Charm`, `OI`, `Options Vol`, `Premium`) so the center comparison surface stays in sync with the KPI card and price lines.
 
 ### Settings drawer (new row)
 
@@ -155,6 +158,7 @@ ALERTS
 ## 4. Design decisions (locked)
 
 - **0DTE bundle strategy:** backend precomputes BOTH full-chain and 0DTE-filtered bundles every tick. Cost is one extra DataFrame filter + one `compute_key_levels` + one `compute_trader_stats` on the filtered rows — negligible. Benefit: instant client toggle, no fetch round-trip, no stale state.
+- **Future strike-rail compatibility:** the `activeStatsKey` / `stats_0dte` state introduced here should be treated as the source of truth for any future strike-aligned rail tab set, not just the current GEX panel.
 - **OI overlay transport:** extend `/update` response with a `top_oi` key. The route has `calls`/`puts` DataFrames in hand; a separate `/top_oi` endpoint would duplicate chain loading and double network chatter.
 - **Overlap rendering:** one gold line, not two stacked. Build `Map<strike, {side, color}>`. Process call top-5 first (side=`call`, color=`--call`). Process put top-5: if strike already present, upgrade to side=`both`, color=`--gold`; else add as `put`. Flatten to ≤10 unique lines.
 - **Overlap label:** `★ {strike}` (terse, visually distinctive). Plain labels: `C OI {strike}`, `P OI {strike}`.
@@ -202,7 +206,7 @@ Clients that don't read these keys see no change. Existing integration tests and
 
 Types: `feat`, `fix`, `refactor`, `style`, `chore`. Scopes for this phase: `oi`, `0dte`, `theme`, `alerts`, `chart`. One stage = one commit (or tightly-related pair). Examples:
 
-- `feat(theme): shared Plotly theme helper for bottom exposure tabs`
+- `feat(theme): shared Plotly theme helper for strike/exposure tabs`
 - `feat(oi): top-5 OI overlay button on price chart`
 - `feat(0dte): precompute 0DTE stats + key_levels bundles`
 - `feat(alerts): gate strike-origin alerts to key-level proximity`
@@ -229,7 +233,7 @@ Land in this order — each stage is independently committable and reviewable.
 
 ### Stage 1 — Plotly theme helper + default-on OI tab
 
-**Goal:** one shared theme applied to every bottom tab, OI tab visible by default.
+**Goal:** one shared theme applied to every strike/exposure tab, with OI visible by default.
 
 **Changes:**
 - Add `PLOTLY_THEME` dict at module scope (near the color constants / CSS token resolution region).
@@ -246,7 +250,7 @@ Land in this order — each stage is independently committable and reviewable.
 - Flip `open_interest: false` → `true` at line 7335.
 
 **Verification:**
-- Run the app, cycle through every bottom tab. Confirm consistent background, grid color, tick density, hover format.
+- Run the app, cycle through every strike/exposure tab. Confirm consistent background, grid color, tick density, hover format.
 - Confirm OI tab appears default-enabled after a cache-clear load.
 
 ### Stage 2 — Top-5 OI overlay backend
@@ -343,7 +347,7 @@ Land in this order — each stage is independently committable and reviewable.
 Deferred to a later phase so this one stays reviewable:
 
 - **Strike-level GEX rate-of-change** (Gemini suggestion: show 15-min Δ per wall strike). Data is in SQLite `interval_data`; build it next.
-- **0DTE toggle for bottom tabs.** This phase only toggles the side-panel KPI and chart lines. The bottom Gamma/Delta/Vanna tabs still show full-chain aggregation. Natural follow-up.
+- **0DTE toggle for the future strike rail.** This phase only toggles the KPI card and chart lines. The follow-on UX/layout phase should carry the same state into the promoted strike-aligned rail tabs so they stop behaving as full-chain-only views.
 - **Fixed N-strikes-around-spot window.** Bottom tabs stay percentage-range-based.
 - **Vomma / Speed / Color bottom tabs.** Already computed server-side; tabs are hidden. Not in this phase.
 - **Moving the "Exposure Metric" dropdown** (OI vs Volume weighting for greek aggregation). Works as designed.
