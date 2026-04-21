@@ -6625,11 +6625,84 @@ def index():
             font-size: 12px;
             flex: 0 0 auto;
         }
+        .dealer-impact-overview {
+            padding: 8px 9px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-0);
+            margin-bottom: 2px;
+        }
+        .dealer-impact-overview-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+        .dealer-impact-overview-label {
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+        .dealer-impact-overview-chip {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: var(--bg-2);
+            color: var(--fg-1);
+            font-size: 10px;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .dealer-impact-overview-chip.pos { color: var(--call); }
+        .dealer-impact-overview-chip.neg { color: var(--put); }
+        .dealer-impact-overview-title {
+            color: var(--fg-0);
+            font-size: 14px;
+            font-weight: 650;
+            line-height: 1.25;
+        }
+        .dealer-impact-overview-title.pos { color: var(--call); }
+        .dealer-impact-overview-title.neg { color: var(--put); }
+        .dealer-impact-overview-sub {
+            margin-top: 3px;
+            color: var(--fg-1);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .dealer-impact-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 2px;
+        }
+        .dealer-impact-legend span {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 7px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: var(--bg-2);
+            font-size: 10px;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+        }
+        .dealer-impact-legend .pos { color: var(--call); }
+        .dealer-impact-legend .neg { color: var(--put); }
         .dealer-impact-row {
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto;
             gap: 10px;
             align-items: center;
+        }
+        .dealer-impact-row + .dealer-impact-row {
+            padding-top: 7px;
+            border-top: 1px solid var(--border);
         }
         .dealer-impact-copy { min-width: 0; }
         .dealer-impact .label {
@@ -6645,6 +6718,13 @@ def index():
             margin-top: 2px;
             line-height: 1.3;
         }
+        .dealer-impact-read {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 2px;
+        }
         .dealer-impact .val   {
             font-variant-numeric: tabular-nums;
             text-align: right;
@@ -6655,6 +6735,34 @@ def index():
         }
         .dealer-impact .val.pos { color: var(--call); }
         .dealer-impact .val.neg { color: var(--put); }
+        .dealer-impact-cue {
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.25;
+            text-align: right;
+        }
+        .dealer-impact-cue.pos { color: var(--call); }
+        .dealer-impact-cue.neg { color: var(--put); }
+        .dealer-impact-summary {
+            margin-top: 4px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+            color: var(--fg-1);
+            font-size: 10px;
+            line-height: 1.45;
+        }
+        .dealer-impact.compact .dealer-impact-legend,
+        .dealer-impact.compact .dealer-impact-cue,
+        .dealer-impact.compact .dealer-impact-summary,
+        .dealer-impact.compact .sub {
+            display: none;
+        }
+        .dealer-impact.compact .dealer-impact-row + .dealer-impact-row {
+            padding-top: 6px;
+        }
+        .dealer-impact.compact .dealer-impact-read {
+            gap: 0;
+        }
 
         /* ── Phase 3 Stage 2 — rail card system ───────────────────────── */
         .rail-card {
@@ -6761,6 +6869,13 @@ def index():
             border-radius: 3px;
             margin: 8px 0;
         }
+        .rail-range-value {
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.35;
+        }
         .rail-range-em {
             position: absolute;
             top: 0;
@@ -6784,6 +6899,12 @@ def index():
             font-size: 10px;
             color: var(--fg-2);
             font-variant-numeric: tabular-nums;
+        }
+        .rail-range-caption {
+            margin-top: 7px;
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.4;
         }
         .rail-profile-dot {
             display: inline-block;
@@ -8589,6 +8710,10 @@ def index():
                             <input type="checkbox" id="gate_alerts" checked>
                             <label for="gate_alerts">Only alert near key levels</label>
                         </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="dealer_impact_verbose">
+                            <label for="dealer_impact_verbose">Verbose dealer cues</label>
+                        </div>
                     </div>
                 </details>
                 <details class="drawer-section">
@@ -8700,7 +8825,11 @@ def index():
                         </div>
                     </div>
                     <div class="rail-card" id="rail-card-range">
-                        <div class="rail-card-header">Range · EM <span data-met="em_pct"></span></div>
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Expected Move <span data-met="em_pct"></span></div>
+                            <div class="rail-card-note" data-met="em_type">ATM straddle</div>
+                        </div>
+                        <div class="rail-range-value" data-met="em_band_label">—</div>
                         <div class="rail-range-track">
                             <div class="rail-range-em" data-met="em_band"></div>
                             <div class="rail-range-marker" data-met="price_marker"></div>
@@ -8709,6 +8838,7 @@ def index():
                             <span data-met="range_low">—</span>
                             <span data-met="range_high">—</span>
                         </div>
+                        <div class="rail-range-caption" data-met="em_context">Uses the current ATM straddle, not flow alone.</div>
                     </div>
                     <div class="rail-card" id="rail-card-profile">
                         <div class="rail-card-header">Gamma Profile</div>
@@ -8721,29 +8851,57 @@ def index():
                     <div class="rail-card" id="rail-card-dealer">
                         <div class="rail-card-header-row">
                             <div class="rail-card-header">Dealer Impact</div>
-                            <div class="rail-card-note">Compact hedge read</div>
+                            <div class="rail-card-note">Hedge response</div>
                         </div>
                         <div class="dealer-impact" id="dealer-impact">
-                            <div class="dealer-impact-row">
-                                <div class="dealer-impact-copy"><div class="label">Spot +1%</div><div class="sub">dealers buy / sell</div></div>
-                                <div class="val" data-di="hedge_on_up_1pct">—</div>
+                            <div class="dealer-impact-overview">
+                                <div class="dealer-impact-overview-head">
+                                    <div class="dealer-impact-overview-label">Combined read</div>
+                                    <div class="dealer-impact-overview-chip" data-met="dealer_conviction">—</div>
+                                </div>
+                                <div class="dealer-impact-overview-title" data-met="dealer_headline">—</div>
+                                <div class="dealer-impact-overview-sub" data-met="dealer_subhead">—</div>
+                            </div>
+                            <div class="dealer-impact-legend">
+                                <span class="pos">+ buy to hedge</span>
+                                <span class="neg">- sell to hedge</span>
                             </div>
                             <div class="dealer-impact-row">
-                                <div class="dealer-impact-copy"><div class="label">Spot −1%</div><div class="sub">dealers buy / sell</div></div>
-                                <div class="val" data-di="hedge_on_down_1pct">—</div>
+                                <div class="dealer-impact-copy"><div class="label">Spot +1%</div><div class="sub">hedge flow if spot lifts 1%</div></div>
+                                <div class="dealer-impact-read">
+                                    <div class="val" data-di="hedge_on_up_1pct">—</div>
+                                    <div class="dealer-impact-cue" data-di-cue="hedge_on_up_1pct">—</div>
+                                </div>
                             </div>
                             <div class="dealer-impact-row">
-                                <div class="dealer-impact-copy"><div class="label">Vol +1 pt</div><div class="sub">vanna delta shift</div></div>
-                                <div class="val" data-di="vanna_up_1">—</div>
+                                <div class="dealer-impact-copy"><div class="label">Spot −1%</div><div class="sub">hedge flow if spot drops 1%</div></div>
+                                <div class="dealer-impact-read">
+                                    <div class="val" data-di="hedge_on_down_1pct">—</div>
+                                    <div class="dealer-impact-cue" data-di-cue="hedge_on_down_1pct">—</div>
+                                </div>
                             </div>
                             <div class="dealer-impact-row">
-                                <div class="dealer-impact-copy"><div class="label">Vol −1 pt</div><div class="sub">vanna delta shift</div></div>
-                                <div class="val" data-di="vanna_down_1">—</div>
+                                <div class="dealer-impact-copy"><div class="label">Vol +1 pt</div><div class="sub">delta shift from a 1-point IV rise</div></div>
+                                <div class="dealer-impact-read">
+                                    <div class="val" data-di="vanna_up_1">—</div>
+                                    <div class="dealer-impact-cue" data-di-cue="vanna_up_1">—</div>
+                                </div>
                             </div>
                             <div class="dealer-impact-row">
-                                <div class="dealer-impact-copy"><div class="label">Charm by close</div><div class="sub">intraday delta decay</div></div>
-                                <div class="val" data-di="charm_by_close">—</div>
+                                <div class="dealer-impact-copy"><div class="label">Vol −1 pt</div><div class="sub">delta shift from a 1-point IV drop</div></div>
+                                <div class="dealer-impact-read">
+                                    <div class="val" data-di="vanna_down_1">—</div>
+                                    <div class="dealer-impact-cue" data-di-cue="vanna_down_1">—</div>
+                                </div>
                             </div>
+                            <div class="dealer-impact-row">
+                                <div class="dealer-impact-copy"><div class="label">Charm by close</div><div class="sub">delta bleed projected into 16:00 ET</div></div>
+                                <div class="dealer-impact-read">
+                                    <div class="val" data-di="charm_by_close">—</div>
+                                    <div class="dealer-impact-cue" data-di-cue="charm_by_close">—</div>
+                                </div>
+                            </div>
+                            <div class="dealer-impact-summary" data-met="dealer_takeaway">Positive values indicate dealer buying to hedge; negative values indicate dealer selling to hedge.</div>
                         </div>
                     </div>
                     <div class="rail-card" id="rail-card-activity">
@@ -8929,6 +9087,7 @@ def index():
         // Share the chart-visibility store but render under a separate drawer group.
         const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2', 'historical_dots'];
         const ALERT_GATE_KEY = 'gex.gateAlerts';
+        const DEALER_DETAIL_KEY = 'gex.dealerImpactVerbose';
         const CHART_VISIBILITY_DEFAULTS = {
             price: true, gamma: true, delta: true, vanna: true, charm: true,
             speed: false, vomma: false, color: false,
@@ -9025,15 +9184,34 @@ def index():
                 return true;
             }
         })();
+        let dealerImpactVerbose = (() => {
+            try {
+                return localStorage.getItem(DEALER_DETAIL_KEY) === '1';
+            } catch (e) {
+                return false;
+            }
+        })();
         function syncAlertGateCheckbox() {
             const cb = document.getElementById('gate_alerts');
             if (cb) cb.checked = !!gateAlertsNearKeyLevels;
+        }
+        function syncDealerDetailCheckbox() {
+            const cb = document.getElementById('dealer_impact_verbose');
+            if (cb) cb.checked = !!dealerImpactVerbose;
         }
         function setAlertGateSetting(next, persist = true) {
             gateAlertsNearKeyLevels = !!next;
             syncAlertGateCheckbox();
             if (!persist) return;
             try { localStorage.setItem(ALERT_GATE_KEY, gateAlertsNearKeyLevels ? '1' : '0'); } catch (e) {}
+        }
+        function setDealerDetailSetting(next, persist = true) {
+            dealerImpactVerbose = !!next;
+            syncDealerDetailCheckbox();
+            const el = document.getElementById('dealer-impact');
+            if (el) el.classList.toggle('compact', !dealerImpactVerbose);
+            if (!persist) return;
+            try { localStorage.setItem(DEALER_DETAIL_KEY, dealerImpactVerbose ? '1' : '0'); } catch (e) {}
         }
 
         // List of Plotly chart div IDs that carry a current-price line shape
@@ -12564,7 +12742,11 @@ def index():
                         '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-range">' +
-                        '<div class="rail-card-header">Range · EM <span data-met="em_pct"></span></div>' +
+                        '<div class="rail-card-header-row">' +
+                            '<div class="rail-card-header">Expected Move <span data-met="em_pct"></span></div>' +
+                            '<div class="rail-card-note" data-met="em_type">ATM straddle</div>' +
+                        '</div>' +
+                        '<div class="rail-range-value" data-met="em_band_label">—</div>' +
                         '<div class="rail-range-track">' +
                             '<div class="rail-range-em" data-met="em_band"></div>' +
                             '<div class="rail-range-marker" data-met="price_marker"></div>' +
@@ -12573,6 +12755,7 @@ def index():
                             '<span data-met="range_low">—</span>' +
                             '<span data-met="range_high">—</span>' +
                         '</div>' +
+                        '<div class="rail-range-caption" data-met="em_context">Uses the current ATM straddle, not flow alone.</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-profile">' +
                         '<div class="rail-card-header">Gamma Profile</div>' +
@@ -12585,29 +12768,57 @@ def index():
                     '<div class="rail-card" id="rail-card-dealer">' +
                         '<div class="rail-card-header-row">' +
                             '<div class="rail-card-header">Dealer Impact</div>' +
-                            '<div class="rail-card-note">Compact hedge read</div>' +
+                            '<div class="rail-card-note">Hedge response</div>' +
                         '</div>' +
                         '<div class="dealer-impact" id="dealer-impact">' +
-                            '<div class="dealer-impact-row">' +
-                                '<div class="dealer-impact-copy"><div class="label">Spot +1%</div><div class="sub">dealers buy / sell</div></div>' +
-                                '<div class="val" data-di="hedge_on_up_1pct">—</div>' +
+                            '<div class="dealer-impact-overview">' +
+                                '<div class="dealer-impact-overview-head">' +
+                                    '<div class="dealer-impact-overview-label">Combined read</div>' +
+                                    '<div class="dealer-impact-overview-chip" data-met="dealer_conviction">—</div>' +
+                                '</div>' +
+                                '<div class="dealer-impact-overview-title" data-met="dealer_headline">—</div>' +
+                                '<div class="dealer-impact-overview-sub" data-met="dealer_subhead">—</div>' +
+                            '</div>' +
+                            '<div class="dealer-impact-legend">' +
+                                '<span class="pos">+ buy to hedge</span>' +
+                                '<span class="neg">- sell to hedge</span>' +
                             '</div>' +
                             '<div class="dealer-impact-row">' +
-                                '<div class="dealer-impact-copy"><div class="label">Spot −1%</div><div class="sub">dealers buy / sell</div></div>' +
-                                '<div class="val" data-di="hedge_on_down_1pct">—</div>' +
+                                '<div class="dealer-impact-copy"><div class="label">Spot +1%</div><div class="sub">hedge flow if spot lifts 1%</div></div>' +
+                                '<div class="dealer-impact-read">' +
+                                    '<div class="val" data-di="hedge_on_up_1pct">—</div>' +
+                                    '<div class="dealer-impact-cue" data-di-cue="hedge_on_up_1pct">—</div>' +
+                                '</div>' +
                             '</div>' +
                             '<div class="dealer-impact-row">' +
-                                '<div class="dealer-impact-copy"><div class="label">Vol +1 pt</div><div class="sub">vanna delta shift</div></div>' +
-                                '<div class="val" data-di="vanna_up_1">—</div>' +
+                                '<div class="dealer-impact-copy"><div class="label">Spot −1%</div><div class="sub">hedge flow if spot drops 1%</div></div>' +
+                                '<div class="dealer-impact-read">' +
+                                    '<div class="val" data-di="hedge_on_down_1pct">—</div>' +
+                                    '<div class="dealer-impact-cue" data-di-cue="hedge_on_down_1pct">—</div>' +
+                                '</div>' +
                             '</div>' +
                             '<div class="dealer-impact-row">' +
-                                '<div class="dealer-impact-copy"><div class="label">Vol −1 pt</div><div class="sub">vanna delta shift</div></div>' +
-                                '<div class="val" data-di="vanna_down_1">—</div>' +
+                                '<div class="dealer-impact-copy"><div class="label">Vol +1 pt</div><div class="sub">delta shift from a 1-point IV rise</div></div>' +
+                                '<div class="dealer-impact-read">' +
+                                    '<div class="val" data-di="vanna_up_1">—</div>' +
+                                    '<div class="dealer-impact-cue" data-di-cue="vanna_up_1">—</div>' +
+                                '</div>' +
                             '</div>' +
                             '<div class="dealer-impact-row">' +
-                                '<div class="dealer-impact-copy"><div class="label">Charm by close</div><div class="sub">intraday delta decay</div></div>' +
-                                '<div class="val" data-di="charm_by_close">—</div>' +
+                                '<div class="dealer-impact-copy"><div class="label">Vol −1 pt</div><div class="sub">delta shift from a 1-point IV drop</div></div>' +
+                                '<div class="dealer-impact-read">' +
+                                    '<div class="val" data-di="vanna_down_1">—</div>' +
+                                    '<div class="dealer-impact-cue" data-di-cue="vanna_down_1">—</div>' +
+                                '</div>' +
                             '</div>' +
+                            '<div class="dealer-impact-row">' +
+                                '<div class="dealer-impact-copy"><div class="label">Charm by close</div><div class="sub">delta bleed projected into 16:00 ET</div></div>' +
+                                '<div class="dealer-impact-read">' +
+                                    '<div class="val" data-di="charm_by_close">—</div>' +
+                                    '<div class="dealer-impact-cue" data-di-cue="charm_by_close">—</div>' +
+                                '</div>' +
+                            '</div>' +
+                            '<div class="dealer-impact-summary" data-met="dealer_takeaway">Positive values indicate dealer buying to hedge; negative values indicate dealer selling to hedge.</div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-activity">' +
@@ -13429,22 +13640,179 @@ def index():
         function renderDealerImpact(stats) {
             const el = document.getElementById('dealer-impact');
             if (!el) return;
+            el.classList.toggle('compact', !dealerImpactVerbose);
+            const setCue = (key, tone, text) => {
+                const n = el.querySelector('[data-di-cue="' + key + '"]');
+                if (!n) return;
+                n.textContent = text || '—';
+                n.classList.remove('pos', 'neg');
+                if (tone) n.classList.add(tone);
+            };
+            const setMetTone = (key, tone, text) => {
+                const n = document.querySelector('[data-met="' + key + '"]');
+                if (!n) return;
+                n.textContent = text == null ? '—' : text;
+                n.classList.remove('pos', 'neg');
+                if (tone) n.classList.add(tone);
+            };
+            const describeStrength = score => {
+                const abs = Math.abs(score);
+                if (abs < 0.18) return 'Neutral';
+                if (abs < 0.45) return 'Slight';
+                if (abs < 0.72) return 'Moderate';
+                return 'Strong';
+            };
+            const buildDealerOverview = s => {
+                if (!s) {
+                    return {
+                        headline: 'Dealer read unavailable',
+                        subhead: 'Waiting for live stats.',
+                        conviction: '—',
+                        tone: '',
+                    };
+                }
+                const up = Number.isFinite(s.hedge_on_up_1pct) ? s.hedge_on_up_1pct : null;
+                const down = Number.isFinite(s.hedge_on_down_1pct) ? s.hedge_on_down_1pct : null;
+                const vanna = Number.isFinite(s.vanna_delta_shift_per_1volpt) ? s.vanna_delta_shift_per_1volpt : null;
+                const charm = Number.isFinite(s.charm_by_close) ? s.charm_by_close : null;
+                let structure = 'mixed';
+                if (up != null && down != null) {
+                    if (up < 0 && down > 0) structure = 'mean_revert';
+                    else if (up > 0 && down < 0) structure = 'momentum';
+                }
+                const parts = [];
+                if (vanna != null) parts.push(vanna);
+                if (charm != null) parts.push(charm * 0.75);
+                const numer = parts.reduce((sum, v) => sum + v, 0);
+                const denom = parts.reduce((sum, v) => sum + Math.abs(v), 0);
+                const biasScore = denom > 0 ? (numer / denom) : 0;
+                const biasStrength = describeStrength(biasScore).toLowerCase();
+                let tone = '';
+                if (biasScore > 0.18) tone = 'pos';
+                else if (biasScore < -0.18) tone = 'neg';
+                const structureClarity = structure === 'mixed' ? 0.4 : 0.95;
+                const convictionScore = Math.round((0.55 * structureClarity + 0.45 * Math.abs(biasScore)) * 100);
+                const conviction = convictionScore >= 72 ? 'High edge'
+                    : convictionScore >= 48 ? 'Usable'
+                    : 'Low edge';
+                if (structure === 'mean_revert') {
+                    if (tone === 'pos') {
+                        return {
+                            headline: 'Chop with bullish support',
+                            subhead: `${biasStrength} bullish hedge tilt. Spot hedging fades moves first.`,
+                            conviction,
+                            tone,
+                        };
+                    }
+                    if (tone === 'neg') {
+                        return {
+                            headline: 'Chop with bearish pressure',
+                            subhead: `${biasStrength} bearish hedge tilt. Spot hedging still leans mean reversion.`,
+                            conviction,
+                            tone,
+                        };
+                    }
+                    return {
+                        headline: 'Chop / mean reversion',
+                        subhead: 'Spot hedging fades both directions. Good for lower follow-through unless flow overwhelms it.',
+                        conviction,
+                        tone: '',
+                    };
+                }
+                if (structure === 'momentum') {
+                    if (tone === 'pos') {
+                        return {
+                            headline: 'Bullish momentum risk',
+                            subhead: `${biasStrength} bullish hedge tilt. Rips can extend if vol/charm keep leaning positive.`,
+                            conviction,
+                            tone,
+                        };
+                    }
+                    if (tone === 'neg') {
+                        return {
+                            headline: 'Bearish momentum risk',
+                            subhead: `${biasStrength} bearish hedge tilt. Dealers are more likely to reinforce downside moves.`,
+                            conviction,
+                            tone,
+                        };
+                    }
+                    return {
+                        headline: 'Momentum-sensitive tape',
+                        subhead: 'Spot hedging reinforces moves. Directional edge is mixed, but follow-through risk is elevated.',
+                        conviction,
+                        tone: '',
+                    };
+                }
+                if (tone === 'pos') {
+                    return {
+                        headline: 'Mixed read, bullish tilt',
+                        subhead: `${biasStrength} bullish tilt from vanna/charm. Spot-response rows are not aligned cleanly.`,
+                        conviction,
+                        tone,
+                    };
+                }
+                if (tone === 'neg') {
+                    return {
+                        headline: 'Mixed read, bearish tilt',
+                        subhead: `${biasStrength} bearish tilt from vanna/charm. Spot-response rows are not aligned cleanly.`,
+                        conviction,
+                        tone,
+                    };
+                }
+                return {
+                    headline: 'Mixed / low edge',
+                    subhead: 'Signals conflict. Use the raw rows as context, not a standalone trigger.',
+                    conviction,
+                    tone: '',
+                };
+            };
+            const cueFor = (key, v) => {
+                if (v == null || !isFinite(v) || v === 0) return { tone: '', text: 'balanced hedge read' };
+                const pos = v > 0;
+                if (key === 'hedge_on_up_1pct') {
+                    return { tone: pos ? 'pos' : 'neg', text: pos ? 'buy into strength' : 'sell into strength' };
+                }
+                if (key === 'hedge_on_down_1pct') {
+                    return { tone: pos ? 'pos' : 'neg', text: pos ? 'buy the dip' : 'sell the dip' };
+                }
+                if (key === 'vanna_up_1') {
+                    return { tone: pos ? 'pos' : 'neg', text: pos ? 'higher vol adds long delta' : 'higher vol adds short delta' };
+                }
+                if (key === 'vanna_down_1') {
+                    return { tone: pos ? 'pos' : 'neg', text: pos ? 'lower vol adds long delta' : 'lower vol adds short delta' };
+                }
+                if (key === 'charm_by_close') {
+                    return { tone: pos ? 'pos' : 'neg', text: pos ? 'delta firms into close' : 'delta fades into close' };
+                }
+                return { tone: '', text: '—' };
+            };
             const set = (key, v) => {
                 const n = el.querySelector('[data-di="' + key + '"]');
                 if (!n) return;
                 if (v == null || !isFinite(v)) {
                     n.textContent = '—';
                     n.classList.remove('pos', 'neg');
+                    setCue(key, '', '—');
                     return;
                 }
                 const sign = v > 0 ? '+' : '';
                 n.textContent = sign + fmtMoneyCompact(v);
                 n.classList.remove('pos', 'neg');
                 if (v !== 0) n.classList.add(v > 0 ? 'pos' : 'neg');
+                const cue = cueFor(key, v);
+                setCue(key, cue.tone, cue.text);
             };
+            const takeawayEl = document.querySelector('[data-met="dealer_takeaway"]');
             if (!stats) {
                 ['hedge_on_up_1pct','hedge_on_down_1pct','vanna_up_1','vanna_down_1','charm_by_close']
                     .forEach(k => set(k, null));
+                const overview = buildDealerOverview(null);
+                setMetTone('dealer_conviction', overview.tone, overview.conviction);
+                setMetTone('dealer_headline', overview.tone, overview.headline);
+                setMetTone('dealer_subhead', '', overview.subhead);
+                if (takeawayEl) {
+                    takeawayEl.textContent = 'Positive values indicate dealer buying to hedge; negative values indicate dealer selling to hedge.';
+                }
                 return;
             }
             set('hedge_on_up_1pct',   stats.hedge_on_up_1pct);
@@ -13453,6 +13821,19 @@ def index():
             set('vanna_down_1',       stats.vanna_delta_shift_per_1volpt == null
                                         ? null : -stats.vanna_delta_shift_per_1volpt);
             set('charm_by_close',     stats.charm_by_close);
+            const overview = buildDealerOverview(stats);
+            setMetTone('dealer_conviction', overview.tone, overview.conviction);
+            setMetTone('dealer_headline', overview.tone, overview.headline);
+            setMetTone('dealer_subhead', '', overview.subhead);
+            if (takeawayEl) {
+                if (stats.regime === 'Long Gamma') {
+                    takeawayEl.textContent = 'Long-gamma posture: dealers usually buy dips and sell rips, which tends to dampen follow-through.';
+                } else if (stats.regime === 'Short Gamma') {
+                    takeawayEl.textContent = 'Short-gamma posture: dealers usually sell dips and buy rips, which can reinforce momentum.';
+                } else {
+                    takeawayEl.textContent = 'Positive values indicate dealer buying to hedge; negative values indicate dealer selling to hedge.';
+                }
+            }
         }
 
         // ── Right-rail alerts panel ──────────────────────────────────────
@@ -14314,15 +14695,19 @@ def index():
             if (typeof low !== 'number' || typeof high !== 'number' || high <= low) {
                 _setMet('range_low',  '—');
                 _setMet('range_high', '—');
+                _setMet('em_type', 'ATM straddle');
+                _setMet('em_band_label', '—');
+                _setMet('em_context', 'Uses the current ATM straddle, not flow alone.');
                 return;
             }
             const range = high - low;
             const pct = Math.max(0, Math.min(1, (price - low) / range));
             const marker = document.querySelector('#rail-card-range [data-met="price_marker"]');
             if (marker) marker.style.left = (pct * 100).toFixed(2) + '%';
-            _setMet('range_low',  '$' + low.toFixed(2));
-            _setMet('range_high', '$' + high.toFixed(2));
+            _setMet('range_low',  'Day low $' + low.toFixed(2));
+            _setMet('range_high', 'Day high $' + high.toFixed(2));
             const band = document.querySelector('#rail-card-range [data-met="em_band"]');
+            _setMet('em_type', 'ATM straddle');
             if (info.expected_move_range && typeof info.expected_move_range.lower === 'number'
                                          && typeof info.expected_move_range.upper === 'number') {
                 const emLo = info.expected_move_range.lower;
@@ -14334,11 +14719,18 @@ def index():
                     band.style.width = ((b - a) * 100).toFixed(2) + '%';
                     band.style.display = '';
                 }
+                _setMet('em_band_label', '$' + emLo.toFixed(2) + ' to $' + emHi.toFixed(2));
                 const upperPct = info.expected_move_range.upper_pct;
                 _setMet('em_pct', (upperPct != null) ? ('±' + Math.abs(upperPct).toFixed(2) + '%') : '');
+                let context = 'Spot is inside the implied band.';
+                if (typeof price === 'number' && price > emHi) context = 'Spot is above the implied upper band.';
+                else if (typeof price === 'number' && price < emLo) context = 'Spot is below the implied lower band.';
+                _setMet('em_context', context + ' Based on the current ATM straddle, not a flow-only forecast.');
             } else {
                 if (band) band.style.display = 'none';
+                _setMet('em_band_label', 'Implied move unavailable');
                 _setMet('em_pct', '');
+                _setMet('em_context', 'Uses the current ATM straddle when bid/ask data is available.');
             }
         }
 
@@ -14876,6 +15268,7 @@ def index():
         
         document.getElementById('streamToggle').addEventListener('click', toggleStreaming);
         syncAlertGateCheckbox();
+        syncDealerDetailCheckbox();
         const gateAlertsToggle = document.getElementById('gate_alerts');
         if (gateAlertsToggle) {
             gateAlertsToggle.addEventListener('change', () => {
@@ -14883,11 +15276,18 @@ def index():
                 updateData();
             });
         }
+        const dealerDetailToggle = document.getElementById('dealer_impact_verbose');
+        if (dealerDetailToggle) {
+            dealerDetailToggle.addEventListener('change', () => {
+                setDealerDetailSetting(dealerDetailToggle.checked);
+                renderDealerImpact(_lastStats);
+            });
+        }
 
         // Settings save/load functions
         function gatherSettings() {
             return {
-                settings_schema_version: 2,
+                settings_schema_version: 3,
                 ticker: document.getElementById('ticker').value,
                 timeframe: document.getElementById('timeframe').value,
                 strike_range: document.getElementById('strike_range').value,
@@ -14916,6 +15316,7 @@ def index():
                 max_level_color: document.getElementById('max_level_color').value,
                 max_level_mode: document.getElementById('max_level_mode').value,
                 gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
+                dealer_impact_verbose: !!(document.getElementById('dealer_impact_verbose') && document.getElementById('dealer_impact_verbose').checked),
                 em_range_locked: emRangeLocked,
                 // Chart visibility
                 charts: getChartVisibility()
@@ -14985,6 +15386,11 @@ def index():
             }
             if (settings.gate_alerts !== undefined) {
                 setAlertGateSetting(settings.gate_alerts);
+            }
+            if (settings.dealer_impact_verbose !== undefined) {
+                setDealerDetailSetting(settings.dealer_impact_verbose);
+            } else if (settingsSchemaVersion < 3) {
+                setDealerDetailSetting(false);
             }
             if (settings.em_range_locked !== undefined) {
                 setEmRangeLocked(settings.em_range_locked);
