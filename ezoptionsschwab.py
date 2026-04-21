@@ -4219,9 +4219,11 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     out['net_dex'] = dex_call + dex_put
 
     # Dealer Hedge Impact block (Stage 2)
-    # Spot ±1%: same 1% hedge number, signed so ± sides render independently.
-    out['hedge_on_up_1pct']   = +0.01 * net_gex
-    out['hedge_on_down_1pct'] = -0.01 * net_gex
+    # Spot ±1%: signed dealer hedge flow for the move direction.
+    # Long-gamma posture fades moves (sell strength / buy weakness);
+    # short-gamma posture reinforces them (buy strength / sell weakness).
+    out['hedge_on_up_1pct']   = -0.01 * net_gex
+    out['hedge_on_down_1pct'] = +0.01 * net_gex
 
     # Vanna delta-shift per +1 vol point. VEX row values already carry the *0.01
     # factor (see compute_greek_exposures :1408), so the window sum is directly
@@ -13676,7 +13678,9 @@ def index():
                 const vanna = Number.isFinite(s.vanna_delta_shift_per_1volpt) ? s.vanna_delta_shift_per_1volpt : null;
                 const charm = Number.isFinite(s.charm_by_close) ? s.charm_by_close : null;
                 let structure = 'mixed';
-                if (up != null && down != null) {
+                if (s.regime === 'Long Gamma') structure = 'mean_revert';
+                else if (s.regime === 'Short Gamma') structure = 'momentum';
+                else if (up != null && down != null) {
                     if (up < 0 && down > 0) structure = 'mean_revert';
                     else if (up > 0 && down < 0) structure = 'momentum';
                 }
