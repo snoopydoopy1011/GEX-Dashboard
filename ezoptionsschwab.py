@@ -2136,38 +2136,124 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
     # Create figure
     fig = go.Figure()
     max_side_volume = max(call_volume + put_volume + [1.0])
+    max_total_volume = max(total_volume + [1.0])
     max_net_volume = max([abs(val) for val in net_volume] + [1.0])
     label_threshold = max_side_volume * 0.16
+    poc_idx = total_volume.index(max_total_volume) if all_strikes_list and max_total_volume > 0 else None
+    atm_idx = min(range(len(all_strikes_list)), key=lambda idx: abs(all_strikes_list[idx] - S)) if all_strikes_list else None
 
     def _call_put_customdata():
         return [
-            [format_large_number(call), format_large_number(put), format_large_number(total)]
-            for call, put, total in zip(call_volume, put_volume, total_volume)
+            [format_large_number(call), format_large_number(put), format_large_number(total), format_large_number(net)]
+            for call, put, total, net in zip(call_volume, put_volume, total_volume, net_volume)
+        ]
+
+    def _format_strike_label(strike):
+        return f"{strike:.2f}".rstrip('0').rstrip('.')
+
+    def _build_strike_tick_labels():
+        if not all_strikes_list:
+            return []
+        if not show_totals or not horizontal:
+            return [_format_strike_label(strike) for strike in all_strikes_list]
+        return [
+            f"{_format_strike_label(strike)} ({format_large_number(total)})"
+            for strike, total in zip(all_strikes_list, total_volume)
         ]
 
     customdata = _call_put_customdata()
+    strike_ticktext = _build_strike_tick_labels()
     call_text = [format_large_number(val) if show_totals and val >= label_threshold else '' for val in call_volume]
     put_text = [format_large_number(val) if show_totals and val >= label_threshold else '' for val in put_volume]
 
-    # Add call volume bars
-    if show_calls and all_strikes_list:
+    if horizontal and all_strikes_list:
         call_colors = get_colors(call_color, call_volume, max_side_volume, coloring_mode)
-        if horizontal:
+        put_colors = get_colors(put_color, put_volume, max_side_volume, coloring_mode)
+        row_count = len(all_strikes_list)
+
+        call_major_x = [0.0] * row_count
+        put_major_x = [0.0] * row_count
+        call_minor_x = [0.0] * row_count
+        put_minor_x = [0.0] * row_count
+        call_major_line_widths = [0] * row_count
+        put_major_line_widths = [0] * row_count
+        call_minor_line_widths = [0] * row_count
+        put_minor_line_widths = [0] * row_count
+
+        for idx, (call_val, put_val) in enumerate(zip(call_volume, put_volume)):
+            if call_val >= put_val:
+                if show_calls and call_val > 0:
+                    call_major_x[idx] = -call_val
+                    call_major_line_widths[idx] = 4 if highlight_max_level and idx == poc_idx else 0
+                if show_puts and put_val > 0:
+                    put_minor_x[idx] = -put_val
+                    put_minor_line_widths[idx] = 4 if highlight_max_level and idx == poc_idx else 0
+            else:
+                if show_puts and put_val > 0:
+                    put_major_x[idx] = -put_val
+                    put_major_line_widths[idx] = 4 if highlight_max_level and idx == poc_idx else 0
+                if show_calls and call_val > 0:
+                    call_minor_x[idx] = -call_val
+                    call_minor_line_widths[idx] = 4 if highlight_max_level and idx == poc_idx else 0
+
+        def _add_overlay_volume_trace(name, x_values, colors, hovertemplate, line_widths, show_in_legend):
+            if not any(abs(val) > 0 for val in x_values):
+                return
             fig.add_trace(go.Bar(
                 y=all_strikes_list,
-                x=call_volume,
-                name='Calls',
-                marker_color=call_colors,
+                x=x_values,
+                name=name,
+                legendgroup=name,
+                showlegend=show_in_legend,
+                marker=dict(
+                    color=colors,
+                    line=dict(width=line_widths, color=max_level_color),
+                ),
                 customdata=customdata,
-                text=call_text,
+                text=[''] * row_count,
                 textposition='inside',
                 insidetextanchor='middle',
                 textfont=dict(size=10, color='#E5E7EB'),
                 orientation='h',
-                hovertemplate='Strike: %{y}<br>Calls: %{customdata[0]}<br>Puts: %{customdata[1]}<br>Total: %{customdata[2]}<extra></extra>',
-                marker_line_width=0
+                hovertemplate=hovertemplate,
             ))
-        else:
+
+        _add_overlay_volume_trace(
+            'Calls',
+            call_major_x,
+            call_colors,
+            'Strike: %{y}<br>Calls: %{customdata[0]}<br>Puts: %{customdata[1]}<br>Total: %{customdata[2]}<extra></extra>',
+            call_major_line_widths,
+            not any(abs(val) > 0 for val in call_minor_x),
+        )
+        _add_overlay_volume_trace(
+            'Puts',
+            put_major_x,
+            put_colors,
+            'Strike: %{y}<br>Puts: %{customdata[1]}<br>Calls: %{customdata[0]}<br>Total: %{customdata[2]}<extra></extra>',
+            put_major_line_widths,
+            not any(abs(val) > 0 for val in put_minor_x),
+        )
+        _add_overlay_volume_trace(
+            'Calls',
+            call_minor_x,
+            call_colors,
+            'Strike: %{y}<br>Calls: %{customdata[0]}<br>Puts: %{customdata[1]}<br>Total: %{customdata[2]}<extra></extra>',
+            call_minor_line_widths,
+            any(abs(val) > 0 for val in call_minor_x),
+        )
+        _add_overlay_volume_trace(
+            'Puts',
+            put_minor_x,
+            put_colors,
+            'Strike: %{y}<br>Puts: %{customdata[1]}<br>Calls: %{customdata[0]}<br>Total: %{customdata[2]}<extra></extra>',
+            put_minor_line_widths,
+            any(abs(val) > 0 for val in put_minor_x),
+        )
+    else:
+        # Add call volume bars
+        if show_calls and all_strikes_list:
+            call_colors = get_colors(call_color, call_volume, max_side_volume, coloring_mode)
             fig.add_trace(go.Bar(
                 x=all_strikes_list,
                 y=call_volume,
@@ -2182,25 +2268,9 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
                 marker_line_width=0
             ))
 
-    # Add put volume bars mirrored from zero so the split is visible at each strike.
-    if show_puts and all_strikes_list:
-        put_colors = get_colors(put_color, put_volume, max_side_volume, coloring_mode)
-        if horizontal:
-            fig.add_trace(go.Bar(
-                y=all_strikes_list,
-                x=[-v for v in put_volume],
-                name='Puts',
-                marker_color=put_colors,
-                customdata=customdata,
-                text=put_text,
-                textposition='inside',
-                insidetextanchor='middle',
-                textfont=dict(size=10, color='#E5E7EB'),
-                orientation='h',
-                hovertemplate='Strike: %{y}<br>Puts: %{customdata[1]}<br>Calls: %{customdata[0]}<br>Total: %{customdata[2]}<extra></extra>',
-                marker_line_width=0
-            ))
-        else:
+        # Add put volume bars mirrored from zero so the split is visible at each strike.
+        if show_puts and all_strikes_list:
+            put_colors = get_colors(put_color, put_volume, max_side_volume, coloring_mode)
             fig.add_trace(go.Bar(
                 x=all_strikes_list,
                 y=[-v for v in put_volume],
@@ -2225,7 +2295,7 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
             ]
             fig.add_trace(go.Scatter(
                 y=all_strikes_list,
-                x=net_volume,
+                x=[-total if total > 0 else None for total in total_volume],
                 name='Net',
                 mode='markers',
                 customdata=customdata,
@@ -2235,7 +2305,7 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
                     symbol='circle',
                     line=dict(color='rgba(255,255,255,0.18)', width=1),
                 ),
-                hovertemplate='Strike: %{y}<br>Net: %{x:,.0f}<br>Calls: %{customdata[0]}<br>Puts: %{customdata[1]}<extra></extra>',
+                hovertemplate='Strike: %{y}<br>Net: %{customdata[3]}<br>Calls: %{customdata[0]}<br>Puts: %{customdata[1]}<extra></extra>',
             ))
         else:
             fig.add_trace(go.Bar(
@@ -2306,20 +2376,21 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
     if horizontal:
         x_padding = max_side_volume * 1.08
         xaxis_config.update(dict(
-            range=[-x_padding, max_side_volume * 1.08],
+            range=[-x_padding, 0],
             autorange=False,
-            tickvals=[-max_side_volume, -(max_side_volume / 2.0), 0, max_side_volume / 2.0, max_side_volume],
+            tickvals=[-max_side_volume, -(max_side_volume / 2.0), 0],
             ticktext=[
                 format_large_number(max_side_volume),
                 format_large_number(max_side_volume / 2.0),
                 '0',
-                format_large_number(max_side_volume / 2.0),
-                format_large_number(max_side_volume),
             ],
+            zeroline=False,
         ))
         yaxis_config.update(dict(
             range=[min_strike, max_strike],
-            autorange=False
+            autorange=False,
+            tickvals=all_strikes_list,
+            ticktext=strike_ticktext,
         ))
     else:
         xaxis_config.update(dict(
@@ -2344,7 +2415,7 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
         ),
         xaxis=xaxis_config,
         yaxis=yaxis_config,
-        barmode='relative',
+        barmode='overlay' if horizontal else 'relative',
         hovermode='y unified' if horizontal else 'x unified',
         plot_bgcolor=PLOT_THEME['plot_bgcolor'],
         paper_bgcolor=PLOT_THEME['paper_bgcolor'],
@@ -2358,9 +2429,9 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
             font=dict(color='#CCCCCC'),
             bgcolor=PLOT_THEME['paper_bgcolor']
         ),
-        bargap=0.1,
+        bargap=0.14 if horizontal else 0.1,
         bargroupgap=0.1,
-        margin=dict(l=50, r=50, t=50, b=(40 if horizontal else 100)),
+        margin=dict(l=40 if horizontal else 50, r=82 if horizontal else 50, t=50, b=(40 if horizontal else 100)),
         hoverlabel=dict(
             bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
@@ -2371,13 +2442,45 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
         showlegend=True,
         height=500
     )
+
+    if horizontal and all_strikes_list:
+        annotations = list(fig.layout.annotations) if fig.layout.annotations else []
+        def _append_strike_badge(idx, text, border_color, yshift=0):
+            if idx is None or idx < 0 or idx >= len(all_strikes_list):
+                return
+            annotations.append(dict(
+                xref='paper',
+                x=0.02,
+                yref='y',
+                y=all_strikes_list[idx],
+                text=text,
+                showarrow=False,
+                xanchor='left',
+                yanchor='middle',
+                yshift=yshift,
+                font=dict(size=9, color='#E5E7EB'),
+                bgcolor=PLOT_THEME['paper_bgcolor'],
+                bordercolor=border_color,
+                borderwidth=1.5,
+                borderpad=3,
+                opacity=0.98,
+            ))
+
+        if atm_idx is not None and atm_idx == poc_idx and highlight_max_level:
+            _append_strike_badge(atm_idx, 'ATM · POC', max_level_color)
+        else:
+            if highlight_max_level and poc_idx is not None:
+                _append_strike_badge(poc_idx, 'POC', max_level_color, -10 if atm_idx is not None and atm_idx != poc_idx else 0)
+            if atm_idx is not None:
+                _append_strike_badge(atm_idx, 'ATM', '#F59E0B', 10 if highlight_max_level and poc_idx is not None and atm_idx != poc_idx else 0)
+        fig.update_layout(annotations=annotations)
     
     # Add hover spikes
     fig.update_xaxes(showspikes=True, spikecolor='#CCCCCC', spikethickness=1)
     fig.update_yaxes(showspikes=True, spikecolor='#CCCCCC', spikethickness=1)
     
     # Logic for Highlighting Max Level
-    if highlight_max_level:
+    if highlight_max_level and not horizontal:
         try:
             if max_level_mode == 'Net':
                 net_trace_idx = next((i for i, t in enumerate(fig.data) if t.name == 'Net'), None)
@@ -8665,6 +8768,7 @@ def index():
          */
         function updateAllPlotlyPriceLines(price) {
             const priceStr = price.toFixed(2);
+            const numericAnnotationRe = /^-?\d+(?:\.\d+)?$/;
 
             const plotIds = PLOTLY_PRICE_LINE_CHARTS.concat(['gex-side-panel']);
 
@@ -8701,7 +8805,12 @@ def index():
                         update['annotations[' + i + '].x'] = price;
                         update['annotations[' + i + '].text'] = priceStr;
                         break;
-                    } else if (ann.xref === 'paper' && ann.yref === 'y') {
+                    } else if (
+                        ann.xref === 'paper' &&
+                        ann.yref === 'y' &&
+                        typeof ann.text === 'string' &&
+                        numericAnnotationRe.test(ann.text.trim())
+                    ) {
                         update['annotations[' + i + '].y'] = price;
                         update['annotations[' + i + '].text'] = priceStr;
                         break;
