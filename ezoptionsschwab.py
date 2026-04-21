@@ -3373,21 +3373,61 @@ def build_historical_levels_overlay(ticker, display_date, chart_times, latest_pr
                 continue
             bucket['by_type'].setdefault(level_type, []).append((float(strike), float(value)))
 
+    def _select_historical_candidates(level_type, candidates, count):
+        ranked = sorted(candidates, key=lambda item: abs(item[1]), reverse=True)
+        if level_type != 'GEX' or count <= 0:
+            return [
+                {'strike': strike, 'value': value, 'rank': rank}
+                for rank, (strike, value) in enumerate(ranked[:count], start=1)
+            ]
+
+        selected = []
+        seen = set()
+
+        def _append_first(match_fn):
+            for strike, value in ranked:
+                key = (strike, value)
+                if key in seen or not match_fn(value):
+                    continue
+                seen.add(key)
+                selected.append({'strike': strike, 'value': value, 'rank': 1})
+                return
+
+        # GEX bubbles should retain the dynamic "call side / put side leader"
+        # behavior even though chart walls are now OI-based. That keeps the
+        # historical dots informative intraday instead of pinning them to static
+        # OI strikes that rarely move during the session.
+        _append_first(lambda value: value > 0)
+        _append_first(lambda value: value < 0)
+
+        next_rank = 2
+        for strike, value in ranked:
+            key = (strike, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append({'strike': strike, 'value': value, 'rank': next_rank})
+            next_rank += 1
+            if len(selected) >= count:
+                break
+
+        return selected[:count]
+
     selected_points = []
     max_abs_by_type = {}
     for bucket in points_by_time.values():
         snapped_time = bucket['time']
         for level_type, candidates in bucket['by_type'].items():
-            top_levels = sorted(candidates, key=lambda item: abs(item[1]), reverse=True)[:levels_count]
-            for rank, (strike, value) in enumerate(top_levels, start=1):
+            top_levels = _select_historical_candidates(level_type, candidates, levels_count)
+            for point in top_levels:
                 selected_points.append({
                     'time': snapped_time,
-                    'price': strike,
-                    'value': value,
+                    'price': point['strike'],
+                    'value': point['value'],
                     'type': level_type,
-                    'rank': rank,
+                    'rank': point['rank'],
                 })
-                max_abs_by_type[level_type] = max(max_abs_by_type.get(level_type, 0), abs(value))
+                max_abs_by_type[level_type] = max(max_abs_by_type.get(level_type, 0), abs(point['value']))
 
     highlight_abs_by_bucket_type = {}
     if highlight_max_level:
@@ -3729,14 +3769,18 @@ def _flow_blotter_side_label(side_code, bid, ask):
     return 'mid'
 
 
-def compute_key_levels(calls, puts, S, selected_expiries=None):
+def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None):
     """Return the key dealer-flow levels to draw on the price chart.
 
-    Call Wall: strike with the highest net (positive) GEX — resistance.
-    Put Wall:  strike with the most-negative net GEX — support.
-    Gamma Flip: strike where cumulative net GEX (summed from the lowest
-                strike upward) first crosses zero — the regime boundary
-                between long-gamma and short-gamma dealer positioning.
+    Call Wall: strike with the highest call-side open interest.
+    Put Wall:  strike with the highest put-side open interest.
+    Gamma Flip: interpolated strike where the displayed per-strike net GEX
+                profile crosses zero. If several sign changes exist, prefer
+                the crossing closest to spot because that is the most relevant
+                local regime boundary on the chart.
+    Max +/- GEX: live strongest positive / negative net GEX strikes. When a
+                 strike window is provided, rank these inside that window so
+                 the chart overlays match the visible strike rail.
     EM Upper/Lower: ATM straddle-based ±1σ expected move bracket.
 
     All values can be None independently if the inputs don't support them
@@ -3746,6 +3790,7 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
         'call_wall': None, 'put_wall': None, 'gamma_flip': None,
         'em_upper': None, 'em_lower': None,
         'call_wall_2': None, 'put_wall_2': None, 'hvl': None,
+        'max_positive_gex': None, 'max_negative_gex': None,
         'em_upper_2': None, 'em_lower_2': None,
     }
     if S is None:
@@ -3764,45 +3809,82 @@ def compute_key_levels(calls, puts, S, selected_expiries=None):
     call_map = c.groupby('strike')['GEX'].sum().to_dict() if c is not None else {}
     put_map  = p.groupby('strike')['GEX'].sum().to_dict() if p is not None else {}
     strikes = sorted(set(call_map) | set(put_map))
+    def _rank_side_oi(df):
+        if df is None or df.empty or 'openInterest' not in df.columns:
+            return []
+        grouped = (
+            df[['strike', 'openInterest']]
+            .assign(openInterest=lambda x: pd.to_numeric(x['openInterest'], errors='coerce').fillna(0.0))
+            .groupby('strike', as_index=False)['openInterest']
+            .sum()
+        )
+        if grouped.empty:
+            return []
+        ranked = grouped[grouped['openInterest'] > 0].sort_values(
+            ['openInterest', 'strike'],
+            ascending=[False, True],
+            kind='mergesort',
+        )
+        return [(float(row['strike']), float(row['openInterest'])) for _, row in ranked.iterrows()]
+
+    ranked_calls = _rank_side_oi(c)
+    ranked_puts = _rank_side_oi(p)
+    if ranked_calls:
+        cw_strike, cw_oi = ranked_calls[0]
+        out['call_wall'] = {'price': float(cw_strike), 'oi': float(cw_oi)}
+        if len(ranked_calls) > 1:
+            cw2_strike, cw2_oi = ranked_calls[1]
+            out['call_wall_2'] = {'price': float(cw2_strike), 'oi': float(cw2_oi)}
+    if ranked_puts:
+        pw_strike, pw_oi = ranked_puts[0]
+        out['put_wall'] = {'price': float(pw_strike), 'oi': float(pw_oi)}
+        if len(ranked_puts) > 1:
+            pw2_strike, pw2_oi = ranked_puts[1]
+            out['put_wall_2'] = {'price': float(pw2_strike), 'oi': float(pw2_oi)}
+
     if strikes:
         net = {s: call_map.get(s, 0) - put_map.get(s, 0) for s in strikes}
+        if strike_range is not None and S is not None:
+            lo = float(S) * (1 - float(strike_range))
+            hi = float(S) * (1 + float(strike_range))
+            extrema_items = [(s, v) for s, v in net.items() if lo <= s <= hi]
+            if not extrema_items:
+                extrema_items = list(net.items())
+        else:
+            extrema_items = list(net.items())
 
-        pos_strikes = sorted(
-            [(s, v) for s, v in net.items() if v > 0],
-            key=lambda kv: kv[1], reverse=True,
-        )
-        neg_strikes = sorted(
-            [(s, v) for s, v in net.items() if v < 0],
-            key=lambda kv: kv[1],
-        )
-        if pos_strikes:
-            cw_strike, cw_val = pos_strikes[0]
-            out['call_wall'] = {'price': float(cw_strike), 'gex': float(cw_val)}
-            if len(pos_strikes) > 1:
-                cw2_strike, cw2_val = pos_strikes[1]
-                out['call_wall_2'] = {'price': float(cw2_strike), 'gex': float(cw2_val)}
-        if neg_strikes:
-            pw_strike, pw_val = neg_strikes[0]
-            out['put_wall'] = {'price': float(pw_strike), 'gex': float(pw_val)}
-            if len(neg_strikes) > 1:
-                pw2_strike, pw2_val = neg_strikes[1]
-                out['put_wall_2'] = {'price': float(pw2_strike), 'gex': float(pw2_val)}
+        pos_extrema = [(s, v) for s, v in extrema_items if v > 0]
+        neg_extrema = [(s, v) for s, v in extrema_items if v < 0]
+        if pos_extrema:
+            pos_strike, pos_val = max(pos_extrema, key=lambda item: item[1])
+            out['max_positive_gex'] = {'price': float(pos_strike), 'gex': float(pos_val)}
+        if neg_extrema:
+            neg_strike, neg_val = min(neg_extrema, key=lambda item: item[1])
+            out['max_negative_gex'] = {'price': float(neg_strike), 'gex': float(neg_val)}
 
-        # Gamma flip: cumulative net GEX from lowest strike up; find first
-        # sign change. Interpolate between the bracketing strikes for a
-        # smoother flip price.
-        cum = 0.0
-        prev_s, prev_cum = None, 0.0
-        flip_price = None
+        # Match the displayed strike-rail profile: look for adjacent net-GEX bars
+        # whose signs differ, then interpolate between them. Exact zero bars win
+        # immediately. Multiple crossings can happen on noisy chains, so use the
+        # one closest to spot.
+        crossings = []
+        prev_s, prev_v = None, None
+        eps = 1e-12
         for s in strikes:
-            cum += net[s]
-            if prev_s is not None and (prev_cum <= 0) != (cum <= 0) and (cum - prev_cum) != 0:
-                t = (0 - prev_cum) / (cum - prev_cum)
-                flip_price = prev_s + t * (s - prev_s)
-                break
-            prev_s, prev_cum = s, cum
-        if flip_price is not None:
-            out['gamma_flip'] = {'price': float(flip_price)}
+            v = float(net.get(s, 0.0) or 0.0)
+            if abs(v) <= eps:
+                crossings.append((abs(s - S), float(s)))
+            if prev_s is not None and prev_v is not None:
+                if abs(prev_v) <= eps:
+                    crossings.append((abs(prev_s - S), float(prev_s)))
+                elif prev_v * v < 0:
+                    t = (0.0 - prev_v) / (v - prev_v)
+                    flip_price = prev_s + t * (s - prev_s)
+                    crossings.append((abs(flip_price - S), float(flip_price)))
+            prev_s, prev_v = s, v
+
+        if crossings:
+            crossings.sort(key=lambda item: (item[0], item[1]))
+            out['gamma_flip'] = {'price': float(crossings[0][1])}
 
     em = calculate_expected_move_snapshot(calls, puts, S)
     if em:
@@ -4183,7 +4265,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     if S is None:
         return out
 
-    levels = compute_key_levels(calls, puts, S, selected_expiries=selected_expiries)
+    levels = compute_key_levels(calls, puts, S, selected_expiries=selected_expiries, strike_range=strike_range)
     if levels.get('call_wall'):  out['call_wall']  = levels['call_wall']['price']
     if levels.get('put_wall'):   out['put_wall']   = levels['put_wall']['price']
     if levels.get('gamma_flip'): out['gamma_flip'] = levels['gamma_flip']['price']
@@ -9087,7 +9169,7 @@ def index():
         ];
         // TradingView overlays on the price chart (not Plotly containers).
         // Share the chart-visibility store but render under a separate drawer group.
-        const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2', 'historical_dots'];
+        const LINE_OVERLAY_IDS = ['hvl', 'em_2s', 'walls_2', 'live_gex_extrema', 'historical_dots'];
         const ALERT_GATE_KEY = 'gex.gateAlerts';
         const DEALER_DETAIL_KEY = 'gex.dealerImpactVerbose';
         const CHART_VISIBILITY_DEFAULTS = {
@@ -9095,7 +9177,7 @@ def index():
             speed: false, vomma: false, color: false,
             options_volume: true, open_interest: true,
             large_trades: true, premium: true,
-            hvl: true, em_2s: true, walls_2: true, historical_dots: true
+            hvl: true, em_2s: true, walls_2: true, live_gex_extrema: true, historical_dots: true
         };
         const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
         const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
@@ -14271,9 +14353,10 @@ def index():
             if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
             const LS = LightweightCharts.LineStyle;
             const vis = getChartVisibility();
-            const showWalls2 = vis.walls_2 !== false;
-            const showHvl    = vis.hvl     !== false;
-            const showEm2    = vis.em_2s   !== false;
+            const showWalls2  = vis.walls_2          !== false;
+            const showHvl     = vis.hvl              !== false;
+            const showEm2     = vis.em_2s            !== false;
+            const showLiveGex = vis.live_gex_extrema !== false;
             const defs = [
                 { key: 'call_wall',   title: 'Call Wall',   color: '#10B981', style: LS.Solid,  width: 2 },
                 { key: 'put_wall',    title: 'Put Wall',    color: '#EF4444', style: LS.Solid,  width: 2 },
@@ -14283,6 +14366,8 @@ def index():
                 { key: 'call_wall_2', title: 'Call Wall 2', color: 'rgba(16,185,129,0.55)',  style: LS.Dashed, width: 1, show: showWalls2 },
                 { key: 'put_wall_2',  title: 'Put Wall 2',  color: 'rgba(239,68,68,0.55)',   style: LS.Dashed, width: 1, show: showWalls2 },
                 { key: 'hvl',         title: 'HVL',         color: 'rgba(156,163,175,0.8)',  style: LS.Dotted, width: 1, show: showHvl },
+                { key: 'max_positive_gex', title: 'Max +GEX', color: 'rgba(16,185,129,0.75)',  style: LS.LargeDashed, width: 1, show: showLiveGex },
+                { key: 'max_negative_gex', title: 'Max -GEX', color: 'rgba(239,68,68,0.75)',   style: LS.LargeDashed, width: 1, show: showLiveGex },
                 { key: 'em_upper_2',  title: '+2σ EM',      color: 'rgba(156,163,175,0.45)', style: LS.Dotted, width: 1, show: showEm2 },
                 { key: 'em_lower_2',  title: '-2σ EM',      color: 'rgba(156,163,175,0.45)', style: LS.Dotted, width: 1, show: showEm2 },
             ];
@@ -15484,6 +15569,7 @@ def index():
             options_volume: 'Options Vol', open_interest: 'Open Interest',
             large_trades: 'Flow Blotter', premium: 'Premium',
             hvl: 'HVL line', em_2s: '±2σ EM lines', walls_2: 'Secondary walls',
+            live_gex_extrema: 'Live max ±GEX lines',
             historical_dots: 'Historical dots'
         };
         function renderChartVisibilitySection() {
@@ -16050,6 +16136,14 @@ def update_price():
         S_for_panel = cached.get('S')
         if calls is not None and puts is not None and S_for_panel is not None:
             try:
+                # Keep historical intraday bubbles in sync with the price-chart
+                # refresh loop as well as the heavier /update loop. This avoids
+                # gaps when the chart stays alive but the main payload path is
+                # delayed or skipped late in the session.
+                store_interval_data(ticker, S_for_panel, strike_range, calls, puts)
+            except Exception as e:
+                print(f"[interval_data] price-path store failed: {e}")
+            try:
                 gex_panel = create_gex_side_panel(
                     calls, puts, S_for_panel, strike_range=strike_range,
                     call_color=call_color, put_color=put_color,
@@ -16058,7 +16152,7 @@ def update_price():
                 print(f"[gex_panel] build failed: {e}")
                 gex_panel = None
             try:
-                key_levels = compute_key_levels(calls, puts, S_for_panel)
+                key_levels = compute_key_levels(calls, puts, S_for_panel, strike_range=strike_range)
             except Exception as e:
                 print(f"[key_levels] build failed: {e}")
                 key_levels = None
@@ -16091,7 +16185,7 @@ def update_price():
                 if nearest_exp:
                     c0 = calls[calls['expiration_date'] == nearest_exp] if 'expiration_date' in calls.columns else calls
                     p0 = puts[puts['expiration_date']   == nearest_exp] if 'expiration_date' in puts.columns  else puts
-                    key_levels_0dte = compute_key_levels(c0, p0, S_for_panel)
+                    key_levels_0dte = compute_key_levels(c0, p0, S_for_panel, strike_range=strike_range)
                     stats_0dte = compute_trader_stats(
                         c0, p0, S_for_panel,
                         strike_range=strike_range,
