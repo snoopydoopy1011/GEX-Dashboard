@@ -6223,6 +6223,7 @@ def index():
             --workspace-pane-h: clamp(700px, 74vh, 840px);
             display: grid;
             grid-template-columns: minmax(0, 1fr) var(--gex-col-w) var(--rail-col-w);
+            grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto;
             column-gap: 2px;
             row-gap: 4px;
             width: 100%;
@@ -6230,16 +6231,16 @@ def index():
         }
         .chart-grid.gex-collapsed { --gex-col-w: 28px; }
         /* Row 1: toolbar (col 1) + GEX column header (col 2) + rail tabs (col 3). */
-        .chart-grid > .tv-toolbar-container { grid-column: 1; }
-        .chart-grid > .gex-col-header       { grid-column: 2; }
-        .chart-grid > .right-rail-tabs      { grid-column: 3; }
+        .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
+        .chart-grid > .gex-col-header       { grid-column: 2; grid-row: 1; }
+        .chart-grid > .right-rail-tabs      { grid-column: 3; grid-row: 1; }
         /* Row 2: price chart (col 1) + GEX column (col 2) + rail panels (col 3). */
-        .chart-grid > .price-chart-container { grid-column: 1; }
-        .chart-grid > .gex-column            { grid-column: 2; }
-        .chart-grid > .right-rail-panels     { grid-column: 3; }
+        .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
+        .chart-grid > .gex-column            { grid-column: 2; grid-row: 2; }
+        .chart-grid > .right-rail-panels     { grid-column: 3; grid-row: 2; }
         /* Remaining rows span all columns. */
-        .chart-grid > #secondary-tabs { grid-column: 1 / -1; }
-        .chart-grid > .charts-grid    { grid-column: 1 / -1; }
+        .chart-grid > #secondary-tabs { grid-column: 1 / -1; grid-row: 3; }
+        .chart-grid > .charts-grid    { grid-column: 1 / -1; grid-row: 4; }
         .chart-grid > .gex-resize-handle {
             grid-column: 2;
             grid-row: 1 / span 2;
@@ -7703,6 +7704,7 @@ def index():
         @media screen and (max-width: 1400px) {
             .chart-grid {
                 grid-template-columns: minmax(0, 1fr) var(--rail-col-w);
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) minmax(34px, auto) 420px auto auto;
             }
             .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
             .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
@@ -7715,24 +7717,24 @@ def index():
             .chart-grid > .charts-grid {
                 grid-column: 1 / -1;
             }
+            .chart-grid > #secondary-tabs { grid-row: 5; }
+            .chart-grid > .charts-grid    { grid-row: 6; }
         }
 
         /* Collapse right rail below the main chart on narrow widths */
         @media screen and (max-width: 1024px) {
             .chart-grid {
                 grid-template-columns: 1fr;
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
             }
-            .chart-grid > .tv-toolbar-container,
-            .chart-grid > .gex-col-header,
-            .chart-grid > .gex-resize-handle,
-            .chart-grid > .right-rail-tabs,
-            .chart-grid > .price-chart-container,
-            .chart-grid > .gex-column,
-            .chart-grid > .right-rail-panels,
-            .chart-grid > #secondary-tabs,
-            .chart-grid > .charts-grid {
-                grid-column: 1;
-            }
+            .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
+            .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
+            .chart-grid > .gex-col-header { grid-column: 1; grid-row: 3; }
+            .chart-grid > .gex-column { grid-column: 1; grid-row: 4; }
+            .chart-grid > .right-rail-tabs { grid-column: 1; grid-row: 5; }
+            .chart-grid > .right-rail-panels { grid-column: 1; grid-row: 6; }
+            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 7; }
+            .chart-grid > .charts-grid { grid-column: 1; grid-row: 8; }
             .chart-grid > .gex-resize-handle { display: none; }
             .gex-column { height: 420px; }
             .right-rail-panels { height: 420px; }
@@ -11260,7 +11262,7 @@ def index():
                 try { handle.setPointerCapture(event.pointerId); } catch (e) {}
 
                 const onMove = (moveEvent) => {
-                    const nextWidth = startWidth + (moveEvent.clientX - startX);
+                    const nextWidth = startWidth + (startX - moveEvent.clientX);
                     applyGexColWidth(nextWidth, false);
                     scheduleGexResizeRefresh();
                 };
@@ -11376,21 +11378,37 @@ def index():
                 activeStrikeRailTab = availableTabs[0] || 'gex';
                 try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
             }
-            const buttonHtml = availableTabs.map(tab =>
-                '<button type="button" class="strike-rail-tab' + (tab === activeStrikeRailTab ? ' active' : '') +
-                '" data-strike-rail-tab="' + tab + '">' + (STRIKE_RAIL_LABELS[tab] || tab) + '</button>'
-            ).join('');
-            const optionHtml = availableTabs.map(tab =>
-                '<option value="' + tab + '"' + (tab === activeStrikeRailTab ? ' selected' : '') + '>' +
-                (STRIKE_RAIL_LABELS[tab] || tab) + '</option>'
-            ).join('');
-            tabsEl.innerHTML =
-                '<div class="strike-rail-tab-list">' + buttonHtml + '</div>' +
-                '<label class="strike-rail-select-wrap" aria-label="Strike rail view">' +
-                    '<span class="strike-rail-select-icon" aria-hidden="true">&#9776;</span>' +
-                    '<select class="strike-rail-select" id="strike-rail-select">' + optionHtml + '</select>' +
-                '</label>';
-            wireStrikeRailTabs();
+            const tabsKey = availableTabs.join('|');
+            const needsRebuild =
+                tabsEl.dataset.tabsKey !== tabsKey ||
+                !tabsEl.querySelector('.strike-rail-tab-list') ||
+                !tabsEl.querySelector('#strike-rail-select');
+            if (needsRebuild) {
+                const buttonHtml = availableTabs.map(tab =>
+                    '<button type="button" class="strike-rail-tab' + (tab === activeStrikeRailTab ? ' active' : '') +
+                    '" data-strike-rail-tab="' + tab + '">' + (STRIKE_RAIL_LABELS[tab] || tab) + '</button>'
+                ).join('');
+                const optionHtml = availableTabs.map(tab =>
+                    '<option value="' + tab + '"' + (tab === activeStrikeRailTab ? ' selected' : '') + '>' +
+                    (STRIKE_RAIL_LABELS[tab] || tab) + '</option>'
+                ).join('');
+                tabsEl.innerHTML =
+                    '<div class="strike-rail-tab-list">' + buttonHtml + '</div>' +
+                    '<label class="strike-rail-select-wrap" aria-label="Strike rail view">' +
+                        '<span class="strike-rail-select-icon" aria-hidden="true">&#9776;</span>' +
+                        '<select class="strike-rail-select" id="strike-rail-select">' + optionHtml + '</select>' +
+                    '</label>';
+                tabsEl.dataset.tabsKey = tabsKey;
+                wireStrikeRailTabs();
+            } else {
+                tabsEl.querySelectorAll('.strike-rail-tab').forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.strikeRailTab === activeStrikeRailTab);
+                });
+                const select = tabsEl.querySelector('#strike-rail-select');
+                if (select && select.value !== activeStrikeRailTab) {
+                    select.value = activeStrikeRailTab;
+                }
+            }
         }
 
         function wireStrikeRailTabs() {
@@ -11429,10 +11447,74 @@ def index():
             if (!target) return;
             try { Plotly.purge(target); } catch (e) {}
             target.replaceChildren();
+            target.__strikeRailState = null;
             const empty = document.createElement('div');
             empty.className = 'strike-rail-empty';
             empty.textContent = message || 'Strike rail data loads with chart updates.';
             target.appendChild(empty);
+        }
+
+        let _strikeRailLastPayloadByTab = Object.create(null);
+        let _strikeRailRenderToken = 0;
+        function getStrikeRailPayloadKey(payload) {
+            if (payload == null) return '';
+            return typeof payload === 'string' ? payload : JSON.stringify(payload);
+        }
+        function getStrikeRailSyncSpec() {
+            if (isGexColumnCollapsed()) return null;
+            const tvEl = document.getElementById('price-chart');
+            if (!tvEl || !tvPriceChart || !tvCandleSeries) return null;
+            try {
+                const h = tvEl.clientHeight;
+                if (!h) return null;
+                const tsH = (tvPriceChart.timeScale && tvPriceChart.timeScale().height)
+                    ? tvPriceChart.timeScale().height() : 0;
+                const plotBottomPx = Math.max(0, h - tsH);
+                const top = tvCandleSeries.coordinateToPrice(0);
+                const bot = tvCandleSeries.coordinateToPrice(plotBottomPx);
+                if (top == null || bot == null) return null;
+                const lo = Math.min(top, bot);
+                const hi = Math.max(top, bot);
+                if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return null;
+                return {
+                    lo,
+                    hi,
+                    tsH,
+                    key: [lo.toFixed(4), hi.toFixed(4), String(Math.round(tsH))].join('|'),
+                };
+            } catch (e) {
+                return null;
+            }
+        }
+        function applyStrikeRailSyncToFigure(fig, syncSpec) {
+            if (!fig || !syncSpec) return fig;
+            fig.layout = fig.layout || {};
+            fig.layout.margin = Object.assign({ l: 12, r: 12, t: 10, b: 28 }, fig.layout.margin || {});
+            fig.layout.margin.t = 0;
+            fig.layout.margin.b = syncSpec.tsH;
+            fig.layout.yaxis = Object.assign({}, fig.layout.yaxis || {}, {
+                range: [syncSpec.lo, syncSpec.hi],
+                autorange: false,
+                side: 'right',
+                automargin: true,
+            });
+            return fig;
+        }
+        function lockStrikeRailFigureInteractions(fig) {
+            if (!fig) return fig;
+            fig.layout = fig.layout || {};
+            fig.layout.dragmode = false;
+            fig.layout.uirevision = 'strike-rail-locked';
+            fig.layout.xaxis = Object.assign({}, fig.layout.xaxis || {}, {
+                fixedrange: true,
+                automargin: true,
+            });
+            fig.layout.yaxis = Object.assign({}, fig.layout.yaxis || {}, {
+                fixedrange: true,
+                side: 'right',
+                automargin: true,
+            });
+            return fig;
         }
 
         function buildStrikeRailFigure(tab, payload) {
@@ -11451,32 +11533,67 @@ def index():
                 parsed.layout.yaxis.automargin = true;
                 parsed.layout.yaxis.side = 'right';
             }
-            return parsed;
+            return lockStrikeRailFigureInteractions(parsed);
         }
 
-        function renderStrikeRailPanel() {
+        function renderStrikeRailPanel(force = false) {
             const target = getStrikeRailTarget();
             if (!target || isGexColumnCollapsed()) return;
-            const payload = activeStrikeRailTab === 'gex'
+            let payload = activeStrikeRailTab === 'gex'
                 ? _lastGexPanelJson
                 : (lastData && lastData[activeStrikeRailTab]);
             if (!payload) {
-                renderStrikeRailEmpty((STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike rail') + ' data loads with the next refresh.');
-                return;
+                payload = _strikeRailLastPayloadByTab[activeStrikeRailTab] || null;
+                if (!payload) {
+                    renderStrikeRailEmpty((STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike rail') + ' data loads with the next refresh.');
+                    return;
+                }
             }
             try {
+                const payloadKey = getStrikeRailPayloadKey(payload);
+                const syncSpec = getStrikeRailSyncSpec();
+                const syncKey = syncSpec ? syncSpec.key : '';
+                const currentState = target.__strikeRailState || null;
+                if (
+                    !force &&
+                    target._fullLayout &&
+                    currentState &&
+                    currentState.tab === activeStrikeRailTab &&
+                    currentState.payloadKey === payloadKey
+                ) {
+                    if (syncKey && currentState.syncKey !== syncKey) {
+                        scheduleGexPanelSync();
+                    }
+                    return;
+                }
                 const fig = activeStrikeRailTab === 'gex' ? (typeof payload === 'string' ? JSON.parse(payload) : payload)
                                                           : buildStrikeRailFigure(activeStrikeRailTab, payload);
-                const config = { displayModeBar: false, responsive: true };
+                lockStrikeRailFigureInteractions(fig);
+                applyStrikeRailSyncToFigure(fig, syncSpec);
+                const config = {
+                    displayModeBar: false,
+                    responsive: true,
+                    scrollZoom: false,
+                    doubleClick: false,
+                    showAxisDragHandles: false,
+                };
                 target.style.width = '100%';
                 target.style.height = '100%';
                 const hasMountedPlot = !!target._fullLayout;
                 if (!hasMountedPlot) {
                     target.replaceChildren();
                 }
+                _strikeRailLastPayloadByTab[activeStrikeRailTab] = payload;
+                const renderToken = ++_strikeRailRenderToken;
                 const renderer = hasMountedPlot ? Plotly.react : Plotly.newPlot;
                 renderer(target, fig.data || [], fig.layout || {}, config)
                     .then(() => {
+                        if (renderToken !== _strikeRailRenderToken) return;
+                        target.__strikeRailState = {
+                            tab: activeStrikeRailTab,
+                            payloadKey,
+                            syncKey,
+                        };
                         try { Plotly.Plots.resize(target); } catch (e) {}
                         syncGexPanelYAxisToTV();
                     });
@@ -11553,29 +11670,20 @@ def index():
         function syncGexPanelYAxisToTV() {
             if (isGexColumnCollapsed()) return;
             const panel = getStrikeRailTarget();
-            const tvEl  = document.getElementById('price-chart');
-            if (!panel || !tvEl || !tvPriceChart || !tvCandleSeries) return;
+            const syncSpec = getStrikeRailSyncSpec();
+            if (!panel || !syncSpec) return;
             try {
-                const h = tvEl.clientHeight;
-                if (!h) return;
-                // TV plot area = full container minus the time axis at bottom
-                const tsH = (tvPriceChart.timeScale && tvPriceChart.timeScale().height)
-                    ? tvPriceChart.timeScale().height() : 0;
-                const plotBottomPx = Math.max(0, h - tsH);
-                const top = tvCandleSeries.coordinateToPrice(0);
-                const bot = tvCandleSeries.coordinateToPrice(plotBottomPx);
-                if (top == null || bot == null) return;
-                const lo = Math.min(top, bot);
-                const hi = Math.max(top, bot);
-                if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return;
+                const currentState = panel.__strikeRailState || {};
+                if (currentState.syncKey === syncSpec.key) return;
                 // Mirror TV's plot-area pixel bounds by zeroing Plotly top margin
                 // and matching bottom margin to TV's time-axis height. That way
                 // the Plotly y-axis range maps to the same screen pixels as TV's.
                 Plotly.relayout(panel, {
-                    'yaxis.range': [lo, hi],
+                    'yaxis.range': [syncSpec.lo, syncSpec.hi],
                     'margin.t': 0,
-                    'margin.b': tsH,
+                    'margin.b': syncSpec.tsH,
                 });
+                panel.__strikeRailState = Object.assign({}, currentState, { syncKey: syncSpec.key });
             } catch (e) {
                 // TV chart may not be ready yet; skip silently
             }
