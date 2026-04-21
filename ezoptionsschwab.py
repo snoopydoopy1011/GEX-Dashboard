@@ -16136,6 +16136,14 @@ def update_price():
         S_for_panel = cached.get('S')
         if calls is not None and puts is not None and S_for_panel is not None:
             try:
+                # Keep historical intraday bubbles in sync with the price-chart
+                # refresh loop as well as the heavier /update loop. This avoids
+                # gaps when the chart stays alive but the main payload path is
+                # delayed or skipped late in the session.
+                store_interval_data(ticker, S_for_panel, strike_range, calls, puts)
+            except Exception as e:
+                print(f"[interval_data] price-path store failed: {e}")
+            try:
                 gex_panel = create_gex_side_panel(
                     calls, puts, S_for_panel, strike_range=strike_range,
                     call_color=call_color, put_color=put_color,
