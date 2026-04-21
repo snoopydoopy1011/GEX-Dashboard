@@ -8502,6 +8502,7 @@ def index():
         let tvExpectedMovePriceLines = [];
         let tvKeyLevelLines = [];
         let tvTopOILines   = [];
+        let tvUserHLinePriceLines = new Map();
         let _lastTopOI     = null;
         let _lastTopOIContextKey = '';
         let _lastKeyLevels     = null;
@@ -10324,6 +10325,22 @@ def index():
             return style === 'dashed' || style === 'dotted' ? style : 'solid';
         }
 
+        function normalizeTVDrawingLogical(value) {
+            const logical = Number(value);
+            return Number.isFinite(logical) ? logical : null;
+        }
+
+        function normalizeTVDrawingLabelPosition(type, position) {
+            const value = String(position || '').trim().toLowerCase();
+            if (type === 'trendline') {
+                return ['auto', 'start', 'middle', 'end'].includes(value) ? value : 'auto';
+            }
+            if (type === 'rect') {
+                return ['auto', 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center'].includes(value) ? value : 'auto';
+            }
+            return '';
+        }
+
         function normalizeTVDrawingDef(def) {
             if (!def || typeof def !== 'object' || !def.type) return null;
             const normalized = { ...def };
@@ -10331,6 +10348,10 @@ def index():
             normalized.color = normalized.color || '#FFD700';
             normalized.lineWidth = clampTVDrawingLineWidth(normalized.lineWidth);
             normalized.lineStyle = normalizeTVDrawingStyle(normalized.lineStyle);
+            normalized.logical = normalizeTVDrawingLogical(normalized.logical);
+            normalized.l1 = normalizeTVDrawingLogical(normalized.l1);
+            normalized.l2 = normalizeTVDrawingLogical(normalized.l2);
+            normalized.labelPosition = normalizeTVDrawingLabelPosition(normalized.type, normalized.labelPosition);
             if (normalized.type === 'text') {
                 normalized.text = String(normalized.text || 'Label').slice(0, 40);
             } else {
@@ -10387,6 +10408,304 @@ def index():
             const b = parseInt(value.slice(4, 6), 16);
             const luminance = ((0.299 * r) + (0.587 * g) + (0.114 * b)) / 255;
             return luminance > 0.62 ? '#0b1220' : '#f8fafc';
+        }
+
+        function getTVTimeframeSeconds() {
+            const timeframeEl = document.getElementById('timeframe');
+            const minutes = timeframeEl ? parseInt(timeframeEl.value, 10) : NaN;
+            if (Number.isFinite(minutes) && minutes > 0) return minutes * 60;
+            if (tvLastCandles.length > 1) {
+                const span = Math.abs(Number(tvLastCandles[tvLastCandles.length - 1].time) - Number(tvLastCandles[tvLastCandles.length - 2].time));
+                if (Number.isFinite(span) && span > 0) return span;
+            }
+            return 60;
+        }
+
+        function tvCoordinateToLogical(x) {
+            const timeScale = tvPriceChart && tvPriceChart.timeScale ? tvPriceChart.timeScale() : null;
+            if (!timeScale || typeof timeScale.coordinateToLogical !== 'function') return null;
+            try {
+                const logical = timeScale.coordinateToLogical(x);
+                return Number.isFinite(logical) ? logical : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function tvLogicalToCoordinate(logical) {
+            const timeScale = tvPriceChart && tvPriceChart.timeScale ? tvPriceChart.timeScale() : null;
+            if (!timeScale || typeof timeScale.logicalToCoordinate !== 'function' || !Number.isFinite(logical)) return null;
+            try {
+                const x = timeScale.logicalToCoordinate(logical);
+                return Number.isFinite(x) ? x : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function tvLogicalToTime(logical) {
+            if (!tvLastCandles.length || !Number.isFinite(logical)) return null;
+            const span = getTVTimeframeSeconds();
+            const lastIndex = tvLastCandles.length - 1;
+            const firstTime = Number(tvLastCandles[0].time);
+            const lastTime = Number(tvLastCandles[lastIndex].time);
+            if (!Number.isFinite(firstTime) || !Number.isFinite(lastTime)) return null;
+            if (logical <= 0) return Math.round(firstTime + (logical * span));
+            if (logical >= lastIndex) return Math.round(lastTime + ((logical - lastIndex) * span));
+            const lowerIndex = Math.max(0, Math.min(lastIndex, Math.floor(logical)));
+            const upperIndex = Math.max(0, Math.min(lastIndex, Math.ceil(logical)));
+            const lower = tvLastCandles[lowerIndex];
+            const upper = tvLastCandles[upperIndex] || lower;
+            if (!lower) return null;
+            if (!upper || upperIndex === lowerIndex) return Number(lower.time) || null;
+            const step = Math.max(1, Number(upper.time) - Number(lower.time));
+            return Math.round(Number(lower.time) + ((logical - lowerIndex) * step));
+        }
+
+        function tvTimeToLogical(time) {
+            if (!tvLastCandles.length || !Number.isFinite(time)) return null;
+            const span = getTVTimeframeSeconds();
+            const firstTime = Number(tvLastCandles[0].time);
+            const lastIndex = tvLastCandles.length - 1;
+            const lastTime = Number(tvLastCandles[lastIndex].time);
+            if (!Number.isFinite(firstTime) || !Number.isFinite(lastTime)) return null;
+            const maxBackward = span * 12;
+            const maxForward = span * 240;
+            if (time < firstTime - maxBackward || time > lastTime + maxForward) return null;
+            if (time <= firstTime) return (time - firstTime) / span;
+            if (time >= lastTime) return lastIndex + ((time - lastTime) / span);
+            for (let i = 1; i < tvLastCandles.length; i += 1) {
+                const prev = tvLastCandles[i - 1];
+                const next = tvLastCandles[i];
+                const prevTime = Number(prev && prev.time);
+                const nextTime = Number(next && next.time);
+                if (!Number.isFinite(prevTime) || !Number.isFinite(nextTime)) continue;
+                if (time === nextTime) return i;
+                if (time < nextTime) {
+                    const step = Math.max(1, nextTime - prevTime);
+                    return (i - 1) + ((time - prevTime) / step);
+                }
+            }
+            return lastIndex;
+        }
+
+        function tvTimeToCoordinateExtended(time) {
+            const timeScale = tvPriceChart && tvPriceChart.timeScale ? tvPriceChart.timeScale() : null;
+            if (!timeScale || !Number.isFinite(time)) return null;
+            try {
+                const x = timeScale.timeToCoordinate(time);
+                if (Number.isFinite(x)) return x;
+            } catch (e) {}
+            const logical = tvTimeToLogical(time);
+            return logical == null ? null : tvLogicalToCoordinate(logical);
+        }
+
+        function tvResolveDrawingAnchorX(timeValue, logicalValue, previewX) {
+            if (Number.isFinite(previewX)) return previewX;
+            const timeX = Number.isFinite(timeValue) ? tvTimeToCoordinateExtended(timeValue) : null;
+            if (Number.isFinite(timeX)) return timeX;
+            return Number.isFinite(logicalValue) ? tvLogicalToCoordinate(logicalValue) : null;
+        }
+
+        function measureTVDrawingBadgeWidth(text, minWidth, maxWidth, leadingPad = 8) {
+            const safeText = String(text || '');
+            return Math.max(minWidth, Math.min(maxWidth, 14 + leadingPad + (safeText.length * 7)));
+        }
+
+        function appendTVDrawingBadge(group, options = {}) {
+            if (!group) return null;
+            const labelText = String(options.label || '').trim();
+            const valueText = options.value == null ? '' : String(options.value).trim();
+            if (!labelText && !valueText) return null;
+            const width = Math.max(0, Number(options.boundWidth) || 0);
+            const height = Math.max(0, Number(options.boundHeight) || 0);
+            const badgeHeight = 22;
+            const labelHasSwatch = labelText && options.showSwatch !== false;
+            const labelPad = labelHasSwatch ? 22 : 8;
+            const labelWidth = labelText ? measureTVDrawingBadgeWidth(labelText, 54, 170, labelPad) : 0;
+            const valueWidth = valueText ? measureTVDrawingBadgeWidth(valueText, 56, 100, 8) : 0;
+            const gap = labelText && valueText ? 2 : 0;
+            const totalWidth = labelWidth + gap + valueWidth;
+            const anchor = options.anchor === 'right' ? 'right' : (options.anchor === 'center' ? 'center' : 'left');
+            let x = Number.isFinite(options.x) ? options.x : 8;
+            if (anchor === 'right') x -= totalWidth;
+            if (anchor === 'center') x -= totalWidth / 2;
+            if (width > totalWidth) x = Math.max(8, Math.min(width - totalWidth - 8, x));
+            const y = height > badgeHeight
+                ? Math.max(8, Math.min(height - badgeHeight - 8, Number(options.y) || 8))
+                : 0;
+            let cursorX = x;
+
+            if (labelText) {
+                group.appendChild(createSvgEl('rect', {
+                    class: 'tv-drawing-shape',
+                    x: cursorX,
+                    y,
+                    rx: 6,
+                    ry: 6,
+                    width: labelWidth,
+                    height: badgeHeight,
+                    fill: 'rgba(71, 85, 105, 0.96)',
+                    stroke: 'rgba(255,255,255,0.10)',
+                    'stroke-width': 1,
+                }));
+                if (labelHasSwatch) {
+                    group.appendChild(createSvgEl('circle', {
+                        class: 'tv-drawing-shape',
+                        cx: cursorX + 10,
+                        cy: y + (badgeHeight / 2),
+                        r: 4,
+                        fill: options.color || '#FFD700',
+                    }));
+                }
+                group.appendChild(createSvgEl('text', {
+                    class: 'tv-drawing-text',
+                    x: cursorX + (labelHasSwatch ? 18 : 8),
+                    y: y + (badgeHeight / 2),
+                    fill: '#f8fafc',
+                }));
+                group.lastChild.textContent = labelText;
+                cursorX += labelWidth + gap;
+            }
+
+            if (valueText) {
+                const valueFill = options.valueFill || options.color || '#FFD700';
+                group.appendChild(createSvgEl('rect', {
+                    class: 'tv-drawing-shape',
+                    x: cursorX,
+                    y,
+                    rx: 6,
+                    ry: 6,
+                    width: valueWidth,
+                    height: badgeHeight,
+                    fill: valueFill,
+                    stroke: valueFill,
+                    'stroke-width': 1,
+                }));
+                group.appendChild(createSvgEl('text', {
+                    class: 'tv-drawing-text',
+                    x: cursorX + 8,
+                    y: y + (badgeHeight / 2),
+                    fill: getTVDrawingContrastTextColor(valueFill),
+                }));
+                group.lastChild.textContent = valueText;
+            }
+
+            return { x, y, width: totalWidth, height: badgeHeight };
+        }
+
+        function tvDrawingLineStyleToNative(lineStyle) {
+            if (!window.LightweightCharts) return null;
+            const LS = LightweightCharts.LineStyle;
+            if (lineStyle === 'dashed') return LS.Dashed;
+            if (lineStyle === 'dotted') return LS.Dotted;
+            return LS.Solid;
+        }
+
+        function clearTVUserHLinePriceLines() {
+            if (tvCandleSeries) {
+                tvUserHLinePriceLines.forEach(line => {
+                    try { tvCandleSeries.removePriceLine(line); } catch (e) {}
+                });
+            }
+            tvUserHLinePriceLines = new Map();
+        }
+
+        function syncTVUserHLinePriceLines() {
+            if (!tvCandleSeries || !window.LightweightCharts) {
+                tvUserHLinePriceLines = new Map();
+                return;
+            }
+            const defs = tvDrawingDefs.filter(def => def && def.type === 'hline' && Number.isFinite(def.price));
+            const activeIds = new Set(defs.map(def => def.id));
+            tvUserHLinePriceLines.forEach((line, id) => {
+                if (activeIds.has(id)) return;
+                try { tvCandleSeries.removePriceLine(line); } catch (e) {}
+                tvUserHLinePriceLines.delete(id);
+            });
+            defs.forEach(def => {
+                const options = {
+                    price: def.price,
+                    color: def.color,
+                    lineWidth: clampTVDrawingLineWidth(def.lineWidth),
+                    lineStyle: tvDrawingLineStyleToNative(def.lineStyle),
+                    axisLabelVisible: true,
+                    title: String(def.label || ''),
+                };
+                const existing = tvUserHLinePriceLines.get(def.id);
+                if (existing && typeof existing.applyOptions === 'function') {
+                    try {
+                        existing.applyOptions(options);
+                        return;
+                    } catch (e) {
+                        try { tvCandleSeries.removePriceLine(existing); } catch (err) {}
+                        tvUserHLinePriceLines.delete(def.id);
+                    }
+                } else if (existing) {
+                    try { tvCandleSeries.removePriceLine(existing); } catch (e) {}
+                    tvUserHLinePriceLines.delete(def.id);
+                }
+                try {
+                    const line = tvCandleSeries.createPriceLine(options);
+                    tvUserHLinePriceLines.set(def.id, line);
+                } catch (e) {
+                    console.warn('createPriceLine failed for user H-Line', e);
+                }
+            });
+        }
+
+        function getTVDrawingLabelPositionOptions(type) {
+            if (type === 'trendline') {
+                return [
+                    { value: 'auto', label: 'Auto' },
+                    { value: 'start', label: 'Start' },
+                    { value: 'middle', label: 'Middle' },
+                    { value: 'end', label: 'End' },
+                ];
+            }
+            if (type === 'rect') {
+                return [
+                    { value: 'auto', label: 'Auto' },
+                    { value: 'top-left', label: 'Top Left' },
+                    { value: 'top-right', label: 'Top Right' },
+                    { value: 'bottom-left', label: 'Bottom Left' },
+                    { value: 'bottom-right', label: 'Bottom Right' },
+                    { value: 'center', label: 'Center' },
+                ];
+            }
+            return [];
+        }
+
+        function getTVTrendlineLabelPlacement(screen, labelPosition, width, height) {
+            const xMid = (screen.x1 + screen.x2) / 2;
+            const yMid = (screen.y1 + screen.y2) / 2;
+            const placement = labelPosition || 'auto';
+            if (placement === 'start') {
+                return { x: screen.x1 + 12, y: screen.y1 - 12, anchor: 'left', boundWidth: width, boundHeight: height };
+            }
+            if (placement === 'middle') {
+                return { x: xMid, y: yMid - 16, anchor: 'center', boundWidth: width, boundHeight: height };
+            }
+            return { x: screen.x2 + 12, y: screen.y2 - 12, anchor: 'left', boundWidth: width, boundHeight: height };
+        }
+
+        function getTVRectLabelPlacement(screen, labelPosition, width, height) {
+            const placement = labelPosition || 'auto';
+            const inset = 8;
+            const bottomY = screen.y + screen.h - 30;
+            if (placement === 'top-right') {
+                return { x: screen.x + screen.w - inset, y: screen.y + inset, anchor: 'right', boundWidth: width, boundHeight: height };
+            }
+            if (placement === 'bottom-left') {
+                return { x: screen.x + inset, y: bottomY, anchor: 'left', boundWidth: width, boundHeight: height };
+            }
+            if (placement === 'bottom-right') {
+                return { x: screen.x + screen.w - inset, y: bottomY, anchor: 'right', boundWidth: width, boundHeight: height };
+            }
+            if (placement === 'center') {
+                return { x: screen.x + (screen.w / 2), y: screen.y + (screen.h / 2) - 11, anchor: 'center', boundWidth: width, boundHeight: height };
+            }
+            return { x: screen.x + inset, y: screen.y + inset, anchor: 'left', boundWidth: width, boundHeight: height };
         }
 
         function scheduleTVDrawingOverlayDraw() {
@@ -10449,6 +10768,10 @@ def index():
                         '<label for="tv-selected-draw-text">Label</label>' +
                         '<input type="text" id="tv-selected-draw-text" maxlength="40" />' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-label-position-row">' +
+                        '<label for="tv-selected-draw-label-position">Label Position</label>' +
+                        '<select id="tv-selected-draw-label-position"></select>' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-actions">' +
                         '<button type="button" class="tv-tb-btn danger" data-action="delete">Delete</button>' +
                     '</div>';
@@ -10476,6 +10799,7 @@ def index():
                     if (!def) return;
                     def.color = event.target.value || def.color;
                     persistTVDrawings();
+                    if (def.type === 'hline') syncTVUserHLinePriceLines();
                     scheduleTVDrawingOverlayDraw();
                 });
                 editor.querySelector('#tv-selected-draw-width').addEventListener('change', event => {
@@ -10483,6 +10807,7 @@ def index():
                     if (!def || def.type === 'text') return;
                     def.lineWidth = clampTVDrawingLineWidth(event.target.value);
                     persistTVDrawings();
+                    if (def.type === 'hline') syncTVUserHLinePriceLines();
                     tvRefreshDrawingLevels();
                     scheduleTVDrawingOverlayDraw();
                 });
@@ -10491,6 +10816,7 @@ def index():
                     if (!def || def.type === 'text') return;
                     def.lineStyle = normalizeTVDrawingStyle(event.target.value);
                     persistTVDrawings();
+                    if (def.type === 'hline') syncTVUserHLinePriceLines();
                     scheduleTVDrawingOverlayDraw();
                 });
                 editor.querySelector('#tv-selected-draw-text').addEventListener('input', event => {
@@ -10501,6 +10827,14 @@ def index():
                     } else {
                         def.label = String(event.target.value || '').slice(0, 40);
                     }
+                    persistTVDrawings();
+                    if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    scheduleTVDrawingOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-label-position').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def) return;
+                    def.labelPosition = normalizeTVDrawingLabelPosition(def.type, event.target.value);
                     persistTVDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
@@ -10521,6 +10855,8 @@ def index():
             const widthSelect = editor.querySelector('#tv-selected-draw-width');
             const styleSelect = editor.querySelector('#tv-selected-draw-style');
             const textInput = editor.querySelector('#tv-selected-draw-text');
+            const labelPositionRow = editor.querySelector('#tv-drawing-label-position-row');
+            const labelPositionSelect = editor.querySelector('#tv-selected-draw-label-position');
             if (titleEl) {
                 const typeLabel = def.type === 'hline' ? 'H-Line'
                     : def.type === 'trendline' ? 'Trend Line'
@@ -10540,6 +10876,21 @@ def index():
             if (textInput) {
                 textInput.value = def.type === 'text' ? (def.text || '') : (def.label || '');
                 textInput.disabled = false;
+            }
+            if (labelPositionRow && labelPositionSelect) {
+                const options = getTVDrawingLabelPositionOptions(def.type);
+                if (options.length) {
+                    labelPositionRow.style.display = 'flex';
+                    labelPositionSelect.innerHTML = options.map(opt =>
+                        `<option value="${opt.value}">${opt.label}</option>`
+                    ).join('');
+                    labelPositionSelect.value = normalizeTVDrawingLabelPosition(def.type, def.labelPosition);
+                    labelPositionSelect.disabled = false;
+                } else {
+                    labelPositionRow.style.display = 'none';
+                    labelPositionSelect.innerHTML = '';
+                    labelPositionSelect.disabled = true;
+                }
             }
             editor.classList.add('visible');
         }
@@ -10589,8 +10940,8 @@ def index():
                 return { type: 'hline', y };
             }
             if (def.type === 'trendline') {
-                const x1 = tvPriceChart.timeScale().timeToCoordinate(def.t1);
-                const x2 = def.previewX2 != null ? def.previewX2 : tvPriceChart.timeScale().timeToCoordinate(def.t2);
+                const x1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                const x2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
                 const y1 = tvCandleSeries.priceToCoordinate(def.p1);
                 const y2 = def.previewY2 != null ? def.previewY2 : tvCandleSeries.priceToCoordinate(def.p2);
                 if ([x1, x2, y1, y2].some(v => v == null || Number.isNaN(v))) return null;
@@ -10604,8 +10955,8 @@ def index():
                 let x1 = 0;
                 let x2 = width;
                 if (def.t1 != null && (def.t2 != null || def.previewX2 != null)) {
-                    const rawX1 = tvPriceChart.timeScale().timeToCoordinate(def.t1);
-                    const rawX2 = def.previewX2 != null ? def.previewX2 : tvPriceChart.timeScale().timeToCoordinate(def.t2);
+                    const rawX1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                    const rawX2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
                     if ([rawX1, rawX2].some(v => v == null || Number.isNaN(v))) return null;
                     x1 = Math.min(rawX1, rawX2);
                     x2 = Math.max(rawX1, rawX2);
@@ -10621,7 +10972,8 @@ def index():
             if (def.type === 'text') {
                 const y = def.previewY != null ? def.previewY : tvCandleSeries.priceToCoordinate(def.price);
                 if (y == null || Number.isNaN(y)) return null;
-                const x = def.previewX != null ? def.previewX : Math.max(92, width - 150);
+                const x = tvResolveDrawingAnchorX(def.time, def.logical, def.previewX);
+                if (x == null || Number.isNaN(x)) return null;
                 return { type: 'text', x, y };
             }
             return null;
@@ -10653,21 +11005,21 @@ def index():
             };
 
             if (screen.type === 'hline') {
-                group.appendChild(createSvgEl('line', {
-                    class: 'tv-drawing-shape',
-                    x1: 0,
-                    y1: screen.y,
-                    x2: width,
-                    y2: screen.y,
-                    stroke: def.color,
-                    'stroke-width': strokeWidth,
-                    'stroke-dasharray': dashArray || null,
-                    'stroke-linecap': 'round',
-                    opacity: isPreview ? 0.8 : 1,
-                }));
-                const priceText = Number.isFinite(def.price) ? def.price.toFixed(2) : '--';
-                const pillY = Math.max(8, Math.min(height - 22, screen.y - 11));
                 if (isPreview) {
+                    group.appendChild(createSvgEl('line', {
+                        class: 'tv-drawing-shape',
+                        x1: 0,
+                        y1: screen.y,
+                        x2: width,
+                        y2: screen.y,
+                        stroke: def.color,
+                        'stroke-width': strokeWidth,
+                        'stroke-dasharray': dashArray || null,
+                        'stroke-linecap': 'round',
+                        opacity: 0.8,
+                    }));
+                    const priceText = Number.isFinite(def.price) ? def.price.toFixed(2) : '--';
+                    const pillY = Math.max(8, Math.min(height - 22, screen.y - 11));
                     const pillWidth = Math.max(58, 16 + (priceText.length * 7));
                     const pillX = Math.max(8, width - pillWidth - 10);
                     group.appendChild(createSvgEl('rect', {
@@ -10689,52 +11041,17 @@ def index():
                         fill: def.color,
                     }));
                     group.lastChild.textContent = priceText;
-                } else {
-                    const priceWidth = Math.max(58, 16 + (priceText.length * 7));
-                    const priceX = Math.max(8, width - priceWidth - 10);
-                    const priceTextColor = getTVDrawingContrastTextColor(def.color);
-                    if (labelText) {
-                        const labelWidth = Math.max(54, 16 + (labelText.length * 7));
-                        const labelX = Math.max(8, priceX - labelWidth - 2);
-                        group.appendChild(createSvgEl('rect', {
-                            class: 'tv-drawing-shape',
-                            x: labelX,
-                            y: pillY,
-                            rx: 6,
-                            ry: 6,
-                            width: labelWidth,
-                            height: 22,
-                            fill: 'rgba(71, 85, 105, 0.96)',
-                            stroke: 'rgba(255,255,255,0.10)',
-                            'stroke-width': 1,
-                        }));
-                        group.appendChild(createSvgEl('text', {
-                            class: 'tv-drawing-text',
-                            x: labelX + 8,
-                            y: pillY + 11,
-                            fill: '#f8fafc',
-                        }));
-                        group.lastChild.textContent = labelText;
-                    }
-                    group.appendChild(createSvgEl('rect', {
+                } else if (def.id === tvSelectedDrawingId) {
+                    group.appendChild(createSvgEl('line', {
                         class: 'tv-drawing-shape',
-                        x: priceX,
-                        y: pillY,
-                        rx: 6,
-                        ry: 6,
-                        width: priceWidth,
-                        height: 22,
-                        fill: def.color,
-                        stroke: def.color,
-                        'stroke-width': 1,
+                        x1: 0,
+                        y1: screen.y,
+                        x2: width,
+                        y2: screen.y,
+                        stroke: 'rgba(255,255,255,0.42)',
+                        'stroke-width': Math.max(strokeWidth + 1, 3),
+                        'stroke-linecap': 'round',
                     }));
-                    group.appendChild(createSvgEl('text', {
-                        class: 'tv-drawing-text',
-                        x: priceX + 8,
-                        y: pillY + 11,
-                        fill: priceTextColor,
-                    }));
-                    group.lastChild.textContent = priceText;
                 }
                 if (interactive) {
                     const hit = createSvgEl('line', {
@@ -10762,26 +11079,10 @@ def index():
                     opacity: isPreview ? 0.8 : 1,
                 }));
                 if (labelText) {
-                    const labelX = Math.max(8, Math.min(width - 140, screen.x2 + 10));
-                    const labelY = Math.max(8, Math.min(height - 24, screen.y2 - 12));
-                    const labelWidth = Math.max(70, Math.min(150, 18 + (labelText.length * 7)));
-                    group.appendChild(createSvgEl('rect', {
-                        class: 'tv-drawing-shape tv-drawing-text-bg',
-                        x: labelX,
-                        y: labelY,
-                        rx: 6,
-                        ry: 6,
-                        width: labelWidth,
-                        height: 24,
-                        stroke: def.color,
-                    }));
-                    group.appendChild(createSvgEl('text', {
-                        class: 'tv-drawing-text',
-                        x: labelX + 9,
-                        y: labelY + 12,
-                        fill: def.color,
-                    }));
-                    group.lastChild.textContent = labelText;
+                    appendTVDrawingBadge(group, Object.assign({
+                        label: labelText,
+                        color: def.color,
+                    }, getTVTrendlineLabelPlacement(screen, def.labelPosition, width, height)));
                 }
                 if (interactive) {
                     const hit = createSvgEl('line', {
@@ -10809,26 +11110,10 @@ def index():
                     'stroke-dasharray': dashArray || null,
                 }));
                 if (labelText) {
-                    const labelX = Math.max(8, Math.min(width - 150, screen.x + 8));
-                    const labelY = Math.max(8, Math.min(height - 24, screen.y + 8));
-                    const labelWidth = Math.max(70, Math.min(150, 18 + (labelText.length * 7)));
-                    group.appendChild(createSvgEl('rect', {
-                        class: 'tv-drawing-shape tv-drawing-text-bg',
-                        x: labelX,
-                        y: labelY,
-                        rx: 6,
-                        ry: 6,
-                        width: labelWidth,
-                        height: 24,
-                        stroke: def.color,
-                    }));
-                    group.appendChild(createSvgEl('text', {
-                        class: 'tv-drawing-text',
-                        x: labelX + 9,
-                        y: labelY + 12,
-                        fill: def.color,
-                    }));
-                    group.lastChild.textContent = labelText;
+                    appendTVDrawingBadge(group, Object.assign({
+                        label: labelText,
+                        color: def.color,
+                    }, getTVRectLabelPlacement(screen, def.labelPosition, width, height)));
                 }
                 if (interactive) {
                     const hit = createSvgEl('rect', {
@@ -10843,46 +11128,34 @@ def index():
                 }
             } else if (screen.type === 'text') {
                 const text = labelText;
-                const pillWidth = Math.max(78, Math.min(170, 28 + (text.length * 7)));
-                const pillHeight = 24;
-                const pillX = Math.max(8, Math.min(width - pillWidth - 8, screen.x));
-                const pillY = Math.max(8, Math.min(height - pillHeight - 8, screen.y - (pillHeight / 2)));
+                const badge = appendTVDrawingBadge(group, {
+                    label: text,
+                    color: def.color,
+                    x: screen.x,
+                    y: screen.y - 11,
+                    boundWidth: width,
+                    boundHeight: height,
+                });
+                if (!badge) return;
                 group.appendChild(createSvgEl('line', {
                     class: 'tv-drawing-shape',
-                    x1: Math.max(0, pillX - 18),
+                    x1: Math.max(0, badge.x - 18),
                     y1: screen.y,
-                    x2: pillX,
+                    x2: badge.x,
                     y2: screen.y,
                     stroke: def.color,
                     'stroke-width': 2,
                     opacity: isPreview ? 0.75 : 0.95,
                 }));
-                group.appendChild(createSvgEl('rect', {
-                    class: 'tv-drawing-shape tv-drawing-text-bg',
-                    x: pillX,
-                    y: pillY,
-                    rx: 6,
-                    ry: 6,
-                    width: pillWidth,
-                    height: pillHeight,
-                    stroke: def.color,
-                }));
-                group.appendChild(createSvgEl('text', {
-                    class: 'tv-drawing-text',
-                    x: pillX + 9,
-                    y: pillY + (pillHeight / 2),
-                    fill: def.color,
-                }));
-                group.lastChild.textContent = text;
                 if (interactive) {
                     const hit = createSvgEl('rect', {
                         class: 'tv-drawing-hitbox',
-                        x: pillX,
-                        y: pillY,
+                        x: badge.x,
+                        y: badge.y,
                         rx: 6,
                         ry: 6,
-                        width: pillWidth,
-                        height: pillHeight,
+                        width: badge.width,
+                        height: badge.height,
                     });
                     bindSelect(hit);
                     group.appendChild(hit);
@@ -10911,7 +11184,7 @@ def index():
                 appendTVDrawingShape(svg, tvDrawingPreviewDef, true, width, height);
             }
             if (tvDrawStart && (tvDrawMode === 'trendline' || tvDrawMode === 'rect')) {
-                const x = tvPriceChart.timeScale().timeToCoordinate(tvDrawStart.time);
+                const x = tvResolveDrawingAnchorX(tvDrawStart.time, tvDrawStart.logical, null);
                 const y = tvCandleSeries.priceToCoordinate(tvDrawStart.price);
                 if (x != null && y != null && !Number.isNaN(x) && !Number.isNaN(y)) {
                     svg.appendChild(createSvgEl('circle', {
@@ -10926,6 +11199,7 @@ def index():
         }
 
         function tvRestoreDrawings() {
+            syncTVUserHLinePriceLines();
             tvRefreshDrawingLevels();
             scheduleTVDrawingOverlayDraw();
         }
@@ -10952,16 +11226,24 @@ def index():
             if (!tvPriceChart || !tvCandleSeries || !param || !param.point) return null;
             const price = tvCandleSeries.coordinateToPrice(param.point.y);
             if (price === null || price === undefined) return null;
+            let logical = tvCoordinateToLogical(param.point.x);
+            if (logical == null && param.logical != null) {
+                const fallbackLogical = Number(param.logical);
+                logical = Number.isFinite(fallbackLogical) ? fallbackLogical : null;
+            }
             let time = param.time;
-            if (!time && tvLastCandles && tvLastCandles.length) {
+            if (!time) {
                 try { time = tvPriceChart.timeScale().coordinateToTime(param.point.x); } catch (e) {}
-                if (!time) {
-                    const logical = param.logical != null ? param.logical : tvLastCandles.length - 1;
-                    const idx = Math.max(0, Math.min(Math.round(logical), tvLastCandles.length - 1));
+                if (!time && logical != null) {
+                    time = tvLogicalToTime(logical);
+                }
+                if (!time && tvLastCandles && tvLastCandles.length) {
+                    const fallbackLogical = logical != null ? logical : tvLastCandles.length - 1;
+                    const idx = Math.max(0, Math.min(Math.round(fallbackLogical), tvLastCandles.length - 1));
                     time = tvLastCandles[idx].time;
                 }
             }
-            return { price, time };
+            return { price, time, logical };
         }
 
         function updateTVDrawingPreview(param) {
@@ -10997,8 +11279,10 @@ def index():
                         id: '__preview__',
                         type: 'trendline',
                         t1: tvDrawStart.time,
+                        l1: tvDrawStart.logical,
                         p1: tvDrawStart.price,
                         t2: point.time || tvDrawStart.time,
+                        l2: point.logical,
                         p2: previewPoint.price,
                         previewX2: previewPoint.x,
                         previewY2: previewPoint.y,
@@ -11011,7 +11295,9 @@ def index():
                         id: '__preview__',
                         type: 'rect',
                         t1: tvDrawStart.time,
+                        l1: tvDrawStart.logical,
                         t2: point.time || tvDrawStart.time,
+                        l2: point.logical,
                         top: Math.max(tvDrawStart.price, previewPoint.price),
                         bot: Math.min(tvDrawStart.price, previewPoint.price),
                         startPrice: tvDrawStart.price,
@@ -11079,7 +11365,7 @@ def index():
             }
             const point = tvResolveChartPoint(param);
             if (!point) return;
-            const { price, time: clickTime } = point;
+            const { price, time: clickTime, logical } = point;
             const drawColor = getTVDrawingColorFallback();
 
             if (tvDrawMode === 'hline') {
@@ -11096,7 +11382,7 @@ def index():
             if (tvDrawMode === 'trendline' || tvDrawMode === 'rect') {
                 if (!clickTime) return; // still no time — bail
                 if (!tvDrawStart) {
-                    tvDrawStart = { price, time: clickTime };
+                    tvDrawStart = { price, time: clickTime, logical };
                     // Show visual hint that first point is set
                     const container = document.getElementById('price-chart');
                     if (container) { container.title = 'Click second point to complete drawing'; }
@@ -11106,8 +11392,10 @@ def index():
                         finishTVDrawingCreation({
                             type: 'trendline',
                             t1: tvDrawStart.time,
+                            l1: tvDrawStart.logical,
                             p1: tvDrawStart.price,
                             t2: clickTime,
+                            l2: logical,
                             p2: price,
                             color: drawColor,
                             lineWidth: 2,
@@ -11117,7 +11405,9 @@ def index():
                         finishTVDrawingCreation({
                             type: 'rect',
                             t1: tvDrawStart.time,
+                            l1: tvDrawStart.logical,
                             t2: clickTime,
+                            l2: logical,
                             top: Math.max(tvDrawStart.price, price),
                             bot: Math.min(tvDrawStart.price, price),
                             color: drawColor,
@@ -11138,6 +11428,8 @@ def index():
                 finishTVDrawingCreation({
                     type: 'text',
                     price,
+                    time: clickTime,
+                    logical,
                     text: userText,
                     color: drawColor,
                 });
@@ -13370,6 +13662,7 @@ def index():
                 destroyMacdPane();
                 if (tvPriceChart) {
                     try { tvPriceChart.unsubscribeClick(tvHandleChartClick); } catch(e){}
+                    clearTVUserHLinePriceLines();
                     tvPriceChart.remove();
                     tvPriceChart = null;
                     tvCandleSeries = null;
