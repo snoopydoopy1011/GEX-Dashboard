@@ -327,6 +327,110 @@ def get_centroid_data(ticker, date=None):
             
             return filtered_data
 
+def _load_centroid_session_rows(ticker):
+    """Return centroid rows for today or the most recent session."""
+    est = pytz.timezone('US/Eastern')
+    current_time_est = datetime.now(est)
+    showing_last_session = False
+    centroid_data = get_centroid_data(ticker)
+
+    if not centroid_data:
+        last_date = get_last_session_date(ticker, 'centroid_data')
+        if last_date:
+            centroid_data = get_centroid_data(ticker, last_date)
+            showing_last_session = True
+
+    return centroid_data, showing_last_session, current_time_est
+
+def build_centroid_panel_payload(ticker, limit=24):
+    """Compact centroid payload for the right-rail sparkline card."""
+    centroid_data, showing_last_session, current_time_est = _load_centroid_session_rows(ticker)
+
+    if not centroid_data:
+        if current_time_est.weekday() >= 5:
+            status = 'Market closed for the weekend.'
+        elif current_time_est.hour < 9 or (current_time_est.hour == 9 and current_time_est.minute < 30):
+            status = 'Centroid data starts at the open.'
+        elif current_time_est.hour >= 16:
+            status = 'Session closed. Waiting for the next open.'
+        else:
+            status = 'Centroid data will appear after the next refresh.'
+        return {
+            'points': [],
+            'showing_last_session': False,
+            'status': status,
+        }
+
+    rows = centroid_data[-max(8, int(limit or 24)):]
+    points = []
+    first_price = None
+    first_call = None
+    first_put = None
+    first_time = None
+    latest_price = None
+    latest_call = None
+    latest_put = None
+    latest_time = None
+
+    for timestamp, price, call_centroid, put_centroid, call_volume, put_volume in rows:
+        dt_est = datetime.fromtimestamp(timestamp, pytz.timezone('US/Eastern'))
+        time_label = dt_est.strftime('%H:%M')
+        price_value = float(price) if price is not None else None
+        call_value = float(call_centroid) if call_centroid and call_centroid > 0 else None
+        put_value = float(put_centroid) if put_centroid and put_centroid > 0 else None
+        latest_time = time_label
+        latest_price = price_value if price_value is not None else latest_price
+        if call_value is not None:
+            latest_call = call_value
+        if put_value is not None:
+            latest_put = put_value
+        if first_time is None:
+            first_time = time_label
+        if first_price is None and price_value is not None:
+            first_price = price_value
+        if first_call is None and call_value is not None:
+            first_call = call_value
+        if first_put is None and put_value is not None:
+            first_put = put_value
+        points.append({
+            'time': time_label,
+            'price': price_value,
+            'call': call_value,
+            'put': put_value,
+            'call_volume': int(call_volume or 0),
+            'put_volume': int(put_volume or 0),
+        })
+
+    first_spread = (first_call - first_put) if first_call is not None and first_put is not None else None
+    spread = (latest_call - latest_put) if latest_call is not None and latest_put is not None else None
+    call_vs_price = (latest_call - latest_price) if latest_call is not None and latest_price is not None else None
+    put_vs_price = (latest_put - latest_price) if latest_put is not None and latest_price is not None else None
+    call_drift = (latest_call - first_call) if latest_call is not None and first_call is not None else None
+    put_drift = (latest_put - first_put) if latest_put is not None and first_put is not None else None
+    price_drift = (latest_price - first_price) if latest_price is not None and first_price is not None else None
+    spread_drift = (spread - first_spread) if spread is not None and first_spread is not None else None
+
+    return {
+        'points': points,
+        'showing_last_session': showing_last_session,
+        'status': 'Last session' if showing_last_session else 'Current session',
+        'first_time': first_time,
+        'first_price': first_price,
+        'first_call': first_call,
+        'first_put': first_put,
+        'latest_time': latest_time,
+        'latest_price': latest_price,
+        'latest_call': latest_call,
+        'latest_put': latest_put,
+        'spread': spread,
+        'call_drift': call_drift,
+        'put_drift': put_drift,
+        'price_drift': price_drift,
+        'spread_drift': spread_drift,
+        'call_vs_price': call_vs_price,
+        'put_vs_price': put_vs_price,
+    }
+
 # Function to store interval data
 def store_interval_data(ticker, price, strike_range, calls, puts):
     if not is_market_hours():
@@ -4159,6 +4263,12 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         if total_vol > 0:
             sentiment = (call_vol - put_vol) / total_vol  # -1..+1
         out['chain_activity'] = {
+            'call_oi': call_oi,
+            'put_oi': put_oi,
+            'call_vol': call_vol,
+            'put_vol': put_vol,
+            'oi_call_share': (call_oi / (call_oi + put_oi)) if (call_oi + put_oi) > 0 else None,
+            'vol_call_share': (call_vol / total_vol) if total_vol > 0 else None,
             'oi_cp_ratio':  (call_oi  / put_oi)  if put_oi  > 0 else None,
             'vol_cp_ratio': (call_vol / put_vol) if put_vol > 0 else None,
             'sentiment':    sentiment,
@@ -4185,6 +4295,12 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     except Exception as e:
         print(f"[compute_trader_stats] level_deltas failed: {e}")
         out['level_deltas'] = None
+
+    try:
+        out['centroid_panel'] = build_centroid_panel_payload(ticker) if ticker else None
+    except Exception as e:
+        print(f"[compute_trader_stats] centroid_panel failed: {e}")
+        out['centroid_panel'] = None
 
     # Scenario GEX table (Stage 3). Seven rows: current + ±2% spot + ±5 vol pts
     # + two diagonals. "Current" mirrors out['net_gex'] exactly so the table can't
@@ -5809,7 +5925,6 @@ def create_premium_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLO
 def create_centroid_chart(ticker, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
     """Create a chart showing call and put centroids over time with price line"""
     est = pytz.timezone('US/Eastern')
-    current_time_est = datetime.now(est)
 
     def _empty_centroid_chart(title):
         fig = go.Figure()
@@ -5824,15 +5939,7 @@ def create_centroid_chart(ticker, call_color=CALL_COLOR, put_color=PUT_COLOR, se
         )
         return fig.to_json()
 
-    # Get centroid data; fall back to most recent session if today has no data
-    showing_last_session = False
-    centroid_data = get_centroid_data(ticker)
-
-    if not centroid_data:
-        last_date = get_last_session_date(ticker, 'centroid_data')
-        if last_date:
-            centroid_data = get_centroid_data(ticker, last_date)
-            showing_last_session = True
+    centroid_data, showing_last_session, current_time_est = _load_centroid_session_rows(ticker)
 
     if not centroid_data:
         if current_time_est.weekday() >= 5:
@@ -6775,6 +6882,136 @@ def index():
             color: var(--fg-0);
             font-variant-numeric: tabular-nums;
             min-width: 60px;
+        }
+        .rail-bar-rich {
+            align-items: start;
+        }
+        .rail-bar-rich > div {
+            min-width: 0;
+        }
+        .rail-bar-split {
+            margin-top: 5px;
+            font-size: 10px;
+            color: var(--fg-2);
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-centroid-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+            margin-bottom: 8px;
+        }
+        .rail-centroid-sparkline {
+            position: relative;
+            height: 68px;
+            border-radius: var(--radius);
+            background: var(--bg-0);
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+        .rail-centroid-sparkline svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .rail-centroid-empty {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--fg-2);
+            font-size: 11px;
+            text-align: center;
+            padding: 0 12px;
+        }
+        .rail-centroid-legend {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+        }
+        .rail-centroid-legend span {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .rail-centroid-legend i {
+            width: 10px;
+            height: 2px;
+            border-radius: 999px;
+            background: var(--fg-2);
+            display: inline-block;
+        }
+        .rail-centroid-legend i.call { background: var(--call); }
+        .rail-centroid-legend i.put { background: var(--put); }
+        .rail-centroid-legend i.price { background: #D4AF37; }
+        .rail-centroid-stats {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .rail-centroid-stat {
+            min-width: 0;
+        }
+        .rail-centroid-stat .label {
+            display: block;
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+        }
+        .rail-centroid-stat .value {
+            display: block;
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-centroid-stat .value.pos { color: var(--call); }
+        .rail-centroid-stat .value.neg { color: var(--put); }
+        .rail-centroid-stat .subvalue {
+            display: block;
+            margin-top: 2px;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.25;
+        }
+        .rail-centroid-stat .subvalue.pos { color: var(--call); }
+        .rail-centroid-stat .subvalue.neg { color: var(--put); }
+        .rail-centroid-drift-row {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 8px;
+            color: var(--fg-1);
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-centroid-drift-row span {
+            min-width: 0;
+        }
+        .rail-centroid-drift-row .pos { color: var(--call); }
+        .rail-centroid-drift-row .neg { color: var(--put); }
+        .rail-centroid-reads {
+            display: grid;
+            gap: 6px;
+            margin-top: 10px;
+        }
+        .rail-centroid-read {
+            color: var(--fg-1);
+            font-size: 10px;
+            line-height: 1.4;
         }
         /* Dealer-impact block nested inside a rail-card — drop redundant
            padding and the divider it carries when standalone. */
@@ -8519,15 +8756,59 @@ def index():
                         <div class="rail-sentiment-track">
                             <div class="rail-sentiment-marker" data-met="sentiment_marker"></div>
                         </div>
-                        <div class="rail-bar">
+                        <div class="rail-bar rail-bar-rich">
                             <span>OI</span>
-                            <div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div>
+                            <div>
+                                <div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div>
+                                <div class="rail-bar-split" data-met="oi_split">—</div>
+                            </div>
                             <span class="num" data-met="oi_cp">—</span>
                         </div>
-                        <div class="rail-bar">
+                        <div class="rail-bar rail-bar-rich">
                             <span>VOL</span>
-                            <div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>
+                            <div>
+                                <div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>
+                                <div class="rail-bar-split" data-met="vol_split">—</div>
+                            </div>
                             <span class="num" data-met="vol_cp">—</span>
+                        </div>
+                    </div>
+                    <div class="rail-card" id="rail-card-centroid">
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Centroid Drift</div>
+                            <div class="rail-card-note" data-met="centroid_status">Current session</div>
+                        </div>
+                        <div class="rail-centroid-meta">
+                            <span data-met="centroid_time">—</span>
+                            <span data-met="centroid_spread">—</span>
+                        </div>
+                        <div class="rail-centroid-sparkline" data-centroid-sparkline>
+                            <div class="rail-centroid-empty">Centroid data loads with stream data.</div>
+                        </div>
+                        <div class="rail-centroid-legend">
+                            <span><i class="call"></i>Call</span>
+                            <span><i class="price"></i>Spot</span>
+                            <span><i class="put"></i>Put</span>
+                        </div>
+                        <div class="rail-centroid-stats">
+                            <div class="rail-centroid-stat">
+                                <span class="label">Call centroid</span>
+                                <span class="value" data-met="centroid_call_strike">—</span>
+                                <span class="subvalue" data-met="centroid_call_delta">—</span>
+                            </div>
+                            <div class="rail-centroid-stat">
+                                <span class="label">Put centroid</span>
+                                <span class="value" data-met="centroid_put_strike">—</span>
+                                <span class="subvalue" data-met="centroid_put_delta">—</span>
+                            </div>
+                        </div>
+                        <div class="rail-centroid-drift-row">
+                            <span data-met="centroid_call_drift">—</span>
+                            <span data-met="centroid_put_drift">—</span>
+                        </div>
+                        <div class="rail-centroid-reads">
+                            <div class="rail-centroid-read" data-met="centroid_structure">—</div>
+                            <div class="rail-centroid-read" data-met="centroid_drift_read">—</div>
                         </div>
                     </div>
                     <div class="rail-card" id="rail-card-alerts">
@@ -8642,7 +8923,7 @@ def index():
         // surfaces visible before any saved settings are loaded.
         const CHART_IDS = [
             'price','gamma','delta','vanna','charm','speed','vomma','color',
-            'options_volume','open_interest','volume','large_trades','premium','centroid'
+            'options_volume','open_interest','large_trades','premium'
         ];
         // TradingView overlays on the price chart (not Plotly containers).
         // Share the chart-visibility store but render under a separate drawer group.
@@ -8651,8 +8932,8 @@ def index():
         const CHART_VISIBILITY_DEFAULTS = {
             price: true, gamma: true, delta: true, vanna: true, charm: true,
             speed: false, vomma: false, color: false,
-            options_volume: true, open_interest: true, volume: true,
-            large_trades: true, premium: true, centroid: true,
+            options_volume: true, open_interest: true,
+            large_trades: true, premium: true,
             hvl: true, em_2s: true, walls_2: true, historical_dots: true
         };
         const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
@@ -12339,15 +12620,59 @@ def index():
                         '<div class="rail-sentiment-track">' +
                             '<div class="rail-sentiment-marker" data-met="sentiment_marker"></div>' +
                         '</div>' +
-                        '<div class="rail-bar">' +
+                        '<div class="rail-bar rail-bar-rich">' +
                             '<span>OI</span>' +
-                            '<div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div>' +
+                            '<div>' +
+                                '<div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div>' +
+                                '<div class="rail-bar-split" data-met="oi_split">—</div>' +
+                            '</div>' +
                             '<span class="num" data-met="oi_cp">—</span>' +
                         '</div>' +
-                        '<div class="rail-bar">' +
+                        '<div class="rail-bar rail-bar-rich">' +
                             '<span>VOL</span>' +
-                            '<div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>' +
+                            '<div>' +
+                                '<div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>' +
+                                '<div class="rail-bar-split" data-met="vol_split">—</div>' +
+                            '</div>' +
                             '<span class="num" data-met="vol_cp">—</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card" id="rail-card-centroid">' +
+                        '<div class="rail-card-header-row">' +
+                            '<div class="rail-card-header">Centroid Drift</div>' +
+                            '<div class="rail-card-note" data-met="centroid_status">Current session</div>' +
+                        '</div>' +
+                        '<div class="rail-centroid-meta">' +
+                            '<span data-met="centroid_time">—</span>' +
+                            '<span data-met="centroid_spread">—</span>' +
+                        '</div>' +
+                        '<div class="rail-centroid-sparkline" data-centroid-sparkline>' +
+                            '<div class="rail-centroid-empty">Centroid data loads with stream data.</div>' +
+                        '</div>' +
+                        '<div class="rail-centroid-legend">' +
+                            '<span><i class="call"></i>Call</span>' +
+                            '<span><i class="price"></i>Spot</span>' +
+                            '<span><i class="put"></i>Put</span>' +
+                        '</div>' +
+                        '<div class="rail-centroid-stats">' +
+                            '<div class="rail-centroid-stat">' +
+                                '<span class="label">Call centroid</span>' +
+                                '<span class="value" data-met="centroid_call_strike">—</span>' +
+                                '<span class="subvalue" data-met="centroid_call_delta">—</span>' +
+                            '</div>' +
+                            '<div class="rail-centroid-stat">' +
+                                '<span class="label">Put centroid</span>' +
+                                '<span class="value" data-met="centroid_put_strike">—</span>' +
+                                '<span class="subvalue" data-met="centroid_put_delta">—</span>' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="rail-centroid-drift-row">' +
+                            '<span data-met="centroid_call_drift">—</span>' +
+                            '<span data-met="centroid_put_drift">—</span>' +
+                        '</div>' +
+                        '<div class="rail-centroid-reads">' +
+                            '<div class="rail-centroid-read" data-met="centroid_structure">—</div>' +
+                            '<div class="rail-centroid-read" data-met="centroid_drift_read">—</div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-alerts">' +
@@ -13028,6 +13353,22 @@ def index():
             if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
             return sign + '$' + abs.toFixed(0);
         }
+        function fmtCountCompact(n) {
+            if (n == null || !isFinite(n)) return '—';
+            const abs = Math.abs(n);
+            if (abs >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+            if (abs >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+            if (abs >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return Math.round(n).toLocaleString();
+        }
+        function fmtSignedPriceDelta(n) {
+            if (n == null || !isFinite(n)) return '—';
+            if (Math.abs(n) < 0.005) return '$0.00';
+            return (n > 0 ? '+' : '-') + '$' + Math.abs(n).toFixed(2);
+        }
+        function fmtPrice(n) {
+            return (n == null || !isFinite(n)) ? '—' : ('$' + n.toFixed(2));
+        }
         let _lastStats = null;
         function renderTraderStats(stats) {
             _lastStats = stats || null;
@@ -13038,6 +13379,7 @@ def index():
                 renderMarketMetrics(null);
                 renderGammaProfile(null);
                 renderChainActivity(null);
+                renderCentroidPanel(null);
                 renderScenarioTable(null);
                 return;
             }
@@ -13047,6 +13389,7 @@ def index():
             renderMarketMetrics(stats);
             renderGammaProfile(stats);
             renderChainActivity(stats);
+            renderCentroidPanel(stats.centroid_panel || null);
             // Skip Scenario DOM work on background ticks; applyRightRailTab will
             // render it lazily on first reveal using _lastStats.
             if (activeRailTab === 'scenarios') {
@@ -13312,15 +13655,17 @@ def index():
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
-            volume: 'Volume', volume_ratio: 'Vol Ratio', options_chain: 'Chain',
-            premium: 'Premium', large_trades: 'Flow Blotter', centroid: 'Centroid',
+            volume_ratio: 'Vol Ratio', options_chain: 'Chain',
+            premium: 'Premium', large_trades: 'Flow Blotter',
         };
         function updateSecondaryTabs(chartIds) {
             const grid = document.querySelector('.charts-grid');
             if (!grid) return;
             let bar = document.getElementById('secondary-tabs');
-            if (!chartIds.length) {
+            if (!chartIds.length || chartIds.length === 1) {
                 if (bar) bar.remove();
+                if (chartIds.length === 1) secondaryActiveTab = chartIds[0];
+                applySecondaryTabVisibility();
                 return;
             }
             if (!bar) {
@@ -14055,10 +14400,21 @@ def index():
             const biasEl = document.querySelector('#rail-card-activity [data-met="activity_bias"]');
             const oiFill  = document.querySelector('#rail-card-activity [data-met="oi_fill"]');
             const volFill = document.querySelector('#rail-card-activity [data-met="vol_fill"]');
+            const setSplit = (key, share, callValue, putValue) => {
+                if (share == null || !isFinite(share)) {
+                    _setMet(key, '—');
+                    return;
+                }
+                const callPct = Math.round(share * 100);
+                const putPct = Math.max(0, 100 - callPct);
+                _setMet(key, `C ${callPct}% · ${fmtCountCompact(callValue)} | P ${putPct}% · ${fmtCountCompact(putValue)}`);
+            };
             if (!stats || !stats.chain_activity) {
                 _setMet('activity_bias', '—');
                 _setMet('oi_cp',  '—');
                 _setMet('vol_cp', '—');
+                _setMet('oi_split', '—');
+                _setMet('vol_split', '—');
                 if (biasEl) biasEl.classList.remove('pos', 'neg');
                 if (oiFill) {
                     oiFill.style.width = '0%';
@@ -14091,21 +14447,178 @@ def index():
             }
             _setMet('oi_cp',  ca.oi_cp_ratio  == null ? '—' : ('C/P ' + ca.oi_cp_ratio.toFixed(2)));
             _setMet('vol_cp', ca.vol_cp_ratio == null ? '—' : ('C/P ' + ca.vol_cp_ratio.toFixed(2)));
-            // Map ratio 0.5..2.0 → 0..100% fill, clamped.
-            const fillPct = r => (r == null) ? 0
-                : Math.max(0, Math.min(100, ((r - 0.5) / 1.5) * 100));
+            setSplit('oi_split', ca.oi_call_share, ca.call_oi, ca.put_oi);
+            setSplit('vol_split', ca.vol_call_share, ca.call_vol, ca.put_vol);
+            const fillPct = share => (share == null || !isFinite(share)) ? 0
+                : Math.max(0, Math.min(100, share * 100));
             if (oiFill) {
-                oiFill.style.width  = fillPct(ca.oi_cp_ratio)  + '%';
-                oiFill.classList.toggle('pos', ca.oi_cp_ratio != null && ca.oi_cp_ratio >= 1);
-                oiFill.classList.toggle('neg', ca.oi_cp_ratio != null && ca.oi_cp_ratio < 1);
+                oiFill.style.width  = fillPct(ca.oi_call_share)  + '%';
+                oiFill.classList.toggle('pos', ca.oi_call_share != null && ca.oi_call_share >= 0.5);
+                oiFill.classList.toggle('neg', ca.oi_call_share != null && ca.oi_call_share < 0.5);
             }
             if (volFill) {
-                volFill.style.width = fillPct(ca.vol_cp_ratio) + '%';
-                volFill.classList.toggle('pos', ca.vol_cp_ratio != null && ca.vol_cp_ratio >= 1);
-                volFill.classList.toggle('neg', ca.vol_cp_ratio != null && ca.vol_cp_ratio < 1);
+                volFill.style.width = fillPct(ca.vol_call_share) + '%';
+                volFill.classList.toggle('pos', ca.vol_call_share != null && ca.vol_call_share >= 0.5);
+                volFill.classList.toggle('neg', ca.vol_call_share != null && ca.vol_call_share < 0.5);
             }
         }
-        
+
+        function renderCentroidPanel(panel) {
+            const target = document.querySelector('#rail-card-centroid [data-centroid-sparkline]');
+            const callStrikeEl = document.querySelector('#rail-card-centroid [data-met="centroid_call_strike"]');
+            const putStrikeEl = document.querySelector('#rail-card-centroid [data-met="centroid_put_strike"]');
+            const callDeltaEl = document.querySelector('#rail-card-centroid [data-met="centroid_call_delta"]');
+            const putDeltaEl = document.querySelector('#rail-card-centroid [data-met="centroid_put_delta"]');
+            const callDriftEl = document.querySelector('#rail-card-centroid [data-met="centroid_call_drift"]');
+            const putDriftEl = document.querySelector('#rail-card-centroid [data-met="centroid_put_drift"]');
+            const structureEl = document.querySelector('#rail-card-centroid [data-met="centroid_structure"]');
+            const driftReadEl = document.querySelector('#rail-card-centroid [data-met="centroid_drift_read"]');
+            const setTone = (el, value, flat = 0.005) => {
+                if (!el) return;
+                el.classList.remove('pos', 'neg');
+                if (value != null && isFinite(value) && Math.abs(value) >= flat) {
+                    el.classList.add(value > 0 ? 'pos' : 'neg');
+                }
+            };
+            const setDelta = (el, value, suffix) => {
+                if (!el) return;
+                el.textContent = (fmtSignedPriceDelta(value) === '—')
+                    ? '—'
+                    : (fmtSignedPriceDelta(value) + (suffix ? (' ' + suffix) : ''));
+                setTone(el, value);
+            };
+            const setDrift = (el, label, value, fromTime) => {
+                if (!el) return;
+                el.textContent = (value == null || !isFinite(value))
+                    ? `${label} drift —`
+                    : `${label} drift ${fmtSignedPriceDelta(value)} since ${fromTime || 'open'}`;
+                setTone(el, value, 0.05);
+            };
+            const describeStructure = (callVs, putVs) => {
+                const far = 0.35;
+                const near = 0.2;
+                if (callVs == null || putVs == null) return 'The centroid tracks where call and put volume is clustering by strike.';
+                if (callVs > near && putVs < -near) {
+                    return 'Call volume is centered above spot while put volume sits below it, so flow is bracketing current price.';
+                }
+                if (callVs > far && putVs > 0) {
+                    return 'Both centroids sit above spot, so traded volume is clustering in higher strikes.';
+                }
+                if (callVs < 0 && putVs < -far) {
+                    return 'Both centroids sit below spot, so volume concentration is skewed to lower strikes.';
+                }
+                if (Math.abs(callVs) <= near && Math.abs(putVs) <= near) {
+                    return 'Both centroids are hugging spot, so the highest traded strikes are concentrated near current price.';
+                }
+                if (callVs > near) {
+                    return 'Calls are concentrated above spot, while put volume is staying closer to current price.';
+                }
+                if (putVs < -near) {
+                    return 'Puts are concentrated below spot, while call volume is staying closer to current price.';
+                }
+                return 'The centroid is showing where call and put volume is leaning relative to spot right now.';
+            };
+            const describeDrift = (callDrift, putDrift, spreadDrift, fromTime) => {
+                const move = 0.25;
+                const anchor = fromTime || 'the first print';
+                if (callDrift == null && putDrift == null) {
+                    return 'Drift compares the current centroid strikes against the first centroid print of the session.';
+                }
+                const callActive = callDrift != null && Math.abs(callDrift) >= move;
+                const putActive = putDrift != null && Math.abs(putDrift) >= move;
+                if (!callActive && !putActive) {
+                    return `Centroid drift is quiet since ${anchor}, so the volume center of mass has stayed fairly stable.`;
+                }
+                if (callActive && putActive && callDrift > 0 && putDrift > 0) {
+                    return `Both centroids are drifting higher since ${anchor}, lifting the strike focus of traded volume.`;
+                }
+                if (callActive && putActive && callDrift < 0 && putDrift < 0) {
+                    return `Both centroids are drifting lower since ${anchor}, pulling the strike focus down.`;
+                }
+                if (spreadDrift != null && spreadDrift >= move) {
+                    return `Call and put centroids are separating since ${anchor}, widening the strike distribution.`;
+                }
+                if (spreadDrift != null && spreadDrift <= -move) {
+                    return `Call and put centroids are converging since ${anchor}, compressing the strike distribution.`;
+                }
+                if (callActive && !putActive) {
+                    return `The call centroid is doing most of the moving since ${anchor}, while puts remain relatively anchored.`;
+                }
+                if (!callActive && putActive) {
+                    return `The put centroid is doing most of the moving since ${anchor}, while calls remain relatively anchored.`;
+                }
+                return `Drift shows the strike center shifting since ${anchor}, but without a strong one-sided migration yet.`;
+            };
+            if (!target) return;
+            if (!panel || !Array.isArray(panel.points) || !panel.points.length) {
+                _setMet('centroid_status', 'Waiting');
+                _setMet('centroid_time', '—');
+                _setMet('centroid_spread', '—');
+                _setMet('centroid_call_strike', '—');
+                _setMet('centroid_put_strike', '—');
+                setDelta(callDeltaEl, null, '');
+                setDelta(putDeltaEl, null, '');
+                setDrift(callDriftEl, 'Call', null, '');
+                setDrift(putDriftEl, 'Put', null, '');
+                _setMet('centroid_structure', 'The centroid tracks where call and put volume is clustering by strike.');
+                _setMet('centroid_drift_read', 'Drift compares the current centroid strikes against the first centroid print of the session.');
+                target.innerHTML = '<div class="rail-centroid-empty">' + _escapeHtml((panel && panel.status) || 'Centroid data loads with stream data.') + '</div>';
+                return;
+            }
+
+            _setMet('centroid_status', panel.showing_last_session ? 'Last session' : 'Current session');
+            _setMet('centroid_time', panel.latest_time ? ('Updated ' + panel.latest_time + ' ET') : '—');
+            _setMet('centroid_spread', panel.spread != null && isFinite(panel.spread)
+                ? ('Spread ' + fmtSignedPriceDelta(panel.spread))
+                : 'Spread —');
+            _setMet('centroid_call_strike', fmtPrice(panel.latest_call));
+            _setMet('centroid_put_strike', fmtPrice(panel.latest_put));
+            setDelta(callDeltaEl, panel.call_vs_price, 'vs spot');
+            setDelta(putDeltaEl, panel.put_vs_price, 'vs spot');
+            setDrift(callDriftEl, 'Call', panel.call_drift, panel.first_time);
+            setDrift(putDriftEl, 'Put', panel.put_drift, panel.first_time);
+            _setMet('centroid_structure', describeStructure(panel.call_vs_price, panel.put_vs_price));
+            _setMet('centroid_drift_read', describeDrift(panel.call_drift, panel.put_drift, panel.spread_drift, panel.first_time));
+
+            const points = panel.points;
+            const values = points.flatMap(p => [p.call, p.price, p.put]).filter(v => v != null && isFinite(v));
+            if (values.length < 2) {
+                target.innerHTML = '<div class="rail-centroid-empty">Need more centroid history for a trend line.</div>';
+                return;
+            }
+
+            const width = 320;
+            const height = 68;
+            const pad = 6;
+            const min = Math.min(...values);
+            const max = Math.max(...values);
+            const range = Math.max(max - min, 0.5);
+            const seriesPath = key => {
+                let path = '';
+                let hasSegment = false;
+                points.forEach((point, idx) => {
+                    const val = point[key];
+                    if (val == null || !isFinite(val)) {
+                        hasSegment = false;
+                        return;
+                    }
+                    const x = pad + ((width - pad * 2) * idx / Math.max(points.length - 1, 1));
+                    const y = height - pad - (((val - min) / range) * (height - pad * 2));
+                    path += (hasSegment ? ' L ' : ' M ') + x.toFixed(2) + ' ' + y.toFixed(2);
+                    hasSegment = true;
+                });
+                return path.trim();
+            };
+            const midY = (height / 2).toFixed(2);
+            target.innerHTML =
+                '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" aria-hidden="true">' +
+                    '<line x1="0" y1="' + midY + '" x2="' + width + '" y2="' + midY + '" stroke="rgba(156,163,175,0.16)" stroke-width="1" />' +
+                    '<path d="' + seriesPath('call') + '" fill="none" stroke="var(--call)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />' +
+                    '<path d="' + seriesPath('price') + '" fill="none" stroke="#D4AF37" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />' +
+                    '<path d="' + seriesPath('put') + '" fill="none" stroke="var(--put)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />' +
+                '</svg>';
+        }
+
         function loadExpirations() {
             const ticker = document.getElementById('ticker').value;
             fetch(`/expirations/${ticker}`)
@@ -14559,8 +15072,7 @@ def index():
             gamma: 'Gamma', delta: 'Delta', vanna: 'Vanna', charm: 'Charm',
             speed: 'Speed', vomma: 'Vomma', color: 'Color',
             options_volume: 'Options Vol', open_interest: 'Open Interest',
-            volume: 'Volume', large_trades: 'Flow Blotter',
-            premium: 'Premium', centroid: 'Centroid',
+            large_trades: 'Flow Blotter', premium: 'Premium',
             hvl: 'HVL line', em_2s: '±2σ EM lines', walls_2: 'Secondary walls',
             historical_dots: 'Historical dots'
         };
@@ -14909,7 +15421,7 @@ def update():
         if data.get('show_color', True):
             response['color'] = create_exposure_chart(calls, puts, "Color", "Color Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
-        if data.get('show_volume', True):
+        if data.get('show_volume', False):
             response['volume'] = create_volume_chart(call_volume, put_volume, use_range, call_color, put_color, expiry_dates)
         
         if data.get('show_options_volume', True):
@@ -14933,7 +15445,7 @@ def update():
         if data.get('show_large_trades', True):
             response['large_trades'] = create_large_trades_table(calls, puts, S, strike_range, call_color, put_color, expiry_dates)
         
-        if data.get('show_centroid', True):
+        if data.get('show_centroid', False):
             response['centroid'] = create_centroid_chart(ticker, call_color, put_color, expiry_dates)
 
         
