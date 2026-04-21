@@ -2479,21 +2479,29 @@ def update_options_chain(ticker, expiration_date=None):
     except Exception as e:
         print(f"Error updating options chain: {e}")
 
-def aggregate_to_hourly(candles):
-    """Aggregate sub-hourly candles to 1-hour candles aligned to ET hour boundaries."""
+def aggregate_candles_to_timeframe(candles, timeframe_minutes):
+    """Aggregate minute candles into ET-aligned buckets for unsupported chart intervals."""
+    if timeframe_minutes <= 1 or not candles:
+        return candles
+
     tz = pytz.timezone('US/Eastern')
-    hourly = {}
+    buckets = {}
     for candle in candles:
         et = datetime.fromtimestamp(candle['datetime'] / 1000, tz)
-        hour_key = et.replace(minute=0, second=0, microsecond=0)
-        if hour_key not in hourly:
-            hourly[hour_key] = []
-        hourly[hour_key].append(candle)
+        day_start = et.replace(hour=0, minute=0, second=0, microsecond=0)
+        if timeframe_minutes >= 1440:
+            bucket_key = day_start
+        else:
+            minutes_since_midnight = et.hour * 60 + et.minute
+            bucket_minute = (minutes_since_midnight // timeframe_minutes) * timeframe_minutes
+            bucket_key = day_start + timedelta(minutes=bucket_minute)
+        buckets.setdefault(bucket_key, []).append(candle)
+
     result = []
-    for hour_key in sorted(hourly.keys()):
-        group = hourly[hour_key]
+    for bucket_key in sorted(buckets.keys()):
+        group = buckets[bucket_key]
         result.append({
-            'datetime': group[0]['datetime'],
+            'datetime': int(bucket_key.timestamp() * 1000),
             'open': group[0]['open'],
             'high': max(c['high'] for c in group),
             'low': min(c['low'] for c in group),
@@ -2515,7 +2523,18 @@ def get_price_history(ticker, timeframe=1):
         # Map timeframe (minutes) -> trading-day lookback. Finer timeframes get less
         # history to keep payload size bounded; coarser timeframes stretch further back
         # so the chart shows meaningful structure without wasting bandwidth on 1-min bars.
-        PERIOD_BY_TF = {1: 5, 5: 20, 15: 30, 30: 30, 60: 90}
+        PERIOD_BY_TF = {
+            1: 5,
+            2: 10,
+            3: 10,
+            5: 20,
+            10: 20,
+            15: 30,
+            30: 30,
+            60: 90,
+            240: 120,
+            1440: 180,
+        }
         period_days = PERIOD_BY_TF.get(timeframe, 20)
 
         # +5 calendar-day cushion covers weekends/holidays that filter_market_hours() drops.
@@ -2523,8 +2542,13 @@ def get_price_history(ticker, timeframe=1):
         end_date = datetime.combine(current_date + timedelta(days=1), datetime.min.time())
 
         # Schwab API only supports minute frequencies: 1, 5, 10, 15, 30.
-        # For 60-min (hourly), fetch 30-min candles and aggregate after.
-        api_frequency = 30 if timeframe == 60 else timeframe
+        # Unsupported chart intervals are derived from a smaller native fetch.
+        if timeframe in (1, 5, 10, 15, 30):
+            api_frequency = timeframe
+        elif timeframe in (2, 3):
+            api_frequency = 1
+        else:
+            api_frequency = 30
 
         # Schwab's `period` param strict-validates to {1,2,3,4,5,10} for periodType="day".
         # startDate/endDate drive the actual fetch window, so cap `period` at 10 to stay
@@ -2558,9 +2582,8 @@ def get_price_history(ticker, timeframe=1):
         # Sort candles by timestamp
         candles.sort(key=lambda x: x['datetime'])
 
-        # Aggregate to hourly candles if requested
-        if timeframe == 60:
-            candles = aggregate_to_hourly(candles)
+        if timeframe not in (1, 5, 10, 15, 30):
+            candles = aggregate_candles_to_timeframe(candles, timeframe)
 
         # Get previous trading day's close
         prev_day_candles = []
@@ -5993,7 +6016,7 @@ def index():
             font-size: 13px;
         }
         .top-bar #ticker { width: 90px; min-width: 90px; }
-        .top-bar #timeframe { width: 92px; min-width: 92px; }
+        .top-bar #timeframe { width: 108px; min-width: 108px; }
         .top-bar .expiry-dropdown { min-width: 150px; }
         .top-bar .expiry-display { padding: 4px 8px; min-height: 28px; font-size: 13px; }
         .top-bar #token-monitor {
@@ -7908,10 +7931,15 @@ def index():
             <input type="text" id="ticker" placeholder="Ticker" value="SPY" title="Enter a ticker symbol (e.g., SPY, AAPL) or special aggregate tickers: 'MARKET' (SPX base) or 'MARKET2' (SPY base)">
             <select id="timeframe" title="Candle timeframe">
                 <option value="1">1 min</option>
+                <option value="2">2 min</option>
+                <option value="3">3 min</option>
                 <option value="5">5 min</option>
+                <option value="10">10 min</option>
                 <option value="15">15 min</option>
                 <option value="30">30 min</option>
                 <option value="60">1 hour</option>
+                <option value="240">4 hour</option>
+                <option value="1440">Daily</option>
             </select>
             <div class="expiry-dropdown">
                 <div class="expiry-display" id="expiry-display">
@@ -8361,6 +8389,8 @@ def index():
         let tvLastTicker = null;
         // When true, the next render will call fitContent() regardless of tvAutoRange
         let tvForceFit = false;
+        // When true, the next render re-centers on the active trading session.
+        let tvForceSessionFocus = false;
         // EventSource for real-time price streaming from /price_stream/<ticker>
         let priceEventSource = null;
         let priceStreamTicker = null;
@@ -8407,12 +8437,22 @@ def index():
             options_volume: 'Options Vol',
             premium: 'Premium',
         };
+        const STRIKE_RAIL_PREF_VERSION_KEY = 'gex.strikeRailTabPrefVersion';
         let activeStrikeRailTab = (() => {
             try {
                 const saved = localStorage.getItem(STRIKE_RAIL_TAB_KEY);
-                return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'open_interest';
+                const prefVersion = localStorage.getItem(STRIKE_RAIL_PREF_VERSION_KEY);
+                if (saved === 'open_interest' && prefVersion !== '2') {
+                    localStorage.setItem(STRIKE_RAIL_TAB_KEY, 'gex');
+                    localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
+                    return 'gex';
+                }
+                if (!prefVersion) {
+                    localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
+                }
+                return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'gex';
             } catch (e) {
-                return 'open_interest';
+                return 'gex';
             }
         })();
         function getChartVisibility() {
@@ -8591,6 +8631,29 @@ def index():
             }, 50);
         }
 
+        function tvFocusCurrentSession() {
+            if (!tvPriceChart || !tvLastCandles.length) return;
+            setTimeout(() => {
+                try {
+                    let startIndex = Math.max(0, tvLastCandles.length - 80);
+                    if (tvCurrentDayStartTime) {
+                        const idx = tvLastCandles.findIndex(candle => candle.time >= tvCurrentDayStartTime);
+                        if (idx >= 0) startIndex = idx;
+                    }
+                    tvPriceChart.timeScale().setVisibleLogicalRange({
+                        from: Math.max(0, startIndex - 1),
+                        to: (tvLastCandles.length - 1) + 2,
+                    });
+                    tvPriceChart.priceScale('right').applyOptions({ autoScale: true });
+                    tvApplyAutoscale();
+                    if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
+                    if (tvMacdChart) tvMacdChart.priceScale('right').applyOptions({ autoScale: true });
+                    scheduleTVHistoricalOverlayDraw();
+                    scheduleGexPanelSync();
+                } catch(e) {}
+            }, 50);
+        }
+
         // ── Real-time price streaming via Server-Sent Events ─────────────────
         function disconnectPriceStream() {
             if (priceEventSource) {
@@ -8645,6 +8708,10 @@ def index():
         function tvBucketStartForUnixSec(unixSec) {
             if (!Number.isFinite(unixSec)) return null;
             const bucketSec = tvBucketSec();
+            if (tvCurrentDayStartTime > 0 && bucketSec >= 4 * 60 * 60) {
+                return tvCurrentDayStartTime
+                    + (Math.floor((unixSec - tvCurrentDayStartTime) / bucketSec) * bucketSec);
+            }
             return Math.floor(unixSec / bucketSec) * bucketSec;
         }
 
@@ -8661,7 +8728,7 @@ def index():
 
         /**
          * Update the current bucket's high/low/close from a real-time last price.
-         * Bucket boundaries follow the selected timeframe (1m/5m/15m/30m/1h).
+         * Bucket boundaries follow the selected timeframe.
          */
         function applyRealtimeQuote(last) {
             // Track live price and debounce Plotly chart updates
@@ -9504,6 +9571,7 @@ def index():
 
         // Coloring mode listeners
         document.getElementById('timeframe').addEventListener('change', function() {
+            tvForceSessionFocus = true;
             updateData();
             startCandleCloseTimer();
         });
@@ -9574,7 +9642,7 @@ def index():
                 tvLastCandles = [];
                 tvIndicatorCandles = [];
                 tvCurrentDayStartTime = 0;
-                tvForceFit = true;
+                tvForceSessionFocus = true;
                 // Disconnect the price stream so it reconnects on the new ticker
                 disconnectPriceStream();
             }
@@ -10391,17 +10459,25 @@ def index():
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
-            arBtn.className = 'tv-tb-btn' + (tvAutoRange ? ' active' : '');
-            arBtn.title = 'Auto-Range: when ON, the chart fits all candles on every data update. When OFF, your zoom & pan are preserved.';
-            arBtn.textContent = tvAutoRange ? '⤢ Auto-Range ON' : '⤢ Auto-Range OFF';
-            arBtn.addEventListener('click', () => {
-                tvAutoRange = !tvAutoRange;
+            const syncAutoRangeButton = () => {
                 arBtn.textContent = tvAutoRange ? '⤢ Auto-Range ON' : '⤢ Auto-Range OFF';
                 arBtn.classList.toggle('active', tvAutoRange);
+            };
+            arBtn.className = 'tv-tb-btn' + (tvAutoRange ? ' active' : '');
+            arBtn.title = 'Auto-Range: when ON, the chart fits all candles on every data update. When OFF, your zoom & pan are preserved.';
+            syncAutoRangeButton();
+            arBtn.addEventListener('click', () => {
+                tvAutoRange = !tvAutoRange;
+                syncAutoRangeButton();
                 if (tvPriceChart) tvFitAll();  // always fit immediately when toggling, ON or OFF
             });
             addRight(arBtn);
 
+            addRight(btn('Today', 'Zoom to the current trading day', () => {
+                tvAutoRange = false;
+                syncAutoRangeButton();
+                tvFocusCurrentSession();
+            }));
             addRight(btn('⟳ Reset', 'Reset zoom and pan to fit all data', () => tvFitAll()));
 
             const volumeStatusEl = document.createElement('span');
@@ -10918,8 +10994,9 @@ def index():
             // Re-sync GEX side panel after candles + autoscale settle
             scheduleGexPanelSync();
 
-            // fitContent on first render, when auto-range is ON, or when explicitly forced (ticker change)
-            if (tvAutoRange || isFirstRender || tvForceFit) {
+            const shouldFitAll = tvAutoRange || tvForceFit;
+            const shouldFocusSession = !shouldFitAll && (isFirstRender || tvForceSessionFocus);
+            if (shouldFitAll) {
                 const _chart = tvPriceChart;
                 setTimeout(() => {
                     try {
@@ -10931,8 +11008,11 @@ def index():
                         scheduleTVHistoricalOverlayDraw();
                     } catch(e) {}
                 }, 50);
-                tvForceFit = false;
+            } else if (shouldFocusSession) {
+                tvFocusCurrentSession();
             }
+            tvForceFit = false;
+            tvForceSessionFocus = false;
         }
         // ─────────────────────────────────────────────────────────────────────
 
@@ -11419,7 +11499,10 @@ def index():
                     const next = btn.dataset.strikeRailTab;
                     if (!next || next === activeStrikeRailTab) return;
                     activeStrikeRailTab = next;
-                    try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
+                    try {
+                        localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab);
+                        localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
+                    } catch (e) {}
                     applyStrikeRailTabs();
                     renderStrikeRailPanel();
                 });
@@ -11431,7 +11514,10 @@ def index():
                     const next = select.value;
                     if (!next || next === activeStrikeRailTab) return;
                     activeStrikeRailTab = next;
-                    try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
+                    try {
+                        localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab);
+                        localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
+                    } catch (e) {}
                     applyStrikeRailTabs();
                     renderStrikeRailPanel();
                 });
@@ -13156,10 +13242,6 @@ def index():
                 const chartSettings = Object.assign({}, settings.charts);
                 if (settingsSchemaVersion < 2 && chartSettings.open_interest === false) {
                     chartSettings.open_interest = true;
-                    if (activeStrikeRailTab === 'gex') {
-                        activeStrikeRailTab = 'open_interest';
-                        try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
-                    }
                 }
                 setAllChartVisibility(chartSettings);
                 if (typeof renderChartVisibilitySection === 'function') renderChartVisibilitySection();
