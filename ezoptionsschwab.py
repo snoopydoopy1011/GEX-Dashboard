@@ -2100,7 +2100,7 @@ def create_volume_chart(call_volume, put_volume, use_itm=True, call_color=CALL_C
     apply_plotly_theme(fig)
     return fig.to_json()
 
-def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=True, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute'):
+def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CALL_COLOR, put_color=PUT_COLOR, coloring_mode='Solid', show_calls=True, show_puts=True, show_net=False, selected_expiries=None, horizontal=False, highlight_max_level=False, max_level_color='#800080', max_level_mode='Absolute', show_totals=True):
     # Filter strikes within range
     min_strike = S * (1 - strike_range)
     max_strike = S * (1 + strike_range)
@@ -2114,112 +2114,128 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
         strike_interval = get_strike_interval(all_strikes)
         calls = aggregate_by_strike(calls, ['volume'], strike_interval)
         puts = aggregate_by_strike(puts, ['volume'], strike_interval)
-    
+
+    all_strikes_list = sorted(set(calls['strike'].tolist() + puts['strike'].tolist()))
+    call_volume_by_strike = {
+        float(strike): float(volume)
+        for strike, volume in zip(calls['strike'].tolist(), calls['volume'].tolist())
+    }
+    put_volume_by_strike = {
+        float(strike): float(volume)
+        for strike, volume in zip(puts['strike'].tolist(), puts['volume'].tolist())
+    }
+    call_volume = [call_volume_by_strike.get(float(strike), 0.0) for strike in all_strikes_list]
+    put_volume = [put_volume_by_strike.get(float(strike), 0.0) for strike in all_strikes_list]
+    total_volume = [call + put for call, put in zip(call_volume, put_volume)]
+    net_volume = [call - put for call, put in zip(call_volume, put_volume)]
+
+    if not show_calls and not show_puts and not show_net:
+        show_calls = True
+        show_puts = True
+
     # Create figure
     fig = go.Figure()
-    
-    # Calculate max volume for normalization across all data
-    max_volume = 1.0
-    all_abs_vals = []
-    if not calls.empty:
-        all_abs_vals.extend(calls['volume'].abs().tolist())
-    if not puts.empty:
-        all_abs_vals.extend(puts['volume'].abs().tolist())
-    if all_abs_vals:
-        max_volume = max(all_abs_vals)
-    if max_volume == 0:
-        max_volume = 1.0
-    
+    max_side_volume = max(call_volume + put_volume + [1.0])
+    max_net_volume = max([abs(val) for val in net_volume] + [1.0])
+    label_threshold = max_side_volume * 0.16
+
+    def _call_put_customdata():
+        return [
+            [format_large_number(call), format_large_number(put), format_large_number(total)]
+            for call, put, total in zip(call_volume, put_volume, total_volume)
+        ]
+
+    customdata = _call_put_customdata()
+    call_text = [format_large_number(val) if show_totals and val >= label_threshold else '' for val in call_volume]
+    put_text = [format_large_number(val) if show_totals and val >= label_threshold else '' for val in put_volume]
+
     # Add call volume bars
-    if show_calls and not calls.empty:
-        # Apply coloring mode
-        call_colors = get_colors(call_color, calls['volume'], max_volume, coloring_mode)
-            
-        if horizontal:
-            fig.add_trace(go.Bar(
-                y=calls['strike'].tolist(),
-                x=calls['volume'].tolist(),
-                name='Call',
-                marker_color=call_colors,
-                text=calls['volume'].tolist(),
-                textposition='auto',
-                orientation='h',
-                hovertemplate='Strike: %{y}<br>Volume: %{x}<extra></extra>',
-                marker_line_width=0
-            ))
-        else:
-            fig.add_trace(go.Bar(
-                x=calls['strike'].tolist(),
-                y=calls['volume'].tolist(),
-                name='Call',
-                marker_color=call_colors,
-                text=calls['volume'].tolist(),
-                textposition='auto',
-                hovertemplate='Strike: %{x}<br>Volume: %{y}<extra></extra>',
-                marker_line_width=0
-            ))
-    
-    # Add put volume bars (as negative values)
-    if show_puts and not puts.empty:
-        # Apply coloring mode
-        put_colors = get_colors(put_color, puts['volume'], max_volume, coloring_mode)
-            
-        if horizontal:
-            fig.add_trace(go.Bar(
-                y=puts['strike'].tolist(),
-                x=[-v for v in puts['volume'].tolist()],  # Make put volumes negative
-                name='Put',
-                marker_color=put_colors,
-                text=puts['volume'].tolist(),
-                textposition='auto',
-                orientation='h',
-                hovertemplate='Strike: %{y}<br>Volume: %{text}<extra></extra>',  # Show positive value in hover
-                marker_line_width=0
-            ))
-        else:
-            fig.add_trace(go.Bar(
-                x=puts['strike'].tolist(),
-                y=[-v for v in puts['volume'].tolist()],  # Make put volumes negative
-                name='Put',
-                marker_color=put_colors,
-                text=puts['volume'].tolist(),
-                textposition='auto',
-                hovertemplate='Strike: %{x}<br>Volume: %{text}<extra></extra>',  # Show positive value in hover
-                marker_line_width=0
-            ))
-    
-    # Add net volume bars if enabled
-    if show_net and not (calls.empty and puts.empty):
-        # Create net volume by combining calls and puts
-        all_strikes_list = sorted(set(calls['strike'].tolist() + puts['strike'].tolist()))
-        net_volume = []
-        
-        for strike in all_strikes_list:
-            call_vol = calls[calls['strike'] == strike]['volume'].sum() if not calls.empty else 0
-            put_vol = puts[puts['strike'] == strike]['volume'].sum() if not puts.empty else 0
-            net_vol = call_vol - put_vol
-            
-            net_volume.append(net_vol)
-        
-        # Calculate max for net volume normalization
-        max_net_volume = max(abs(min(net_volume)), abs(max(net_volume))) if net_volume else 1.0
-        if max_net_volume == 0:
-            max_net_volume = 1.0
-        
-        # Apply coloring mode for net values
-        net_colors = get_net_colors(net_volume, max_net_volume, call_color, put_color, coloring_mode)
-        
+    if show_calls and all_strikes_list:
+        call_colors = get_colors(call_color, call_volume, max_side_volume, coloring_mode)
         if horizontal:
             fig.add_trace(go.Bar(
                 y=all_strikes_list,
+                x=call_volume,
+                name='Calls',
+                marker_color=call_colors,
+                customdata=customdata,
+                text=call_text,
+                textposition='inside',
+                insidetextanchor='middle',
+                textfont=dict(size=10, color='#E5E7EB'),
+                orientation='h',
+                hovertemplate='Strike: %{y}<br>Calls: %{customdata[0]}<br>Puts: %{customdata[1]}<br>Total: %{customdata[2]}<extra></extra>',
+                marker_line_width=0
+            ))
+        else:
+            fig.add_trace(go.Bar(
+                x=all_strikes_list,
+                y=call_volume,
+                name='Calls',
+                marker_color=call_colors,
+                customdata=customdata,
+                text=call_text,
+                textposition='inside',
+                insidetextanchor='middle',
+                textfont=dict(size=10, color='#E5E7EB'),
+                hovertemplate='Strike: %{x}<br>Calls: %{customdata[0]}<br>Puts: %{customdata[1]}<br>Total: %{customdata[2]}<extra></extra>',
+                marker_line_width=0
+            ))
+
+    # Add put volume bars mirrored from zero so the split is visible at each strike.
+    if show_puts and all_strikes_list:
+        put_colors = get_colors(put_color, put_volume, max_side_volume, coloring_mode)
+        if horizontal:
+            fig.add_trace(go.Bar(
+                y=all_strikes_list,
+                x=[-v for v in put_volume],
+                name='Puts',
+                marker_color=put_colors,
+                customdata=customdata,
+                text=put_text,
+                textposition='inside',
+                insidetextanchor='middle',
+                textfont=dict(size=10, color='#E5E7EB'),
+                orientation='h',
+                hovertemplate='Strike: %{y}<br>Puts: %{customdata[1]}<br>Calls: %{customdata[0]}<br>Total: %{customdata[2]}<extra></extra>',
+                marker_line_width=0
+            ))
+        else:
+            fig.add_trace(go.Bar(
+                x=all_strikes_list,
+                y=[-v for v in put_volume],
+                name='Puts',
+                marker_color=put_colors,
+                customdata=customdata,
+                text=put_text,
+                textposition='inside',
+                insidetextanchor='middle',
+                textfont=dict(size=10, color='#E5E7EB'),
+                hovertemplate='Strike: %{x}<br>Puts: %{customdata[1]}<br>Calls: %{customdata[0]}<br>Total: %{customdata[2]}<extra></extra>',
+                marker_line_width=0
+            ))
+
+    # Add a lighter net overlay so the split profile stays primary.
+    if show_net and all_strikes_list:
+        net_colors = get_net_colors(net_volume, max_net_volume, call_color, put_color, coloring_mode)
+        if horizontal:
+            marker_sizes = [
+                6 + (10 * (abs(val) / max_net_volume if max_net_volume else 0))
+                for val in net_volume
+            ]
+            fig.add_trace(go.Scatter(
+                y=all_strikes_list,
                 x=net_volume,
                 name='Net',
-                marker_color=net_colors,
-                text=[f"{vol:,.0f}" for vol in net_volume],
-                textposition='auto',
-                orientation='h',
-                hovertemplate='Strike: %{y}<br>Net Volume: %{x}<extra></extra>',
-                marker_line_width=0
+                mode='markers',
+                customdata=customdata,
+                marker=dict(
+                    color=net_colors,
+                    size=marker_sizes,
+                    symbol='circle',
+                    line=dict(color='rgba(255,255,255,0.18)', width=1),
+                ),
+                hovertemplate='Strike: %{y}<br>Net: %{x:,.0f}<br>Calls: %{customdata[0]}<br>Puts: %{customdata[1]}<extra></extra>',
             ))
         else:
             fig.add_trace(go.Bar(
@@ -2227,10 +2243,11 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
                 y=net_volume,
                 name='Net',
                 marker_color=net_colors,
-                text=[f"{vol:,.0f}" for vol in net_volume],
+                text=[format_large_number(val) for val in net_volume],
                 textposition='auto',
-                hovertemplate='Strike: %{x}<br>Net Volume: %{y}<extra></extra>',
-                marker_line_width=0
+                hovertemplate='Strike: %{x}<br>Net Volume: %{y:,.0f}<extra></extra>',
+                marker_line_width=0,
+                opacity=0.42
             ))
     
     if horizontal:
@@ -2287,10 +2304,23 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
     )
     
     if horizontal:
-         yaxis_config.update(dict(
+        x_padding = max_side_volume * 1.08
+        xaxis_config.update(dict(
+            range=[-x_padding, max_side_volume * 1.08],
+            autorange=False,
+            tickvals=[-max_side_volume, -(max_side_volume / 2.0), 0, max_side_volume / 2.0, max_side_volume],
+            ticktext=[
+                format_large_number(max_side_volume),
+                format_large_number(max_side_volume / 2.0),
+                '0',
+                format_large_number(max_side_volume / 2.0),
+                format_large_number(max_side_volume),
+            ],
+        ))
+        yaxis_config.update(dict(
             range=[min_strike, max_strike],
             autorange=False
-         ))
+        ))
     else:
         xaxis_config.update(dict(
             range=[min_strike, max_strike],
@@ -2330,7 +2360,7 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
         ),
         bargap=0.1,
         bargroupgap=0.1,
-        margin=dict(l=50, r=50, t=50, b=100),
+        margin=dict(l=50, r=50, t=50, b=(40 if horizontal else 100)),
         hoverlabel=dict(
             bgcolor=PLOT_THEME['paper_bgcolor'],
             font_size=12,
@@ -2350,7 +2380,7 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
     if highlight_max_level:
         try:
             if max_level_mode == 'Net':
-                net_trace_idx = next((i for i, t in enumerate(fig.data) if t.type == 'bar' and t.name == 'Net'), None)
+                net_trace_idx = next((i for i, t in enumerate(fig.data) if t.name == 'Net'), None)
                 if net_trace_idx is not None:
                     raw = fig.data[net_trace_idx].x if horizontal else fig.data[net_trace_idx].y
                     if raw:
@@ -2360,11 +2390,23 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
                             max_bar_idx = vals.index(max(vals))
                         else:
                             max_bar_idx = vals.index(min(vals))
-                        line_widths = [0] * len(vals)
-                        line_widths[max_bar_idx] = 5
-                        fig.data[net_trace_idx].update(marker=dict(
-                            line=dict(width=line_widths, color=max_level_color)
-                        ))
+                        net_trace = fig.data[net_trace_idx]
+                        if net_trace.type == 'scatter':
+                            base_sizes = list(net_trace.marker.size) if hasattr(net_trace.marker, 'size') else [8] * len(vals)
+                            boosted_sizes = [float(size) for size in base_sizes]
+                            boosted_sizes[max_bar_idx] = boosted_sizes[max_bar_idx] + 6
+                            line_widths = [1] * len(vals)
+                            line_widths[max_bar_idx] = 3
+                            net_trace.update(marker=dict(
+                                size=boosted_sizes,
+                                line=dict(width=line_widths, color=max_level_color)
+                            ))
+                        else:
+                            line_widths = [0] * len(vals)
+                            line_widths[max_bar_idx] = 5
+                            net_trace.update(marker=dict(
+                                line=dict(width=line_widths, color=max_level_color)
+                            ))
             else:
                 max_abs_val = 0
                 max_trace_idx = -1
@@ -2380,13 +2422,35 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
                                     max_abs_val = local_max
                                     max_trace_idx = i
                                     max_bar_idx = abs_vals.index(local_max)
+                    elif trace.type == 'scatter' and trace.name == 'Net':
+                        vals = trace.x if horizontal else trace.y
+                        if vals:
+                            abs_vals = [abs(v) for v in vals]
+                            if abs_vals:
+                                local_max = max(abs_vals)
+                                if local_max > max_abs_val:
+                                    max_abs_val = local_max
+                                    max_trace_idx = i
+                                    max_bar_idx = abs_vals.index(local_max)
                 if max_trace_idx != -1:
-                    vals = fig.data[max_trace_idx].x if horizontal else fig.data[max_trace_idx].y
-                    line_widths = [0] * len(vals)
-                    line_widths[max_bar_idx] = 5
-                    fig.data[max_trace_idx].update(marker=dict(
-                        line=dict(width=line_widths, color=max_level_color)
-                    ))
+                    trace = fig.data[max_trace_idx]
+                    vals = trace.x if horizontal else trace.y
+                    if trace.type == 'scatter':
+                        base_sizes = list(trace.marker.size) if hasattr(trace.marker, 'size') else [8] * len(vals)
+                        boosted_sizes = [float(size) for size in base_sizes]
+                        boosted_sizes[max_bar_idx] = boosted_sizes[max_bar_idx] + 6
+                        line_widths = [1] * len(vals)
+                        line_widths[max_bar_idx] = 3
+                        trace.update(marker=dict(
+                            size=boosted_sizes,
+                            line=dict(width=line_widths, color=max_level_color)
+                        ))
+                    else:
+                        line_widths = [0] * len(vals)
+                        line_widths[max_bar_idx] = 5
+                        trace.update(marker=dict(
+                            line=dict(width=line_widths, color=max_level_color)
+                        ))
         except Exception as e:
             print(f"Error highlighting max level in options volume: {e}")
 
@@ -6154,7 +6218,7 @@ def index():
             text-align: center;
         }
         .chart-grid {
-            --gex-col-w: 320px;
+            --gex-col-w: 352px;
             --rail-col-w: 272px;
             --workspace-pane-h: clamp(700px, 74vh, 840px);
             display: grid;
@@ -6176,6 +6240,51 @@ def index():
         /* Remaining rows span all columns. */
         .chart-grid > #secondary-tabs { grid-column: 1 / -1; }
         .chart-grid > .charts-grid    { grid-column: 1 / -1; }
+        .chart-grid > .gex-resize-handle {
+            grid-column: 2;
+            grid-row: 1 / span 2;
+            justify-self: start;
+            align-self: stretch;
+            width: 12px;
+            margin-left: -6px;
+            cursor: ew-resize;
+            z-index: 8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+            touch-action: none;
+        }
+        .gex-resize-handle::before {
+            content: '↔';
+            width: 18px;
+            height: 54px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: rgba(21, 26, 33, 0.92);
+            border: 1px solid var(--border);
+            color: var(--fg-2);
+            font-size: 11px;
+            line-height: 1;
+            opacity: 0;
+            transform: scale(0.96);
+            transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+            pointer-events: none;
+        }
+        .gex-resize-handle:hover::before,
+        .gex-resize-handle.dragging::before {
+            opacity: 1;
+            transform: scale(1);
+            color: var(--fg-0);
+            border-color: var(--accent);
+        }
+        body.gex-resize-active,
+        body.gex-resize-active * {
+            cursor: ew-resize !important;
+            user-select: none !important;
+        }
 
         .chart-container {
             padding: 5px;
@@ -6989,6 +7098,7 @@ def index():
         .chart-grid.gex-collapsed .gex-column > .gex-side-panel-wrap {
             display: none;
         }
+        .chart-grid.gex-collapsed .gex-resize-handle { display: none; }
         .chart-grid.gex-collapsed .gex-col-header { padding: 0 2px; justify-content: center; }
 
         /* ── Secondary chart tab bar ──────────────────────────────── */
@@ -7600,6 +7710,7 @@ def index():
             .chart-grid > .right-rail-panels     { grid-column: 2; grid-row: 2 / span 3; }
             .chart-grid > .gex-col-header        { grid-column: 1; grid-row: 3; }
             .chart-grid > .gex-column            { grid-column: 1; grid-row: 4; height: 420px; }
+            .chart-grid > .gex-resize-handle     { display: none; }
             .chart-grid > #secondary-tabs,
             .chart-grid > .charts-grid {
                 grid-column: 1 / -1;
@@ -7613,6 +7724,7 @@ def index():
             }
             .chart-grid > .tv-toolbar-container,
             .chart-grid > .gex-col-header,
+            .chart-grid > .gex-resize-handle,
             .chart-grid > .right-rail-tabs,
             .chart-grid > .price-chart-container,
             .chart-grid > .gex-column,
@@ -7621,6 +7733,7 @@ def index():
             .chart-grid > .charts-grid {
                 grid-column: 1;
             }
+            .chart-grid > .gex-resize-handle { display: none; }
             .gex-column { height: 420px; }
             .right-rail-panels { height: 420px; }
         }
@@ -7899,6 +8012,27 @@ def index():
                         </div>
                     </div>
                 </details>
+                <details class="drawer-section" open>
+                    <summary>Options Volume</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="ov_show_calls" checked>
+                            <label for="ov_show_calls">Show call profile</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="ov_show_puts" checked>
+                            <label for="ov_show_puts">Show put profile</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="ov_show_net">
+                            <label for="ov_show_net">Show net overlay</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="ov_show_totals" checked>
+                            <label for="ov_show_totals">Show bar labels</label>
+                        </div>
+                    </div>
+                </details>
                 <details class="drawer-section">
                     <summary>Price Levels</summary>
                     <div class="drawer-content">
@@ -8021,6 +8155,7 @@ def index():
                 </div>
                 <button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>
             </div>
+            <div class="gex-resize-handle" id="gex-resize-handle" role="separator" aria-label="Resize strike rail" aria-orientation="vertical"></div>
             <div class="right-rail-tabs" id="right-rail-tabs">
                 <button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
@@ -8258,6 +8393,7 @@ def index():
         const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
         const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
         const STRIKE_RAIL_TAB_KEY = 'gex.strikeRailTab';
+        const GEX_COL_WIDTH_KEY = 'gex.sidePanelWidthPx';
         const STRIKE_RAIL_CHART_IDS = ['gamma', 'delta', 'vanna', 'charm', 'open_interest', 'options_volume', 'premium'];
         const STRIKE_RAIL_LABELS = {
             gex: 'GEX',
@@ -8272,9 +8408,9 @@ def index():
         let activeStrikeRailTab = (() => {
             try {
                 const saved = localStorage.getItem(STRIKE_RAIL_TAB_KEY);
-                return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'gex';
+                return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'open_interest';
             } catch (e) {
-                return 'gex';
+                return 'open_interest';
             }
         })();
         function getChartVisibility() {
@@ -9486,7 +9622,11 @@ def index():
                 highlight_max_level: highlightMaxLevel,
                 max_level_color: maxLevelColor,
                 coloring_mode: coloringMode,
-                top_oi_count: topOiCount
+                top_oi_count: topOiCount,
+                ov_show_calls: !!document.getElementById('ov_show_calls').checked,
+                ov_show_puts: !!document.getElementById('ov_show_puts').checked,
+                ov_show_net: !!document.getElementById('ov_show_net').checked,
+                ov_show_totals: !!document.getElementById('ov_show_totals').checked,
             };
 
             // Fetch price history: immediate on ticker/settings change, throttled to 30s otherwise.
@@ -10911,7 +11051,10 @@ def index():
             const grid = document.getElementById('chart-grid');
             if (!grid) return null;
             let priceContainer = grid.querySelector('.price-chart-container');
-            if (priceContainer) return priceContainer;
+            if (priceContainer) {
+                ensureStrikeRailResizeHandle(grid);
+                return priceContainer;
+            }
 
             let toolbar = grid.querySelector('.tv-toolbar-container');
             if (!toolbar) {
@@ -10934,6 +11077,7 @@ def index():
                 grid.appendChild(gexHeader);
                 wireGexColumnToggle();
             }
+            ensureStrikeRailResizeHandle(grid);
             if (!document.getElementById('strike-rail-tabs')) {
                 const main = gexHeader.querySelector('.strike-rail-header-main');
                 if (main) {
@@ -11010,7 +11154,7 @@ def index():
         }
 
         function showPriceChartUI() {
-            const ids = ['tv-toolbar-container', 'gex-col-header', 'gex-column', 'right-rail-tabs', 'right-rail-panels'];
+            const ids = ['tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels'];
             ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
             const pc = document.querySelector('.price-chart-container');
             if (pc) pc.style.display = 'block';
@@ -11018,6 +11162,56 @@ def index():
 
         // ── GEX column collapse state ────────────────────────────────────
         const GEX_COL_COLLAPSE_KEY = 'gex.sidePanelCollapsed';
+        let _gexResizeRefreshScheduled = false;
+        function getGexColWidthConstraints() {
+            const grid = document.getElementById('chart-grid');
+            if (!grid) return { min: 280, max: 640 };
+            const styles = getComputedStyle(grid);
+            const railWidth = parseFloat(styles.getPropertyValue('--rail-col-w')) || 272;
+            const min = 280;
+            const max = Math.max(min, Math.min(640, grid.clientWidth - railWidth - 360));
+            return { min, max };
+        }
+        function clampGexColWidth(width) {
+            const { min, max } = getGexColWidthConstraints();
+            return Math.max(min, Math.min(max, width));
+        }
+        function applyGexColWidth(width, persist = false) {
+            const grid = document.getElementById('chart-grid');
+            if (!grid || !Number.isFinite(width)) return;
+            const clamped = clampGexColWidth(width);
+            grid.style.setProperty('--gex-col-w', clamped + 'px');
+            if (!persist) return;
+            try { localStorage.setItem(GEX_COL_WIDTH_KEY, String(Math.round(clamped))); } catch (e) {}
+        }
+        function scheduleGexResizeRefresh() {
+            if (_gexResizeRefreshScheduled) return;
+            _gexResizeRefreshScheduled = true;
+            requestAnimationFrame(() => {
+                _gexResizeRefreshScheduled = false;
+                const target = getStrikeRailTarget();
+                if (target && target._fullLayout) {
+                    try { Plotly.Plots.resize(target); } catch (e) {}
+                }
+                scheduleGexPanelSync();
+                try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+            });
+        }
+        function ensureStrikeRailResizeHandle(grid = document.getElementById('chart-grid')) {
+            if (!grid) return null;
+            let handle = document.getElementById('gex-resize-handle');
+            if (!handle) {
+                handle = document.createElement('div');
+                handle.className = 'gex-resize-handle';
+                handle.id = 'gex-resize-handle';
+                handle.setAttribute('role', 'separator');
+                handle.setAttribute('aria-label', 'Resize strike rail');
+                handle.setAttribute('aria-orientation', 'vertical');
+                grid.appendChild(handle);
+            }
+            wireStrikeRailResizeHandle(handle);
+            return handle;
+        }
         function isGexColumnCollapsed() {
             const grid = document.getElementById('chart-grid');
             return !!(grid && grid.classList.contains('gex-collapsed'));
@@ -11051,16 +11245,60 @@ def index():
                 applyGexColumnCollapse(next);
             });
         }
+        function wireStrikeRailResizeHandle(handle = document.getElementById('gex-resize-handle')) {
+            if (!handle || handle.__wired) return;
+            handle.__wired = true;
+            handle.addEventListener('pointerdown', (event) => {
+                if (isGexColumnCollapsed()) return;
+                const grid = document.getElementById('chart-grid');
+                if (!grid) return;
+                event.preventDefault();
+                const startX = event.clientX;
+                const startWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w')) || 352;
+                handle.classList.add('dragging');
+                document.body.classList.add('gex-resize-active');
+                try { handle.setPointerCapture(event.pointerId); } catch (e) {}
+
+                const onMove = (moveEvent) => {
+                    const nextWidth = startWidth + (moveEvent.clientX - startX);
+                    applyGexColWidth(nextWidth, false);
+                    scheduleGexResizeRefresh();
+                };
+                const onUp = (upEvent) => {
+                    document.removeEventListener('pointermove', onMove);
+                    document.removeEventListener('pointerup', onUp);
+                    document.removeEventListener('pointercancel', onUp);
+                    handle.classList.remove('dragging');
+                    document.body.classList.remove('gex-resize-active');
+                    try { handle.releasePointerCapture(upEvent.pointerId); } catch (e) {}
+                    const liveWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w')) || startWidth;
+                    applyGexColWidth(liveWidth, true);
+                    scheduleGexResizeRefresh();
+                };
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', onUp);
+                document.addEventListener('pointercancel', onUp);
+            });
+        }
         (function restoreGexColumnCollapse() {
             let collapsed = false;
             try { collapsed = localStorage.getItem(GEX_COL_COLLAPSE_KEY) === '1'; } catch (e) {}
             // Defer until DOM is parsed
             if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', () => { applyGexColumnCollapse(collapsed); wireGexColumnToggle(); });
+                document.addEventListener('DOMContentLoaded', () => { ensureStrikeRailResizeHandle(); applyGexColumnCollapse(collapsed); wireGexColumnToggle(); });
             } else {
+                ensureStrikeRailResizeHandle();
                 applyGexColumnCollapse(collapsed);
                 wireGexColumnToggle();
             }
+        })();
+        (function restoreGexColumnWidth() {
+            let savedWidth = 352;
+            try {
+                const raw = parseFloat(localStorage.getItem(GEX_COL_WIDTH_KEY));
+                if (Number.isFinite(raw)) savedWidth = raw;
+            } catch (e) {}
+            applyGexColWidth(savedWidth, false);
         })();
 
         // Standalone price chart renderer — called by /update_price without touching other charts.
@@ -11204,7 +11442,7 @@ def index():
             parsed.layout.width = null;
             parsed.layout.height = null;
             parsed.layout.title = { text: '' };
-            parsed.layout.margin = { l: 12, r: 12, t: 10, b: 28 };
+            parsed.layout.margin = Object.assign({ l: 12, r: 12, t: 10, b: 28 }, parsed.layout.margin || {});
             parsed.layout.showlegend = false;
             parsed.layout.plot_bgcolor = parsed.layout.plot_bgcolor || '#1E1E1E';
             parsed.layout.paper_bgcolor = parsed.layout.paper_bgcolor || '#1E1E1E';
@@ -12648,6 +12886,11 @@ def index():
         
         // Handle window resize
         window.addEventListener('resize', () => {
+            const grid = document.getElementById('chart-grid');
+            if (grid) {
+                const liveWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w')) || 352;
+                applyGexColWidth(liveWidth, false);
+            }
             Object.keys(charts).forEach(chartKey => {
                 const chartElement = document.getElementById(`${chartKey}-chart`);
                 if (chartElement && charts[chartKey]) {
@@ -12698,6 +12941,7 @@ def index():
         // Settings save/load functions
         function gatherSettings() {
             return {
+                settings_schema_version: 2,
                 ticker: document.getElementById('ticker').value,
                 timeframe: document.getElementById('timeframe').value,
                 strike_range: document.getElementById('strike_range').value,
@@ -12708,6 +12952,10 @@ def index():
                 show_calls: document.getElementById('show_calls').checked,
                 show_puts: document.getElementById('show_puts').checked,
                 show_net: document.getElementById('show_net').checked,
+                ov_show_calls: document.getElementById('ov_show_calls').checked,
+                ov_show_puts: document.getElementById('ov_show_puts').checked,
+                ov_show_net: document.getElementById('ov_show_net').checked,
+                ov_show_totals: document.getElementById('ov_show_totals').checked,
                 coloring_mode: document.getElementById('coloring_mode').value,
                 levels_types: Array.from(document.querySelectorAll('.levels-option input:checked')).map(cb => cb.value),
                 levels_count: document.getElementById('levels_count').value,
@@ -12729,6 +12977,7 @@ def index():
         }
 
         function applySettings(settings) {
+            const settingsSchemaVersion = Number(settings.settings_schema_version || 0);
             if (settings.ticker) document.getElementById('ticker').value = settings.ticker;
             if (settings.timeframe) document.getElementById('timeframe').value = settings.timeframe;
             if (settings.strike_range) {
@@ -12745,6 +12994,10 @@ def index():
             if (settings.show_calls !== undefined) document.getElementById('show_calls').checked = settings.show_calls;
             if (settings.show_puts !== undefined) document.getElementById('show_puts').checked = settings.show_puts;
             if (settings.show_net !== undefined) document.getElementById('show_net').checked = settings.show_net;
+            if (settings.ov_show_calls !== undefined) document.getElementById('ov_show_calls').checked = settings.ov_show_calls;
+            if (settings.ov_show_puts !== undefined) document.getElementById('ov_show_puts').checked = settings.ov_show_puts;
+            if (settings.ov_show_net !== undefined) document.getElementById('ov_show_net').checked = settings.ov_show_net;
+            if (settings.ov_show_totals !== undefined) document.getElementById('ov_show_totals').checked = settings.ov_show_totals;
             // Handle coloring_mode with migration from old color_intensity setting
             if (settings.coloring_mode) {
                 document.getElementById('coloring_mode').value = settings.coloring_mode;
@@ -12792,7 +13045,15 @@ def index():
             }
             // Chart visibility — persist into localStorage; updateCharts() reads from there
             if (settings.charts) {
-                setAllChartVisibility(settings.charts);
+                const chartSettings = Object.assign({}, settings.charts);
+                if (settingsSchemaVersion < 2 && chartSettings.open_interest === false) {
+                    chartSettings.open_interest = true;
+                    if (activeStrikeRailTab === 'gex') {
+                        activeStrikeRailTab = 'open_interest';
+                        try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
+                    }
+                }
+                setAllChartVisibility(chartSettings);
                 if (typeof renderChartVisibilitySection === 'function') renderChartVisibilitySection();
             }
         }
@@ -13181,6 +13442,10 @@ def update():
         max_level_color = data.get('max_level_color', '#800080')
         max_level_mode = data.get('max_level_mode', 'Absolute')
         top_oi_count = data.get('top_oi_count', 5)
+        ov_show_calls = data.get('ov_show_calls', True)
+        ov_show_puts = data.get('ov_show_puts', True)
+        ov_show_net = data.get('ov_show_net', False)
+        ov_show_totals = data.get('ov_show_totals', True)
  
         
         response = {}
@@ -13219,7 +13484,16 @@ def update():
             response['volume'] = create_volume_chart(call_volume, put_volume, use_range, call_color, put_color, expiry_dates)
         
         if data.get('show_options_volume', True):
-            response['options_volume'] = create_options_volume_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            response['options_volume'] = create_options_volume_chart(
+                calls, puts, S, strike_range,
+                call_color, put_color, coloring_mode,
+                ov_show_calls, ov_show_puts, ov_show_net,
+                expiry_dates, strike_rail_horizontal,
+                highlight_max_level=highlight_max_level,
+                max_level_color=max_level_color,
+                max_level_mode=max_level_mode,
+                show_totals=ov_show_totals
+            )
         
         if data.get('show_open_interest', True):
             response['open_interest'] = create_open_interest_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
