@@ -3769,6 +3769,161 @@ def _flow_blotter_side_label(side_code, bid, ask):
     return 'mid'
 
 
+_FLOW_CONTRACT_HISTORY = collections.defaultdict(lambda: collections.deque(maxlen=96))
+
+
+def _current_session_date_str():
+    try:
+        return datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
+    except Exception:
+        return datetime.utcnow().strftime('%Y-%m-%d')
+
+
+def _normalize_expiry_iso(value):
+    if value is None or pd.isna(value):
+        return ''
+    try:
+        expiry_dt = pd.to_datetime(value, errors='coerce')
+        if pd.isna(expiry_dt):
+            return ''
+        return expiry_dt.strftime('%Y-%m-%d')
+    except Exception:
+        return ''
+
+
+def _estimate_contract_ref_price(row):
+    bid = float(row.get('bid', 0) or 0)
+    ask = float(row.get('ask', 0) or 0)
+    last = float(row.get('lastPrice', 0) or 0)
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2.0
+    if last > 0:
+        return last
+    if bid > 0:
+        return bid
+    if ask > 0:
+        return ask
+    return 0.0
+
+
+def _history_delta_over_window(history, latest_ts, field, seconds, min_age_ratio=0.75, max_age_ratio=2.5):
+    if not history:
+        return None, None
+    latest = history[-1]
+    latest_value = float(latest.get(field, 0) or 0)
+    min_age = seconds * min_age_ratio
+    max_age = seconds * max_age_ratio
+    ref = None
+    for sample in reversed(history):
+        age = latest_ts - float(sample.get('ts', latest_ts) or latest_ts)
+        if age < min_age:
+            continue
+        if age <= max_age:
+            ref = sample
+            break
+    if ref is None:
+        return None, None
+    base_value = float(ref.get(field, 0) or 0)
+    return max(0.0, latest_value - base_value), max(0.0, latest_ts - float(ref.get('ts', latest_ts) or latest_ts))
+
+
+def build_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=0.02, top_n=6):
+    """Return contract-level flow acceleration reads from in-process volume history."""
+    if not ticker or S is None:
+        return []
+    try:
+        lo = float(S) * (1.0 - float(strike_range))
+        hi = float(S) * (1.0 + float(strike_range))
+    except Exception:
+        return []
+    now_ts = time.time()
+    session_date = _current_session_date_str()
+    rows = []
+
+    def _process_df(df, option_type):
+        if df is None or getattr(df, 'empty', True):
+            return
+        working = df.copy()
+        if 'volume' in working.columns:
+            working = working[pd.to_numeric(working['volume'], errors='coerce').fillna(0) > 0]
+        if 'strike' in working.columns:
+            strikes = pd.to_numeric(working['strike'], errors='coerce')
+            working = working[(strikes >= lo) & (strikes <= hi)]
+        if working.empty:
+            return
+        for _, row in working.iterrows():
+            strike = float(row.get('strike', 0) or 0)
+            volume = max(0.0, float(row.get('volume', 0) or 0))
+            oi = max(0.0, float(row.get('openInterest', 0) or 0))
+            if volume <= 0:
+                continue
+            expiry_iso = _normalize_expiry_iso(row.get('expiration', row.get('expiration_date')))
+            history_key = (session_date, ticker, option_type, expiry_iso, round(strike, 4))
+            history = _FLOW_CONTRACT_HISTORY[history_key]
+            sample = {'ts': now_ts, 'volume': volume, 'oi': oi}
+            if history:
+                last = history[-1]
+                age = now_ts - float(last.get('ts', now_ts) or now_ts)
+                changed = volume != float(last.get('volume', 0) or 0) or oi != float(last.get('oi', 0) or 0)
+                if age < 8:
+                    if changed:
+                        history[-1] = sample
+                else:
+                    history.append(sample)
+            else:
+                history.append(sample)
+
+            latest = history[-1]
+            vol_1m, age_1m = _history_delta_over_window(history, now_ts, 'volume', 60)
+            vol_5m, age_5m = _history_delta_over_window(history, now_ts, 'volume', 300)
+            if (vol_1m is None or vol_1m <= 0) and (vol_5m is None or vol_5m <= 0):
+                continue
+
+            ref_price = _estimate_contract_ref_price(row)
+            premium_1m = (vol_1m or 0.0) * max(ref_price, 0.0) * 100.0
+            premium_5m = (vol_5m or 0.0) * max(ref_price, 0.0) * 100.0
+            baseline_1m = (vol_5m / 5.0) if vol_5m and vol_5m > 0 else 0.0
+            pace_1m = (vol_1m / max(baseline_1m, 1.0)) if vol_1m is not None else None
+            voi = (volume / oi) if oi > 0 else float(volume)
+            moneyness_pct = ((strike - float(S)) / float(S) * 100.0) if S else None
+            score = premium_1m * min(max(pace_1m or 1.0, 1.0), 8.0) * (1.0 + min(voi, 2.0))
+            rows.append({
+                'key': f"{expiry_iso}:{option_type}:{strike:.4f}",
+                'ticker': ticker,
+                'option_type': option_type,
+                'strike': strike,
+                'expiry_iso': expiry_iso,
+                'expiry_text': _format_flow_blotter_expiry(expiry_iso),
+                'contract_label': f"{strike:.0f}{'C' if option_type == 'call' else 'P'}",
+                'volume': volume,
+                'open_interest': oi,
+                'voi': voi,
+                'price': ref_price,
+                'vol_delta_1m': vol_1m,
+                'vol_delta_5m': vol_5m,
+                'premium_delta_1m': premium_1m,
+                'premium_delta_5m': premium_5m,
+                'pace_1m': pace_1m,
+                'age_1m': age_1m,
+                'age_5m': age_5m,
+                'score': score,
+                'moneyness_pct': moneyness_pct,
+                'side': _flow_blotter_side_label(int(row.get('side', 0) or 0), float(row.get('bid', 0) or 0), float(row.get('ask', 0) or 0)),
+            })
+
+    _process_df(calls, 'call')
+    _process_df(puts, 'put')
+    rows.sort(
+        key=lambda row: (
+            row.get('score', 0.0),
+            row.get('premium_delta_1m', 0.0),
+            row.get('vol_delta_1m', 0.0),
+        ),
+        reverse=True,
+    )
+    return rows[:max(1, int(top_n or 6))]
+
+
 def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None):
     """Return the key dealer-flow levels to draw on the price chart.
 
@@ -3997,6 +4152,7 @@ def compute_scenario_gex(calls, puts, S, spot_shift=0.0, iv_shift=0.0,
 # (current - baseline). In-process dict — acceptable to lose state on restart.
 _SESSION_BASELINE = {}
 _SESSION_LEVEL_BASELINE = {}
+_SESSION_IV_BASELINE = {}
 
 def _compute_session_deltas(ticker, net_gex, net_dex):
     if ticker is None or net_gex is None:
@@ -4032,6 +4188,139 @@ def _compute_level_session_deltas(ticker, levels):
         cur = levels.get(name)
         ref = base.get(name)
         out[name] = (cur - ref) if (cur is not None and ref is not None) else None
+    return out
+
+
+def _pick_strike_iv(df, target, side='nearest'):
+    if df is None or getattr(df, 'empty', True) or 'strike' not in df.columns or 'impliedVolatility' not in df.columns:
+        return None
+    working = df.copy()
+    working['strike'] = pd.to_numeric(working['strike'], errors='coerce')
+    working['impliedVolatility'] = pd.to_numeric(working['impliedVolatility'], errors='coerce')
+    working = working.dropna(subset=['strike', 'impliedVolatility'])
+    working = working[working['impliedVolatility'] > 0]
+    if working.empty:
+        return None
+    if side == 'below':
+        subset = working[working['strike'] <= target]
+        if subset.empty:
+            subset = working
+    elif side == 'above':
+        subset = working[working['strike'] >= target]
+        if subset.empty:
+            subset = working
+    else:
+        subset = working
+    if subset.empty:
+        return None
+    row = subset.iloc[(subset['strike'] - target).abs().argsort()[:1]]
+    if row.empty:
+        return None
+    strike = float(row['strike'].iloc[0])
+    iv = float(row['impliedVolatility'].iloc[0])
+    return {'strike': strike, 'iv': iv}
+
+
+def compute_iv_context(calls, puts, S, ticker=None):
+    """Build a compact ATM/wing IV + skew read for the alerts rail."""
+    out = {
+        'expiry_text': 'Near expiry',
+        'atm_iv': None,
+        'atm_call_iv': None,
+        'atm_put_iv': None,
+        'put_wing_iv': None,
+        'call_wing_iv': None,
+        'put_wing_strike': None,
+        'call_wing_strike': None,
+        'skew_spread': None,
+        'skew_ratio': None,
+        'atm_iv_change': None,
+        'skew_change': None,
+        'headline': 'IV context unavailable',
+        'blurb': 'Need implied volatility on the near expiry to build a skew read.',
+    }
+    if S is None:
+        return out
+
+    nearest = _nearest_expiration(calls if (calls is not None and not calls.empty) else puts)
+    if nearest is None:
+        return out
+
+    def _filter_exp(df):
+        if df is None or getattr(df, 'empty', True):
+            return pd.DataFrame()
+        if 'expiration_date' in df.columns:
+            return df[df['expiration_date'] == nearest].copy()
+        expiries = _expiration_series_iso(df)
+        if expiries is None:
+            return df.copy()
+        return df[expiries == nearest].copy()
+
+    c0 = _filter_exp(calls)
+    p0 = _filter_exp(puts)
+    atm_call = _pick_strike_iv(c0, float(S), side='nearest')
+    atm_put = _pick_strike_iv(p0, float(S), side='nearest')
+    put_wing = _pick_strike_iv(p0, float(S), side='below')
+    call_wing = _pick_strike_iv(c0, float(S), side='above')
+
+    atm_values = [node['iv'] for node in (atm_call, atm_put) if node]
+    atm_iv = (sum(atm_values) / len(atm_values)) if atm_values else None
+    skew_spread = None
+    skew_ratio = None
+    if put_wing and call_wing and call_wing['iv'] > 0:
+        skew_spread = put_wing['iv'] - call_wing['iv']
+        skew_ratio = put_wing['iv'] / call_wing['iv']
+
+    out.update({
+        'expiry_text': _format_flow_blotter_expiry(nearest) or 'Near expiry',
+        'atm_iv': atm_iv,
+        'atm_call_iv': atm_call['iv'] if atm_call else None,
+        'atm_put_iv': atm_put['iv'] if atm_put else None,
+        'put_wing_iv': put_wing['iv'] if put_wing else None,
+        'call_wing_iv': call_wing['iv'] if call_wing else None,
+        'put_wing_strike': put_wing['strike'] if put_wing else None,
+        'call_wing_strike': call_wing['strike'] if call_wing else None,
+        'skew_spread': skew_spread,
+        'skew_ratio': skew_ratio,
+    })
+
+    try:
+        today = datetime.now(pytz.timezone('US/Eastern')).date()
+        key = (ticker or '__anon__', nearest, today)
+        if key not in _SESSION_IV_BASELINE:
+            _SESSION_IV_BASELINE[key] = {'atm_iv': atm_iv, 'skew_spread': skew_spread}
+        base = _SESSION_IV_BASELINE[key]
+        out['atm_iv_change'] = (
+            atm_iv - base['atm_iv']
+            if atm_iv is not None and base.get('atm_iv') is not None
+            else None
+        )
+        out['skew_change'] = (
+            skew_spread - base['skew_spread']
+            if skew_spread is not None and base.get('skew_spread') is not None
+            else None
+        )
+    except Exception:
+        out['atm_iv_change'] = None
+        out['skew_change'] = None
+
+    spread_pts = (skew_spread * 100.0) if skew_spread is not None else None
+    atm_pts = (atm_iv * 100.0) if atm_iv is not None else None
+    if spread_pts is None:
+        out['headline'] = 'ATM IV read only'
+        out['blurb'] = 'Wing skew needs both a downside put wing and upside call wing on the near expiry.'
+    elif spread_pts >= 6.0:
+        out['headline'] = 'Downside rich'
+        out['blurb'] = f"Put wing IV is {spread_pts:.1f} pts over the call wing. Traders are paying up for downside convexity."
+    elif spread_pts >= 2.0:
+        out['headline'] = 'Put skew firm'
+        out['blurb'] = f"Put wing IV is {spread_pts:.1f} pts over the call wing. Downside demand is leading the surface."
+    elif spread_pts <= -2.0:
+        out['headline'] = 'Upside rich'
+        out['blurb'] = f"Call wing IV is {abs(spread_pts):.1f} pts over the put wing. Upside speculation is leading the surface."
+    else:
+        out['headline'] = 'Skew balanced'
+        out['blurb'] = f"ATM IV is {atm_pts:.1f}% with only {abs(spread_pts):.1f} pts between the put and call wings."
     return out
 
 
@@ -4261,6 +4550,8 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'profile':        None,
         'session_deltas': None,
         'level_deltas':   None,
+        'iv_context':     None,
+        'flow_pulse':     [],
     }
     if S is None:
         return out
@@ -4386,6 +4677,25 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         print(f"[compute_trader_stats] centroid_panel failed: {e}")
         out['centroid_panel'] = None
 
+    try:
+        out['iv_context'] = compute_iv_context(calls, puts, S, ticker=ticker)
+    except Exception as e:
+        print(f"[compute_trader_stats] iv_context failed: {e}")
+        out['iv_context'] = None
+
+    try:
+        out['flow_pulse'] = build_flow_pulse_snapshot(
+            ticker=ticker,
+            calls=calls,
+            puts=puts,
+            S=S,
+            strike_range=strike_range,
+            top_n=5,
+        ) if ticker else []
+    except Exception as e:
+        print(f"[compute_trader_stats] flow_pulse failed: {e}")
+        out['flow_pulse'] = []
+
     # Scenario GEX table (Stage 3). Seven rows: current + ±2% spot + ±5 vol pts
     # + two diagonals. "Current" mirrors out['net_gex'] exactly so the table can't
     # disagree with the KPI strip; the other 6 re-sum row-by-row at shifted
@@ -4466,6 +4776,31 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         alerts.extend(flow)
     except Exception as e:
         print(f'[compute_trader_stats] compute_flow_alerts failed: {e}')
+
+    # Contract-level acceleration alerts from the in-process pulse snapshot.
+    try:
+        for pulse in (out.get('flow_pulse') or [])[:3]:
+            vol_1m = float(pulse.get('vol_delta_1m') or 0.0)
+            premium_1m = float(pulse.get('premium_delta_1m') or 0.0)
+            pace_1m = float(pulse.get('pace_1m') or 0.0)
+            if vol_1m < 250 or premium_1m < 25000 or pace_1m < 2.0:
+                continue
+            strike = float(pulse.get('strike') or 0.0)
+            expiry_text = pulse.get('expiry_text') or ''
+            contract_label = f"{strike:.0f}{'C' if pulse.get('option_type') == 'call' else 'P'}"
+            aid = f"flow_pulse:{pulse.get('key')}"
+            if not _alert_cooldown_ok(ticker, aid, 180):
+                continue
+            alerts.append({
+                'id': aid,
+                'level': 'flow',
+                'text': f"1m {pulse.get('option_type', 'flow')} burst {contract_label} {expiry_text}".strip(),
+                'strike': strike,
+                'ts': now_iso,
+                'detail': f"+{int(vol_1m):,} vol · {pace_1m:.1f}x pace · ~${format_large_number(premium_1m)} est premium",
+            })
+    except Exception as e:
+        print(f'[compute_trader_stats] flow_pulse alerts failed: {e}')
 
     out['alerts'] = alerts
     return out
@@ -4691,7 +5026,7 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     })
 
 
-def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None):
+def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None, ticker=None):
     """Create a flow-oriented blotter from the option chain snapshot."""
     try:
         spot = float(S)
@@ -4701,6 +5036,9 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
     max_rows = 120
     min_strike = spot * (1 - strike_range) if spot and np.isfinite(spot) else None
     max_strike = spot * (1 + strike_range) if spot and np.isfinite(spot) else None
+
+    pulse_snapshot = build_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=strike_range, top_n=4000) if ticker else []
+    pulse_map = {(row['option_type'], row['expiry_iso'], round(float(row['strike']), 4)): row for row in pulse_snapshot}
 
     def build_rows(df, is_put=False):
         if df is None or df.empty:
@@ -4737,6 +5075,9 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
             side_text = {'ask': 'Ask', 'bid': 'Bid', 'mid': 'Mid', 'unknown': 'Unknown'}[side_label]
             distance = abs(strike - spot) if spot and np.isfinite(spot) else 0.0
             option_type = 'put' if is_put else 'call'
+            pulse = pulse_map.get((option_type, expiry_iso, round(strike, 4)), {})
+            vol_1m = float(pulse.get('vol_delta_1m') or 0.0)
+            pace_1m = float(pulse.get('pace_1m') or 0.0)
             time_title = 'Latest trade time from chain snapshot' if trade_ts else (
                 'Latest quote time from chain snapshot' if quote_ts else 'Chain snapshot does not include per-contract time here'
             )
@@ -4762,6 +5103,10 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
                 'side_key': side_label,
                 'side_text': side_text,
                 'distance': distance,
+                'vol_1m': vol_1m,
+                'vol_1m_text': ('+' + format_large_number(vol_1m)) if vol_1m > 0 else '—',
+                'pace_1m': pace_1m,
+                'pace_1m_text': (f"{pace_1m:.1f}x" if pace_1m > 0 else '—'),
             })
         return rows
 
@@ -4821,6 +5166,8 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
                         data-open-interest="{row['open_interest']}"
                         data-voi="{row['voi']}"
                         data-premium="{row['premium']}"
+                        data-vol1m="{row['vol_1m']}"
+                        data-pace="{row['pace_1m']}"
                         data-side="{row['side_key']}">
                         <td class="flow-blotter__time" title="{row['time_title']}">{row['time_text']}</td>
                         <td><span class="flow-blotter__badge flow-blotter__badge--{row['type_key']}" style="--flow-badge-color:{row['type_color']};">{row['type_label']}</span></td>
@@ -4831,6 +5178,8 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
                         <td class="num">{row['volume']:,}</td>
                         <td class="num">{row['open_interest']:,}</td>
                         <td class="num">{row['voi_text']}</td>
+                        <td class="num">{row['vol_1m_text']}</td>
+                        <td class="num">{row['pace_1m_text']}</td>
                         <td class="num">{row['premium_text']}</td>
                         <td><span class="flow-blotter__side flow-blotter__side--{row['side_key']}">{row['side_text']}</span></td>
                     </tr>
@@ -4839,7 +5188,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
     if not rows_html:
         rows_html.append('''
                     <tr>
-                        <td colspan="11" class="flow-blotter__empty">
+                        <td colspan="13" class="flow-blotter__empty">
                             No in-range contracts with non-zero day volume are available for this snapshot.
                         </td>
                     </tr>
@@ -5082,7 +5431,7 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
             {len(visible_rows):,} shown · Approx premium ${format_large_number(total_premium)}
         </div>
         <div class="flow-blotter__note">
-            Chain snapshot view: premium is estimated as last x day volume x 100. Side is inferred from last vs. bid/ask and is not a tape classification.
+            Chain snapshot view: premium is estimated as last x day volume x 100. 1m ΔVol and Pace come from in-process contract volume history. Side is inferred from last vs. bid/ask and is not a tape classification.
         </div>
         <div class="flow-blotter__empty-state" data-flow-empty hidden>No rows match the current filters.</div>
         <div class="flow-blotter__table-wrap">
@@ -5098,6 +5447,8 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
                         <th><button type="button" class="flow-blotter__sort" data-sort-key="volume" data-sort-type="number">Vol <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
                         <th><button type="button" class="flow-blotter__sort" data-sort-key="openInterest" data-sort-type="number">OI <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
                         <th><button type="button" class="flow-blotter__sort" data-sort-key="voi" data-sort-type="number">V/OI <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="vol1m" data-sort-type="number">1m ΔVol <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
+                        <th><button type="button" class="flow-blotter__sort" data-sort-key="pace" data-sort-type="number">Pace <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
                         <th><button type="button" class="flow-blotter__sort" data-sort-key="premium" data-sort-type="number">Premium <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
                         <th><button type="button" class="flow-blotter__sort" data-sort-key="side" data-sort-type="string">Side <span class="flow-blotter__sort-indicator" data-sort-indicator>↕</span></button></th>
                     </tr>
@@ -7013,6 +7364,112 @@ def index():
             margin-top: 5px;
             line-height: 1.35;
         }
+        .rail-iv-top {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .rail-iv-atm {
+            color: var(--fg-0);
+            font-size: 20px;
+            font-weight: 650;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.1;
+        }
+        .rail-iv-headline {
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 600;
+            text-align: right;
+        }
+        .rail-iv-blurb {
+            color: var(--fg-1);
+            font-size: 11px;
+            margin-top: 6px;
+            line-height: 1.4;
+        }
+        .rail-iv-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px 10px;
+            margin-top: 10px;
+        }
+        .rail-iv-stat {
+            min-width: 0;
+        }
+        .rail-iv-stat-label {
+            display: block;
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+        }
+        .rail-iv-stat-value {
+            display: block;
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.25;
+        }
+        .rail-iv-stat-value.pos { color: var(--call); }
+        .rail-iv-stat-value.neg { color: var(--put); }
+        .rail-pulse-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .rail-pulse-empty {
+            color: var(--fg-2);
+            font-size: 11px;
+            line-height: 1.45;
+        }
+        .rail-pulse-item {
+            padding: 9px 10px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+        }
+        .rail-pulse-item.call { border-left: 3px solid var(--call); }
+        .rail-pulse-item.put { border-left: 3px solid var(--put); }
+        .rail-pulse-top {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .rail-pulse-contract {
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .rail-pulse-expiry {
+            color: var(--fg-2);
+            font-size: 10px;
+            margin-left: 6px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .rail-pulse-pace {
+            color: var(--accent);
+            font-size: 11px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-pulse-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 5px;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-pulse-meta .emph {
+            color: var(--fg-1);
+        }
         .rail-activity-bias {
             display: flex;
             align-items: center;
@@ -7317,6 +7774,12 @@ def index():
             font-size: 12px;
             font-weight: 600;
             line-height: 1.4;
+        }
+        .rail-alert-detail {
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.4;
+            font-variant-numeric: tabular-nums;
         }
 
         /* Key Levels table */
@@ -7958,10 +8421,11 @@ def index():
         }
         /* Chart toolbar — sits ABOVE the canvas, normal document flow */
         .tv-toolbar-container {
-            background: #1a1a1a;
-            border-bottom: 1px solid var(--bg-2);
+            background: linear-gradient(180deg, rgba(21, 26, 33, 0.96), rgba(16, 20, 27, 0.98));
+            border: 1px solid var(--border);
+            border-bottom-color: var(--bg-2);
             border-radius: 10px 10px 0 0;
-            padding: 2px 5px;
+            padding: 4px 6px;
             display: flex;
             flex-wrap: nowrap;
             gap: 6px;
@@ -7969,7 +8433,7 @@ def index():
             min-height: 0;
             min-width: 0;
             overflow: hidden;
-            min-height: 34px;
+            min-height: 38px;
         }
         .tv-toolbar {
             display: contents; /* children flow directly into container */
@@ -7977,7 +8441,7 @@ def index():
         .tv-toolbar-main {
             display: flex;
             align-items: center;
-            gap: 2px;
+            gap: 6px;
             flex: 1 1 auto;
             min-width: 0;
             overflow-x: auto;
@@ -7987,10 +8451,27 @@ def index():
         .tv-toolbar-right {
             display: flex;
             align-items: center;
-            gap: 4px;
+            gap: 6px;
             flex: 0 0 auto;
             margin-left: auto;
             white-space: nowrap;
+        }
+        .tv-toolbar-group {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 2px;
+            border: 1px solid var(--border);
+            border-radius: 9px;
+            background: rgba(30, 36, 45, 0.7);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+            flex: 0 0 auto;
+        }
+        .tv-toolbar-group[data-group="draw"] {
+            background: rgba(38, 45, 56, 0.5);
+        }
+        .tv-toolbar-group[data-group="actions"] {
+            background: rgba(59, 130, 246, 0.06);
         }
         .tv-toolbar-sep {
             width: 1px;
@@ -7998,31 +8479,56 @@ def index():
             background: var(--border);
             margin: 0 2px;
             flex: 0 0 auto;
+            display: none;
         }
         .tv-tb-btn {
-            background: #2a2a2a;
-            border: 1px solid var(--border);
-            color: #ccc;
-            border-radius: 4px;
-            padding: 2px 5px;
-            font-size: 10px;
-            line-height: 1.3;
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--fg-1);
+            border-radius: 7px;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 500;
+            line-height: 1.35;
             cursor: pointer;
             white-space: nowrap;
-            transition: background 0.15s;
+            transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
             user-select: none;
         }
-        .tv-tb-btn:hover  { background: #3a3a3a; color: #fff; }
-        .tv-tb-btn.active { background: #1a5fac; border-color: #4b90e2; color: #fff; }
-        .tv-tb-btn.danger { background: #5c1a1a; border-color: #c0392b; color: #f88; }
+        .tv-tb-btn:hover  {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--fg-0);
+            border-color: rgba(255, 255, 255, 0.06);
+        }
+        .tv-tb-btn.active {
+            background: linear-gradient(180deg, rgba(59, 130, 246, 0.92), rgba(37, 99, 235, 0.92));
+            border-color: rgba(96, 165, 250, 0.65);
+            color: #fff;
+            box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2);
+        }
+        .tv-tb-btn.danger {
+            color: #fda4af;
+            background: rgba(127, 29, 29, 0.28);
+            border-color: rgba(220, 38, 38, 0.26);
+        }
+        .tv-tb-btn.danger:hover {
+            background: rgba(127, 29, 29, 0.4);
+            border-color: rgba(248, 113, 113, 0.32);
+            color: #fecdd3;
+        }
+        .tv-tb-btn.icon {
+            padding: 3px 6px;
+            min-width: 30px;
+            text-align: center;
+        }
         .tv-toolbar-status {
             font-size: 10px;
             letter-spacing: 0.03em;
             color: var(--warn);
             border: 1px solid rgba(245, 158, 11, 0.28);
             background: rgba(245, 158, 11, 0.12);
-            border-radius: 4px;
-            padding: 3px 5px;
+            border-radius: 999px;
+            padding: 4px 8px;
             white-space: nowrap;
             user-select: none;
         }
@@ -8932,6 +9438,25 @@ def index():
                         </div>
                         <div class="rail-profile-blurb" data-met="profile_blurb">—</div>
                     </div>
+                    <div class="rail-card" id="rail-card-iv">
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Skew / IV</div>
+                            <div class="rail-card-note" data-met="iv_expiry">Near expiry</div>
+                        </div>
+                        <div class="rail-iv-top">
+                            <div class="rail-iv-atm" data-met="iv_atm">—</div>
+                            <div class="rail-iv-headline" data-met="iv_headline">IV context unavailable</div>
+                        </div>
+                        <div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>
+                        <div class="rail-iv-grid">
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Call</span><span class="rail-iv-stat-value" data-met="iv_atm_call">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Put</span><span class="rail-iv-stat-value" data-met="iv_atm_put">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put Wing</span><span class="rail-iv-stat-value" data-met="iv_put_wing">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Call Wing</span><span class="rail-iv-stat-value" data-met="iv_call_wing">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
+                        </div>
+                    </div>
                     <div class="rail-card" id="rail-card-dealer">
                         <div class="rail-card-header-row">
                             <div class="rail-card-header">Dealer Impact</div>
@@ -9013,6 +9538,15 @@ def index():
                                 <div class="rail-bar-split" data-met="vol_split">—</div>
                             </div>
                             <span class="num" data-met="vol_cp">—</span>
+                        </div>
+                    </div>
+                    <div class="rail-card" id="rail-card-flow-pulse">
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Flow Pulse</div>
+                            <div class="rail-card-note">1m vs 5m pace</div>
+                        </div>
+                        <div class="rail-pulse-list" id="rail-flow-pulse">
+                            <div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>
                         </div>
                     </div>
                     <div class="rail-card" id="rail-card-centroid">
@@ -12157,6 +12691,23 @@ def index():
                 return node;
             }
 
+            function makeGroup(kind) {
+                const el = document.createElement('div');
+                el.className = 'tv-toolbar-group';
+                el.dataset.group = kind;
+                addLeft(el);
+                return el;
+            }
+
+            const indicatorsGroup = makeGroup('indicators');
+            const drawGroup = makeGroup('draw');
+            const actionsGroup = makeGroup('actions');
+
+            function addToGroup(group, node) {
+                group.appendChild(node);
+                return node;
+            }
+
             // Indicator toggles
             const indicatorDefs = [
                 { key:'sma20',  label:'SMA20',  title:'Simple Moving Average (20)' },
@@ -12183,12 +12734,10 @@ def index():
                     if (def.key === 'oi' && tvActiveInds.has('oi')) ensureTopOILoaded();
                 });
                 if (tvActiveInds.has(def.key)) b.classList.add('active');
-                addLeft(b);
+                addToGroup(indicatorsGroup, b);
             });
 
             // --- Separator ---
-            const sep2 = document.createElement('div'); sep2.className = 'tv-toolbar-sep'; addLeft(sep2);
-
             // Drawing tools
             const drawDefs = [
                 { key:'hline',     label:'— H-Line', title:'Draw horizontal price line (single click)' },
@@ -12200,7 +12749,7 @@ def index():
                 const b = btn(def.label, def.title, () => setDrawMode(def.key));
                 b.dataset.draw = def.key;
                 if (tvDrawMode === def.key) b.classList.add('active');
-                addLeft(b);
+                addToGroup(drawGroup, b);
             });
 
             // Draw color picker
@@ -12217,14 +12766,11 @@ def index():
             colorPicker.title = 'Drawing color';
             colorWrap.appendChild(colorLabel);
             colorWrap.appendChild(colorPicker);
-            addLeft(colorWrap);
-
-            // --- Separator ---
-            const sep3 = document.createElement('div'); sep3.className = 'tv-toolbar-sep'; addLeft(sep3);
+            addToGroup(drawGroup, colorWrap);
 
             // Undo / Clear
-            addLeft(btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
-            addLeft(btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
+            addToGroup(actionsGroup, btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
+            addToGroup(actionsGroup, btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
@@ -12849,6 +13395,25 @@ def index():
                         '</div>' +
                         '<div class="rail-profile-blurb" data-met="profile_blurb">—</div>' +
                     '</div>' +
+                    '<div class="rail-card" id="rail-card-iv">' +
+                        '<div class="rail-card-header-row">' +
+                            '<div class="rail-card-header">Skew / IV</div>' +
+                            '<div class="rail-card-note" data-met="iv_expiry">Near expiry</div>' +
+                        '</div>' +
+                        '<div class="rail-iv-top">' +
+                            '<div class="rail-iv-atm" data-met="iv_atm">—</div>' +
+                            '<div class="rail-iv-headline" data-met="iv_headline">IV context unavailable</div>' +
+                        '</div>' +
+                        '<div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>' +
+                        '<div class="rail-iv-grid">' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Call</span><span class="rail-iv-stat-value" data-met="iv_atm_call">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Put</span><span class="rail-iv-stat-value" data-met="iv_atm_put">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Put Wing</span><span class="rail-iv-stat-value" data-met="iv_put_wing">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Call Wing</span><span class="rail-iv-stat-value" data-met="iv_call_wing">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>' +
+                        '</div>' +
+                    '</div>' +
                     '<div class="rail-card" id="rail-card-dealer">' +
                         '<div class="rail-card-header-row">' +
                             '<div class="rail-card-header">Dealer Impact</div>' +
@@ -12930,6 +13495,15 @@ def index():
                                 '<div class="rail-bar-split" data-met="vol_split">—</div>' +
                             '</div>' +
                             '<span class="num" data-met="vol_cp">—</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card" id="rail-card-flow-pulse">' +
+                        '<div class="rail-card-header-row">' +
+                            '<div class="rail-card-header">Flow Pulse</div>' +
+                            '<div class="rail-card-note">1m vs 5m pace</div>' +
+                        '</div>' +
+                        '<div class="rail-pulse-list" id="rail-flow-pulse">' +
+                            '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-centroid">' +
@@ -13589,6 +14163,12 @@ def index():
             const stats = getScopedStats();
             const levels = getScopedKeyLevels();
             renderMarketMetrics(stats);
+            renderDealerImpact(stats);
+            renderGammaProfile(stats);
+            renderChainActivity(stats);
+            renderIVContext(stats);
+            renderFlowPulse(stats);
+            renderRailAlerts(Array.isArray(stats && stats.alerts) ? stats.alerts : []);
             renderRailKeyLevels(stats);
             renderKeyLevels(levels);
         }
@@ -13674,6 +14254,8 @@ def index():
                 renderMarketMetrics(null);
                 renderGammaProfile(null);
                 renderChainActivity(null);
+                renderIVContext(null);
+                renderFlowPulse(null);
                 renderCentroidPanel(null);
                 renderScenarioTable(null);
                 return;
@@ -14001,6 +14583,7 @@ def index():
                                        (ago ? '<span class="rail-alert-ago">' + ago + '</span>' : '') +
                                    '</div>' +
                                    '<div class="rail-alert-text">' + _escapeHtml(a.text) + '</div>' +
+                                   (a.detail ? '<div class="rail-alert-detail">' + _escapeHtml(a.detail) + '</div>' : '') +
                                '</div>';
                     }).join('');
                 }
@@ -14877,6 +15460,46 @@ def index():
             _setMet('profile_blurb',    stats.profile.blurb    || '');
         }
 
+        function renderIVContext(stats) {
+            const setTone = (key, value) => {
+                document.querySelectorAll('[data-met="' + key + '"]').forEach(el => {
+                    el.classList.remove('pos', 'neg');
+                    if (value == null || !isFinite(value) || Math.abs(value) < 0.0001) return;
+                    el.classList.add(value > 0 ? 'pos' : 'neg');
+                });
+            };
+            const fmtPct = value => (value == null || !isFinite(value)) ? '—' : (value * 100).toFixed(1) + '%';
+            const fmtPts = value => (value == null || !isFinite(value)) ? '—' : ((value > 0 ? '+' : '') + (value * 100).toFixed(1) + ' pts');
+            const iv = stats && stats.iv_context;
+            if (!iv) {
+                _setMet('iv_expiry', 'Near expiry');
+                _setMet('iv_atm', '—');
+                _setMet('iv_headline', 'IV context unavailable');
+                _setMet('iv_blurb', 'Need implied volatility on the near expiry to build a skew read.');
+                _setMet('iv_atm_call', '—');
+                _setMet('iv_atm_put', '—');
+                _setMet('iv_put_wing', '—');
+                _setMet('iv_call_wing', '—');
+                _setMet('iv_skew_spread', '—');
+                _setMet('iv_skew_change', '—');
+                setTone('iv_skew_spread', null);
+                setTone('iv_skew_change', null);
+                return;
+            }
+            _setMet('iv_expiry', iv.expiry_text || 'Near expiry');
+            _setMet('iv_atm', fmtPct(iv.atm_iv));
+            _setMet('iv_headline', iv.headline || 'IV context unavailable');
+            _setMet('iv_blurb', iv.blurb || 'Need implied volatility on the near expiry to build a skew read.');
+            _setMet('iv_atm_call', fmtPct(iv.atm_call_iv));
+            _setMet('iv_atm_put', fmtPct(iv.atm_put_iv));
+            _setMet('iv_put_wing', fmtPct(iv.put_wing_iv));
+            _setMet('iv_call_wing', fmtPct(iv.call_wing_iv));
+            _setMet('iv_skew_spread', fmtPts(iv.skew_spread));
+            _setMet('iv_skew_change', fmtPts(iv.skew_change));
+            setTone('iv_skew_spread', iv.skew_spread);
+            setTone('iv_skew_change', iv.skew_change);
+        }
+
         function renderChainActivity(stats) {
             const biasEl = document.querySelector('#rail-card-activity [data-met="activity_bias"]');
             const oiFill  = document.querySelector('#rail-card-activity [data-met="oi_fill"]');
@@ -14942,6 +15565,40 @@ def index():
                 volFill.classList.toggle('pos', ca.vol_call_share != null && ca.vol_call_share >= 0.5);
                 volFill.classList.toggle('neg', ca.vol_call_share != null && ca.vol_call_share < 0.5);
             }
+        }
+
+        function renderFlowPulse(stats) {
+            const target = document.getElementById('rail-flow-pulse');
+            if (!target) return;
+            const rows = Array.isArray(stats && stats.flow_pulse) ? stats.flow_pulse : [];
+            if (!rows.length) {
+                target.innerHTML = '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>';
+                return;
+            }
+            target.innerHTML = rows.slice(0, 4).map(row => {
+                const typeKey = row.option_type === 'put' ? 'put' : 'call';
+                const pace = (row.pace_1m != null && isFinite(row.pace_1m)) ? row.pace_1m.toFixed(1) + 'x' : '—';
+                const vol1m = (row.vol_delta_1m != null && isFinite(row.vol_delta_1m) && row.vol_delta_1m > 0)
+                    ? '+' + fmtCountCompact(row.vol_delta_1m)
+                    : '—';
+                const prem1m = (row.premium_delta_1m != null && isFinite(row.premium_delta_1m) && row.premium_delta_1m > 0)
+                    ? '+' + fmtMoneyCompact(row.premium_delta_1m)
+                    : '—';
+                const voi = (row.voi != null && isFinite(row.voi)) ? row.voi.toFixed(2) + 'x V/OI' : '—';
+                return '<div class="rail-pulse-item ' + typeKey + '">' +
+                           '<div class="rail-pulse-top">' +
+                               '<div class="rail-pulse-contract">' + _escapeHtml(row.contract_label || '—') +
+                                   '<span class="rail-pulse-expiry">' + _escapeHtml(row.expiry_text || '') + '</span>' +
+                               '</div>' +
+                               '<div class="rail-pulse-pace">' + pace + '</div>' +
+                           '</div>' +
+                           '<div class="rail-pulse-meta">' +
+                               '<span class="emph">1m ' + vol1m + ' vol</span>' +
+                               '<span>' + prem1m + '</span>' +
+                               '<span>' + _escapeHtml(voi) + '</span>' +
+                           '</div>' +
+                       '</div>';
+            }).join('');
         }
 
         function renderCentroidPanel(panel) {
@@ -15939,7 +16596,7 @@ def update():
             response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_large_trades', True):
-            response['large_trades'] = create_large_trades_table(calls, puts, S, strike_range, call_color, put_color, expiry_dates)
+            response['large_trades'] = create_large_trades_table(calls, puts, S, strike_range, call_color, put_color, expiry_dates, ticker=ticker)
         
         if data.get('show_centroid', False):
             response['centroid'] = create_centroid_chart(ticker, call_color, put_color, expiry_dates)
