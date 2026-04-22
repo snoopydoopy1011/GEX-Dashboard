@@ -3831,6 +3831,177 @@ def _flow_blotter_side_label(side_code, bid, ask):
 _FLOW_CONTRACT_HISTORY = collections.defaultdict(lambda: collections.deque(maxlen=96))
 
 
+def _flow_pulse_dte_days(expiry_iso):
+    if not expiry_iso:
+        return None
+    try:
+        expiry_dt = pd.to_datetime(expiry_iso, errors='coerce')
+        session_dt = pd.to_datetime(_current_session_date_str(), errors='coerce')
+        if pd.isna(expiry_dt) or pd.isna(session_dt):
+            return None
+        return int((expiry_dt.normalize() - session_dt.normalize()).days)
+    except Exception:
+        return None
+
+
+def _flow_pulse_moneyness_band(option_type, moneyness_pct):
+    try:
+        pct = float(moneyness_pct)
+    except Exception:
+        return 'unknown'
+    abs_pct = abs(pct)
+    if abs_pct <= 0.25:
+        return 'atm'
+    is_otm = pct >= 0 if option_type == 'call' else pct <= 0
+    if is_otm and abs_pct > 1.0:
+        return 'far_otm'
+    if is_otm:
+        return 'near_otm'
+    return 'itm'
+
+
+def _classify_flow_pulse_lean(option_type, side, moneyness_pct, premium_1m, pace_1m, voi, dte_days):
+    band = _flow_pulse_moneyness_band(option_type, moneyness_pct)
+    base = 0.0
+    label = 'mixed'
+    hint = 'Limited directional read'
+    if option_type == 'call':
+        if side == 'ask':
+            base = {'atm': 0.80, 'near_otm': 0.74, 'far_otm': 0.42, 'itm': 0.24}.get(band, 0.18)
+            label = 'bullish'
+            hint = 'Call buying is leaning upside'
+        elif side == 'bid':
+            base = {'atm': -0.42, 'near_otm': -0.36, 'far_otm': -0.18, 'itm': -0.14}.get(band, -0.10)
+            label = 'bearish'
+            hint = 'Call selling is leaning risk-off'
+        elif side == 'mid':
+            base = {'atm': 0.22, 'near_otm': 0.18, 'far_otm': 0.08, 'itm': 0.04}.get(band, 0.05)
+            label = 'bullish' if abs(base) >= 0.12 else 'mixed'
+            hint = 'Call activity is leaning upside'
+    elif option_type == 'put':
+        if band == 'far_otm' and side in ('ask', 'mid', 'unknown'):
+            base = 0.08
+            label = 'hedge'
+            hint = 'Far OTM put activity often reads as hedge flow'
+        elif side == 'ask':
+            base = {'atm': -0.82, 'near_otm': -0.66, 'itm': -0.24}.get(band, -0.14)
+            label = 'bearish'
+            hint = 'Put buying is leaning downside'
+        elif side == 'bid':
+            base = {'atm': 0.42, 'near_otm': 0.34, 'far_otm': 0.16, 'itm': 0.14}.get(band, 0.10)
+            label = 'bullish'
+            hint = 'Put selling is leaning supportive'
+        elif side == 'mid':
+            base = {'atm': -0.22, 'near_otm': -0.18, 'itm': -0.04}.get(band, -0.08)
+            label = 'bearish' if abs(base) >= 0.12 else 'mixed'
+            hint = 'Put activity is leaning downside'
+        else:
+            base = -0.06 if band != 'far_otm' else 0.06
+            label = 'mixed' if band != 'far_otm' else 'hedge'
+            hint = 'Put flow direction is not cleanly classified'
+    pace_factor = 0.72 + min(max(float(pace_1m or 0.0), 0.0), 6.0) * 0.055
+    voi_factor = 0.90 + min(max(float(voi or 0.0), 0.0), 3.0) * 0.05
+    premium = max(float(premium_1m or 0.0), 0.0)
+    premium_factor = 0.86
+    if premium >= 250000:
+        premium_factor = 1.16
+    elif premium >= 100000:
+        premium_factor = 1.08
+    elif premium >= 50000:
+        premium_factor = 1.00
+    if dte_days is None:
+        dte_factor = 1.0
+    elif dte_days <= 1:
+        dte_factor = 1.14
+    elif dte_days <= 3:
+        dte_factor = 1.07
+    elif dte_days >= 14:
+        dte_factor = 0.94
+    else:
+        dte_factor = 1.0
+    score = max(-1.0, min(1.0, base * pace_factor * voi_factor * premium_factor * dte_factor))
+    if label == 'hedge':
+        score = max(-0.18, min(0.18, score))
+    if abs(score) < 0.14 and label != 'hedge':
+        label = 'mixed'
+    return {
+        'moneyness_band': band,
+        'lean_label': label,
+        'lean_score': score,
+        'lean_hint': hint,
+    }
+
+
+def summarize_flow_pulse(rows):
+    if not rows:
+        return {
+            'label': 'mixed',
+            'score': 0.0,
+            'weighted_premium': 0.0,
+            'gross_premium': 0.0,
+            'hedge_share': 0.0,
+        }
+    weighted = 0.0
+    gross = 0.0
+    hedge_premium = 0.0
+    for row in rows:
+        premium = max(float(row.get('premium_delta_1m') or 0.0), 0.0)
+        score = float(row.get('lean_score') or 0.0)
+        weighted += premium * score
+        gross += premium * abs(score)
+        if row.get('lean_label') == 'hedge':
+            hedge_premium += premium
+    net_score = (weighted / gross) if gross > 0 else 0.0
+    hedge_share = (hedge_premium / max(sum(max(float(r.get('premium_delta_1m') or 0.0), 0.0) for r in rows), 1.0))
+    if gross < 25000:
+        label = 'mixed'
+    elif hedge_share >= 0.55 and abs(net_score) < 0.22:
+        label = 'hedge'
+    elif net_score >= 0.18:
+        label = 'bullish'
+    elif net_score <= -0.18:
+        label = 'bearish'
+    else:
+        label = 'mixed'
+    return {
+        'label': label,
+        'score': net_score,
+        'weighted_premium': weighted,
+        'gross_premium': gross,
+        'hedge_share': hedge_share,
+    }
+
+
+def _build_contract_direction_meta(option_type, strike, S, expiry_iso='', side='unknown',
+                                   premium_est=None, pace_hint=None, voi_hint=None):
+    if option_type not in ('call', 'put') or strike is None or S in (None, 0):
+        return {'direction_classifiable': False}
+    try:
+        moneyness_pct = ((float(strike) - float(S)) / float(S) * 100.0)
+    except Exception:
+        return {'direction_classifiable': False}
+    dte_days = _flow_pulse_dte_days(expiry_iso)
+    lean = _classify_flow_pulse_lean(
+        option_type=option_type,
+        side=side,
+        moneyness_pct=moneyness_pct,
+        premium_1m=premium_est,
+        pace_1m=pace_hint,
+        voi=voi_hint,
+        dte_days=dte_days,
+    )
+    return {
+        'direction_classifiable': True,
+        'direction_label': lean['lean_label'],
+        'direction_score': lean['lean_score'],
+        'direction_hint': lean['lean_hint'],
+        'moneyness_pct': moneyness_pct,
+        'moneyness_band': lean['moneyness_band'],
+        'dte_days': dte_days,
+        'side': side,
+    }
+
+
 def _current_session_date_str():
     try:
         return datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
@@ -3952,6 +4123,17 @@ def build_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=0.02, top_n=6
             pace_1m = (vol_1m / max(baseline_1m, 1.0)) if vol_1m is not None else None
             voi = (volume / oi) if oi > 0 else float(volume)
             moneyness_pct = ((strike - float(S)) / float(S) * 100.0) if S else None
+            side_label = _flow_blotter_side_label(int(row.get('side', 0) or 0), float(row.get('bid', 0) or 0), float(row.get('ask', 0) or 0))
+            dte_days = _flow_pulse_dte_days(expiry_iso)
+            lean = _classify_flow_pulse_lean(
+                option_type=option_type,
+                side=side_label,
+                moneyness_pct=moneyness_pct,
+                premium_1m=premium_1m,
+                pace_1m=pace_1m,
+                voi=voi,
+                dte_days=dte_days,
+            )
             score = premium_1m * min(max(pace_1m or 1.0, 1.0), 8.0) * (1.0 + min(voi, 2.0))
             rows.append({
                 'key': f"{expiry_iso}:{option_type}:{strike:.4f}",
@@ -3974,7 +4156,12 @@ def build_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=0.02, top_n=6
                 'age_5m': age_5m,
                 'score': score,
                 'moneyness_pct': moneyness_pct,
-                'side': _flow_blotter_side_label(int(row.get('side', 0) or 0), float(row.get('bid', 0) or 0), float(row.get('ask', 0) or 0)),
+                'moneyness_band': lean['moneyness_band'],
+                'dte_days': dte_days,
+                'side': side_label,
+                'lean_label': lean['lean_label'],
+                'lean_score': lean['lean_score'],
+                'lean_hint': lean['lean_hint'],
             })
 
     _process_df(calls, 'call')
@@ -4508,6 +4695,11 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                     'id': aid, 'level': 'flow',
                     'text': f'{label} {prev:.0f} → {curr:.0f}',
                     'strike': curr, 'ts': now_iso, 'detail': None,
+                    'alert_type': 'wall_shift',
+                    'wall_type': wtype,
+                    'direction_classifiable': True,
+                    'direction_label': 'structural',
+                    'direction_hint': 'Level shift is structural context, not a clean directional flow read',
                 })
 
     # 2. Volume spike (SQLite rolling 20-min baseline)
@@ -4523,6 +4715,8 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                         'id': aid, 'level': 'flow',
                         'text': f'Vol spike @ {strike:.0f} ({ratio:.1f}× avg)',
                         'strike': float(strike), 'ts': now_iso, 'detail': None,
+                        'alert_type': 'vol_spike',
+                        'direction_classifiable': False,
                     })
     except Exception as e:
         print(f'[compute_flow_alerts] vol_spike: {e}')
@@ -4531,7 +4725,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
     try:
         lo = S * (1 - strike_range)
         hi = S * (1 + strike_range)
-        for df in (calls, puts):
+        for option_type, df in (('call', calls), ('put', puts)):
             if df is None or getattr(df, 'empty', True):
                 continue
             window = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
@@ -4539,14 +4733,31 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 strike = float(row['strike'])
                 oi  = float(row.get('openInterest', 0) or 0)
                 vol = float(row.get('volume', 0) or 0)
+                expiry_iso = _normalize_expiry_iso(row.get('expiration', row.get('expiration_date')))
+                side_label = _flow_blotter_side_label(int(row.get('side', 0) or 0), float(row.get('bid', 0) or 0), float(row.get('ask', 0) or 0))
+                ref_price = _estimate_contract_ref_price(row)
                 if oi < 100 or vol / oi <= 0.25:
                     continue
-                aid = f'voi_ratio:{strike:.0f}'
+                aid = f'voi_ratio:{option_type}:{expiry_iso}:{strike:.0f}'
                 if _passes_key_level_gate('voi_ratio', strike) and _alert_cooldown_ok(ticker, aid, 600):
+                    direction_meta = _build_contract_direction_meta(
+                        option_type=option_type,
+                        strike=strike,
+                        S=S,
+                        expiry_iso=expiry_iso,
+                        side=side_label,
+                        premium_est=max(vol, 0.0) * max(ref_price, 0.0) * 100.0,
+                        pace_hint=1.0,
+                        voi_hint=(vol / oi) if oi > 0 else float(vol),
+                    )
                     alerts.append({
                         'id': aid, 'level': 'flow',
                         'text': f'Heavy vol/OI @ {strike:.0f} ({vol/oi:.2f})',
                         'strike': strike, 'ts': now_iso, 'detail': None,
+                        'alert_type': 'voi_ratio',
+                        'option_type': option_type,
+                        'expiry_iso': expiry_iso,
+                        **direction_meta,
                     })
     except Exception as e:
         print(f'[compute_flow_alerts] voi_ratio: {e}')
@@ -4563,6 +4774,10 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 strike = float(row['strike'])
                 expiry_iso = _normalize_expiry_iso(row.get('expiration', row.get('expiration_date')))
                 curr_iv = float(row.get('impliedVolatility', 0) or 0)
+                side_label = _flow_blotter_side_label(int(row.get('side', 0) or 0), float(row.get('bid', 0) or 0), float(row.get('ask', 0) or 0))
+                ref_price = _estimate_contract_ref_price(row)
+                vol = float(row.get('volume', 0) or 0)
+                oi = float(row.get('openInterest', 0) or 0)
                 if curr_iv <= 0:
                     continue
                 buffer_key = (ticker, option_type, expiry_iso, round(strike, 4))
@@ -4579,10 +4794,24 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                     aid = f'iv_surge:{option_type}:{expiry_iso}:{strike:.0f}'
                     if _passes_key_level_gate('iv_surge', strike) and _alert_cooldown_ok(ticker, aid, 600):
                         detail = f'Expiry {expiry_iso}' if expiry_iso else None
+                        direction_meta = _build_contract_direction_meta(
+                            option_type=option_type,
+                            strike=strike,
+                            S=S,
+                            expiry_iso=expiry_iso,
+                            side=side_label,
+                            premium_est=max(vol, 0.0) * max(ref_price, 0.0) * 100.0,
+                            pace_hint=max(1.0, z),
+                            voi_hint=(vol / oi) if oi > 0 else float(vol),
+                        )
                         alerts.append({
                             'id': aid, 'level': 'flow',
                             'text': f'{option_type.capitalize()} IV surge @ {strike:.0f} (+{z:.1f}σ)',
                             'strike': strike, 'ts': now_iso, 'detail': detail,
+                            'alert_type': 'iv_surge',
+                            'option_type': option_type,
+                            'expiry_iso': expiry_iso,
+                            **direction_meta,
                         })
     except Exception as e:
         print(f'[compute_flow_alerts] iv_surge: {e}')
@@ -4622,6 +4851,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'level_deltas':   None,
         'iv_context':     None,
         'flow_pulse':     [],
+        'flow_pulse_summary': {'label': 'mixed', 'score': 0.0, 'weighted_premium': 0.0, 'gross_premium': 0.0, 'hedge_share': 0.0},
     }
     if S is None:
         return out
@@ -4763,6 +4993,11 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     except Exception as e:
         print(f"[compute_trader_stats] flow_pulse failed: {e}")
         out['flow_pulse'] = []
+    try:
+        out['flow_pulse_summary'] = summarize_flow_pulse(out.get('flow_pulse') or [])
+    except Exception as e:
+        print(f"[compute_trader_stats] flow_pulse summary failed: {e}")
+        out['flow_pulse_summary'] = {'label': 'mixed', 'score': 0.0, 'weighted_premium': 0.0, 'gross_premium': 0.0, 'hedge_share': 0.0}
 
     # Scenario GEX table (Stage 3). Seven rows: current + ±2% spot + ±5 vol pts
     # + two diagonals. "Current" mirrors out['net_gex'] exactly so the table can't
@@ -4815,15 +5050,55 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     def _near(a, b, pct):
         return a is not None and b is not None and b > 0 and abs(a - b) / b <= pct
     if _near(S, out['call_wall'], 0.003):
-        alerts.append({'level': 'warn', 'text': f"Near Call Wall @ {out['call_wall']:.2f}"})
+        alerts.append({
+            'level': 'warn',
+            'text': f"Near Call Wall @ {out['call_wall']:.2f}",
+            'alert_type': 'wall_proximity',
+            'wall_type': 'call_wall',
+            'strike': out['call_wall'],
+            'direction_classifiable': True,
+            'direction_label': 'structural',
+            'direction_hint': 'Level proximity is structural context around spot',
+        })
     if _near(S, out['put_wall'], 0.003):
-        alerts.append({'level': 'warn', 'text': f"Near Put Wall @ {out['put_wall']:.2f}"})
+        alerts.append({
+            'level': 'warn',
+            'text': f"Near Put Wall @ {out['put_wall']:.2f}",
+            'alert_type': 'wall_proximity',
+            'wall_type': 'put_wall',
+            'strike': out['put_wall'],
+            'direction_classifiable': True,
+            'direction_label': 'structural',
+            'direction_hint': 'Level proximity is structural context around spot',
+        })
     if _near(S, out['gamma_flip'], 0.005):
-        alerts.append({'level': 'info', 'text': f"Approaching Gamma Flip @ {out['gamma_flip']:.2f}"})
+        alerts.append({
+            'level': 'info',
+            'text': f"Approaching Gamma Flip @ {out['gamma_flip']:.2f}",
+            'alert_type': 'gamma_flip',
+            'strike': out['gamma_flip'],
+            'direction_classifiable': True,
+            'direction_label': 'structural',
+            'direction_hint': 'Gamma flip proximity is structural regime context',
+        })
     if out['regime'] == 'Short Gamma':
-        alerts.append({'level': 'warn', 'text': 'Short-gamma regime — moves may accelerate'})
+        alerts.append({
+            'level': 'warn',
+            'text': 'Short-gamma regime — moves may accelerate',
+            'alert_type': 'regime',
+            'direction_classifiable': True,
+            'direction_label': 'structural',
+            'direction_hint': 'Gamma regime is structural volatility context, not a one-sided flow read',
+        })
     elif out['regime'] == 'Long Gamma':
-        alerts.append({'level': 'info', 'text': 'Long-gamma regime — dealer hedging dampens moves'})
+        alerts.append({
+            'level': 'info',
+            'text': 'Long-gamma regime — dealer hedging dampens moves',
+            'alert_type': 'regime',
+            'direction_classifiable': True,
+            'direction_label': 'structural',
+            'direction_hint': 'Gamma regime is structural volatility context, not a one-sided flow read',
+        })
 
     # Stamp existing rule-based alerts with id + ts (backwards-compatible)
     now_iso = datetime.now(pytz.UTC).isoformat().replace('+00:00', 'Z')
@@ -4866,6 +5141,18 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
                 'strike': strike,
                 'ts': now_iso,
                 'detail': f"+{int(vol_1m):,} vol · {pace_1m:.1f}x pace · ~${format_large_number(premium_1m)} est premium",
+                'alert_type': 'flow_pulse',
+                'option_type': pulse.get('option_type'),
+                'expiry_iso': pulse.get('expiry_iso'),
+                'expiry_text': expiry_text,
+                'direction_classifiable': True,
+                'direction_label': pulse.get('lean_label'),
+                'direction_score': pulse.get('lean_score'),
+                'direction_hint': pulse.get('lean_hint'),
+                'moneyness_band': pulse.get('moneyness_band'),
+                'moneyness_pct': pulse.get('moneyness_pct'),
+                'side': pulse.get('side'),
+                'dte_days': pulse.get('dte_days'),
             })
     except Exception as e:
         print(f'[compute_trader_stats] flow_pulse alerts failed: {e}')
@@ -7128,6 +7415,16 @@ def index():
             max-width: clamp(168px, 10vw, 220px);
             margin: 0;
         }
+        .flow-event-strip .rail-alert-item.lead {
+            flex-basis: clamp(220px, 18vw, 300px);
+            width: clamp(220px, 18vw, 300px);
+            min-width: clamp(220px, 18vw, 300px);
+            max-width: clamp(220px, 18vw, 300px);
+        }
+        .flow-event-strip .rail-alert-item.summary {
+            justify-content: center;
+            background: linear-gradient(180deg, var(--bg-1), var(--bg-0));
+        }
         .flow-event-strip .rail-alerts-empty,
         .flow-event-strip .rail-pulse-empty {
             display: flex;
@@ -7603,6 +7900,12 @@ def index():
             justify-content: space-between;
             gap: 10px;
         }
+        .rail-pulse-right {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
         .rail-pulse-contract {
             color: var(--fg-0);
             font-size: 12px;
@@ -7620,6 +7923,37 @@ def index():
             font-size: 11px;
             font-weight: 600;
             font-variant-numeric: tabular-nums;
+        }
+        .rail-pulse-lean {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 7px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            color: var(--fg-1);
+            background: var(--bg-1);
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .rail-pulse-lean.bullish {
+            color: var(--call);
+            border-color: color-mix(in srgb, var(--call) 40%, var(--border));
+            background: color-mix(in srgb, var(--call) 12%, var(--bg-1));
+        }
+        .rail-pulse-lean.bearish {
+            color: var(--put);
+            border-color: color-mix(in srgb, var(--put) 40%, var(--border));
+            background: color-mix(in srgb, var(--put) 12%, var(--bg-1));
+        }
+        .rail-pulse-lean.hedge {
+            color: var(--warn);
+            border-color: color-mix(in srgb, var(--warn) 34%, var(--border));
+            background: color-mix(in srgb, var(--warn) 11%, var(--bg-1));
+        }
+        .rail-pulse-lean.mixed {
+            color: var(--fg-1);
         }
         .rail-pulse-meta {
             display: flex;
@@ -7900,6 +8234,9 @@ def index():
         .rail-alert-item.stale:not(.top) {
             background: var(--bg-0);
         }
+        .rail-alert-item.refreshed {
+            box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+        }
         .rail-alert-topline {
             display: flex;
             align-items: center;
@@ -7910,12 +8247,74 @@ def index():
             text-transform: uppercase;
             letter-spacing: 0.06em;
         }
+        .rail-alert-topline-left {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+        }
         .rail-alert-tag {
             display: inline-flex;
             align-items: center;
             padding: 2px 7px;
             border-radius: 999px;
             background: var(--bg-2);
+            color: var(--fg-1);
+        }
+        .rail-alert-tier {
+            display: inline-flex;
+            align-items: center;
+            padding: 1px 6px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            color: var(--fg-2);
+        }
+        .rail-alert-tier.count-mid,
+        .rail-alert-tier.count-strong {
+            font-weight: 700;
+        }
+        .rail-alert-tier.count-mid {
+            color: var(--accent);
+            border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+            background: color-mix(in srgb, var(--accent) 10%, var(--bg-1));
+        }
+        .rail-alert-tier.count-strong {
+            color: var(--fg-0);
+            border-color: color-mix(in srgb, var(--accent) 56%, var(--border));
+            background: color-mix(in srgb, var(--accent) 22%, var(--bg-1));
+            box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
+        }
+        .rail-alert-direction {
+            display: inline-flex;
+            align-items: center;
+            padding: 1px 6px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            color: var(--fg-1);
+            background: var(--bg-1);
+            font-weight: 700;
+        }
+        .rail-alert-direction.bullish {
+            color: var(--call);
+            border-color: color-mix(in srgb, var(--call) 42%, var(--border));
+            background: color-mix(in srgb, var(--call) 12%, var(--bg-1));
+        }
+        .rail-alert-direction.bearish {
+            color: var(--put);
+            border-color: color-mix(in srgb, var(--put) 42%, var(--border));
+            background: color-mix(in srgb, var(--put) 12%, var(--bg-1));
+        }
+        .rail-alert-direction.hedge {
+            color: var(--warn);
+            border-color: color-mix(in srgb, var(--warn) 36%, var(--border));
+            background: color-mix(in srgb, var(--warn) 11%, var(--bg-1));
+        }
+        .rail-alert-direction.structural {
+            color: var(--info);
+            border-color: color-mix(in srgb, var(--info) 36%, var(--border));
+            background: color-mix(in srgb, var(--info) 10%, var(--bg-1));
+        }
+        .rail-alert-direction.mixed {
             color: var(--fg-1);
         }
         .rail-alert-item.warn .rail-alert-tag {
@@ -7943,6 +8342,24 @@ def index():
             font-size: 10px;
             line-height: 1.4;
             font-variant-numeric: tabular-nums;
+        }
+        .rail-alert-strongest {
+            color: var(--fg-1);
+            font-size: 10px;
+            line-height: 1.35;
+        }
+        .rail-alert-strongest-value {
+            color: var(--fg-0);
+            font-weight: 700;
+        }
+        .rail-alert-summary-count {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--fg-0);
+        }
+        .rail-alert-summary-text {
+            color: var(--fg-1);
+            line-height: 1.45;
         }
 
         /* Key Levels table */
@@ -9855,7 +10272,7 @@ def index():
                 <div class="flow-event-strip" id="flow-event-strip-alerts">
                     <div class="flow-event-strip-head">
                         <div class="flow-event-strip-title">Live Alerts</div>
-                        <div class="flow-event-strip-note">Recent trigger feed</div>
+                        <div class="flow-event-strip-note">Pinned + buffered feed</div>
                     </div>
                     <div class="rail-alerts-list flow-event-list" id="right-rail-alerts">
                         <div class="rail-alerts-empty">No active alerts.</div>
@@ -9864,7 +10281,7 @@ def index():
                 <div class="flow-event-strip" id="flow-event-strip-pulse">
                     <div class="flow-event-strip-head">
                         <div class="flow-event-strip-title">Flow Pulse</div>
-                        <div class="flow-event-strip-note">1m vs 5m pace</div>
+                        <div class="flow-event-strip-note" id="rail-flow-pulse-note">1m vs 5m pace</div>
                     </div>
                     <div class="rail-pulse-list flow-event-list" id="rail-flow-pulse">
                         <div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>
@@ -14121,7 +14538,7 @@ def index():
                     '<div class="flow-event-strip" id="flow-event-strip-alerts">' +
                         '<div class="flow-event-strip-head">' +
                             '<div class="flow-event-strip-title">Live Alerts</div>' +
-                            '<div class="flow-event-strip-note">Recent trigger feed</div>' +
+                            '<div class="flow-event-strip-note">Pinned + buffered feed</div>' +
                         '</div>' +
                         '<div class="rail-alerts-list flow-event-list" id="right-rail-alerts">' +
                             '<div class="rail-alerts-empty">No active alerts.</div>' +
@@ -14130,7 +14547,7 @@ def index():
                     '<div class="flow-event-strip" id="flow-event-strip-pulse">' +
                         '<div class="flow-event-strip-head">' +
                             '<div class="flow-event-strip-title">Flow Pulse</div>' +
-                            '<div class="flow-event-strip-note">1m vs 5m pace</div>' +
+                            '<div class="flow-event-strip-note" id="rail-flow-pulse-note">1m vs 5m pace</div>' +
                         '</div>' +
                         '<div class="rail-pulse-list flow-event-list" id="rail-flow-pulse">' +
                             '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>' +
@@ -15062,7 +15479,7 @@ def index():
         function renderTraderStats(stats) {
             _lastStats = stats || null;
             if (!stats) {
-                renderRailAlerts([]);
+                renderRailAlerts([], { reset: true });
                 renderRailKeyLevels(null);
                 renderDealerImpact(null);
                 renderMarketMetrics(null);
@@ -15321,10 +15738,319 @@ def index():
         // ── Right-rail alerts panel ──────────────────────────────────────
         let _lastRailAlerts = [];
         let _alertsSeenKeys = new Set();
+        let _railAlertBuffer = new Map();
+        let _railAlertScopeKey = '';
+        const RAIL_ALERT_TTL_MS = Object.freeze({
+            critical: 10 * 60 * 1000,
+            active: 5 * 60 * 1000,
+            recent: 2 * 60 * 1000,
+        });
 
         function _escapeHtml(s) {
             return String(s == null ? '' : s)
-                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function _currentRailAlertScopeKey() {
+            const tickerEl = document.getElementById('ticker');
+            const ticker = String((tickerEl && tickerEl.value) || '').trim().toUpperCase() || 'UNKNOWN';
+            return ticker + '|' + String(gexScope || 'all');
+        }
+
+        function _clearRailAlertState(scopeKey = '') {
+            _railAlertBuffer = new Map();
+            _lastRailAlerts = [];
+            _alertsSeenKeys = new Set();
+            _railAlertScopeKey = scopeKey || _currentRailAlertScopeKey();
+        }
+
+        function _ensureRailAlertScope(reset = false) {
+            const scopeKey = _currentRailAlertScopeKey();
+            if (reset || (_railAlertScopeKey && scopeKey !== _railAlertScopeKey)) {
+                _clearRailAlertState(scopeKey);
+            } else if (!_railAlertScopeKey) {
+                _railAlertScopeKey = scopeKey;
+            }
+            return _railAlertScopeKey;
+        }
+
+        function _alertSeenKey(a) {
+            if (!a) return '';
+            return String(a.scopeKey || _railAlertScopeKey || '') + ':' + String(a.id || a.text || '');
+        }
+
+        function _coerceAlertTsMs(value) {
+            if (!value) return null;
+            const ts = new Date(value).getTime();
+            return isFinite(ts) ? ts : null;
+        }
+
+        function _relTimeMs(tsMs) {
+            if (tsMs == null || !isFinite(tsMs)) return '';
+            const mins = Math.max(0, Math.round((Date.now() - tsMs) / 60000));
+            if (mins < 1) return 'now';
+            if (mins < 60) return mins + 'm';
+            return Math.floor(mins / 60) + 'h';
+        }
+
+        function _flowPulseLeanMeta(label) {
+            const key = String(label || 'mixed').toLowerCase();
+            if (key === 'bullish') return { cls: 'bullish', text: 'Bull' };
+            if (key === 'bearish') return { cls: 'bearish', text: 'Bear' };
+            if (key === 'hedge') return { cls: 'hedge', text: 'Hedge' };
+            return { cls: 'mixed', text: 'Mixed' };
+        }
+
+        function _flowPulseSummaryText(summary) {
+            const s = summary && typeof summary === 'object' ? summary : {};
+            const label = String(s.label || 'mixed').toLowerCase();
+            const weighted = (s.weighted_premium != null && isFinite(s.weighted_premium)) ? s.weighted_premium : 0;
+            const absWeighted = Math.abs(weighted);
+            if (label === 'bullish') {
+                return 'Bullish lean · ' + fmtMoneyCompact(absWeighted || 0) + ' weighted';
+            }
+            if (label === 'bearish') {
+                return 'Bearish lean · ' + fmtMoneyCompact(absWeighted || 0) + ' weighted';
+            }
+            if (label === 'hedge') {
+                return 'Hedge-heavy flow';
+            }
+            return 'Mixed 1m pulse';
+        }
+
+        function _railAlertDirectionMeta(label) {
+            const key = String(label || 'mixed').toLowerCase();
+            if (key === 'bullish') return { cls: 'bullish', text: 'Bull' };
+            if (key === 'bearish') return { cls: 'bearish', text: 'Bear' };
+            if (key === 'hedge') return { cls: 'hedge', text: 'Hedge' };
+            if (key === 'structural') return { cls: 'structural', text: 'Struct' };
+            return { cls: 'mixed', text: 'Mixed' };
+        }
+
+        function _inferRailAlertKind(a) {
+            if (a && a.alert_type) return String(a.alert_type);
+            const id = String((a && a.id) || '');
+            const text = String((a && a.text) || '').toLowerCase();
+            if (id.startsWith('wall_shift:')) return 'wall_shift';
+            if (id.startsWith('flow_pulse:')) return 'flow_pulse';
+            if (id.startsWith('iv_surge:')) return 'iv_surge';
+            if (id.startsWith('voi_ratio:')) return 'voi_ratio';
+            if (id.startsWith('vol_spike:')) return 'vol_spike';
+            if (text.includes('short-gamma regime') || text.includes('long-gamma regime')) return 'regime';
+            if (text.includes('gamma flip')) return 'gamma_flip';
+            if (text.includes('call wall') || text.includes('put wall')) return 'wall_proximity';
+            return 'generic';
+        }
+
+        function _railAlertTier(kind) {
+            if (['wall_shift', 'flow_pulse', 'regime'].includes(kind)) return 'critical';
+            if (['iv_surge', 'voi_ratio', 'vol_spike'].includes(kind)) return 'active';
+            return 'recent';
+        }
+
+        function _railAlertPriority(src, kind, tier) {
+            const base = {
+                wall_shift: 110,
+                flow_pulse: 95,
+                regime: 82,
+                iv_surge: 72,
+                voi_ratio: 64,
+                vol_spike: 56,
+                gamma_flip: 44,
+                wall_proximity: 38,
+                generic: 24,
+            }[kind] || 20;
+            const levelBonus = src.level === 'warn' ? 12 : (src.level === 'flow' ? 8 : 3);
+            const detailBonus = src.detail ? 4 : 0;
+            const strikeBonus = (src.strike != null && isFinite(src.strike)) ? 2 : 0;
+            const tierBonus = tier === 'critical' ? 14 : (tier === 'active' ? 7 : 0);
+            return base + levelBonus + detailBonus + strikeBonus + tierBonus;
+        }
+
+        function _mergeRailAlerts(list) {
+            const scopeKey = _ensureRailAlertScope(false);
+            const now = Date.now();
+            (Array.isArray(list) ? list : []).forEach(item => {
+                const src = (item && typeof item === 'object') ? item : { text: String(item == null ? '' : item) };
+                const text = String(src.text == null ? '' : src.text).trim();
+                if (!text) return;
+                const id = String(src.id || (String(src.level || 'info') + ':' + text));
+                const kind = _inferRailAlertKind(src);
+                const tier = _railAlertTier(kind);
+                const previous = _railAlertBuffer.get(id);
+                const eventTsMs = _coerceAlertTsMs(src.ts) || now;
+                _railAlertBuffer.set(id, Object.assign({}, previous || {}, src, {
+                    id,
+                    text,
+                    detail: src.detail ? String(src.detail) : '',
+                    level: ['warn', 'info', 'flow'].includes(src.level) ? src.level : 'info',
+                    kind,
+                    tier,
+                    priority: _railAlertPriority(src, kind, tier),
+                    eventTsMs,
+                    firstSeenMs: previous ? previous.firstSeenMs : eventTsMs,
+                    lastSeenMs: now,
+                    refreshCount: previous ? (previous.refreshCount + 1) : 1,
+                    scopeKey,
+                }));
+            });
+        }
+
+        function _pruneRailAlertBuffer() {
+            const now = Date.now();
+            for (const [key, alert] of _railAlertBuffer.entries()) {
+                const ttl = RAIL_ALERT_TTL_MS[alert.tier] || RAIL_ALERT_TTL_MS.recent;
+                const anchor = alert.eventTsMs || alert.lastSeenMs || now;
+                if (!isFinite(anchor) || (now - anchor) > ttl) {
+                    _railAlertBuffer.delete(key);
+                }
+            }
+        }
+
+        function _getBufferedRailAlerts() {
+            const now = Date.now();
+            const rows = Array.from(_railAlertBuffer.values()).map(alert => {
+                const ttl = RAIL_ALERT_TTL_MS[alert.tier] || RAIL_ALERT_TTL_MS.recent;
+                const ageMs = Math.max(0, now - (alert.eventTsMs || now));
+                return Object.assign({}, alert, {
+                    _ttlMs: ttl,
+                    _ageMs: ageMs,
+                    _freshness: Math.max(0, 1 - (ageMs / ttl)),
+                });
+            });
+            rows.sort((a, b) => {
+                if (b.priority !== a.priority) return b.priority - a.priority;
+                if (b._freshness !== a._freshness) return b._freshness - a._freshness;
+                return (b.eventTsMs || 0) - (a.eventTsMs || 0);
+            });
+            return rows;
+        }
+
+        function _formatRailAlertStrike(value) {
+            const n = Number(value);
+            if (!isFinite(n)) return '—';
+            return (Math.abs(n - Math.round(n)) < 0.001)
+                ? String(Math.round(n))
+                : n.toFixed(2).replace(/\.?0+$/, '');
+        }
+
+        function _isClusterableRailAlert(a) {
+            const kind = String((a && (a.alert_type || a.kind)) || '');
+            return ['voi_ratio', 'iv_surge', 'flow_pulse'].includes(kind)
+                && !!(a && a.option_type)
+                && a && a.strike != null
+                && isFinite(Number(a.strike));
+        }
+
+        function _clusterRailAlerts(rows) {
+            const passthrough = [];
+            const grouped = new Map();
+            (Array.isArray(rows) ? rows : []).forEach(row => {
+                if (!_isClusterableRailAlert(row)) {
+                    passthrough.push(row);
+                    return;
+                }
+                const kind = String(row.alert_type || row.kind || '');
+                const key = [
+                    kind,
+                    String(row.option_type || ''),
+                    String(row.side || ''),
+                    String(row.expiry_iso || ''),
+                    String(row.level || ''),
+                    String(row.tier || ''),
+                    String(row.direction_label || ''),
+                ].join('|');
+                if (!grouped.has(key)) grouped.set(key, []);
+                grouped.get(key).push(row);
+            });
+            const clustered = [];
+            grouped.forEach(groupRows => {
+                const sorted = groupRows.slice().sort((a, b) => {
+                    const strikeDiff = Number(a.strike) - Number(b.strike);
+                    if (strikeDiff !== 0) return strikeDiff;
+                    return (b.eventTsMs || 0) - (a.eventTsMs || 0);
+                });
+                const uniqueStrikes = sorted
+                    .map(row => Number(row.strike))
+                    .filter((strike, idx, arr) => idx === 0 || Math.abs(strike - arr[idx - 1]) > 0.0001);
+                let baseStep = Infinity;
+                for (let i = 1; i < uniqueStrikes.length; i += 1) {
+                    const diff = Math.abs(uniqueStrikes[i] - uniqueStrikes[i - 1]);
+                    if (diff > 0.0001 && diff < baseStep) baseStep = diff;
+                }
+                if (!isFinite(baseStep)) baseStep = 1;
+                const adjacencyThreshold = Math.max(0.51, baseStep * 1.25);
+                let run = [];
+                const flushRun = () => {
+                    if (!run.length) return;
+                    if (run.length === 1) {
+                        clustered.push(run[0]);
+                        run = [];
+                        return;
+                    }
+                    const strongest = run.reduce((best, row) => {
+                        if (!best) return row;
+                        if ((row.priority || 0) !== (best.priority || 0)) return (row.priority || 0) > (best.priority || 0) ? row : best;
+                        return (row.eventTsMs || 0) > (best.eventTsMs || 0) ? row : best;
+                    }, null);
+                    const strikes = run.map(row => Number(row.strike)).sort((a, b) => a - b);
+                    const start = strikes[0];
+                    const end = strikes[strikes.length - 1];
+                    const rangeLabel = _formatRailAlertStrike(start) + (Math.abs(end - start) > 0.0001 ? ('-' + _formatRailAlertStrike(end)) : '');
+                    const kind = String(strongest.alert_type || strongest.kind || '');
+                    const optionLabel = strongest.option_type === 'put' ? 'Put' : 'Call';
+                    const title = kind === 'iv_surge'
+                        ? 'IV surge'
+                        : (kind === 'flow_pulse' ? 'burst' : 'heavy vol/OI');
+                    const expiryLabel = strongest.expiry_text || strongest.expiry_iso || '';
+                    const newestEventTsMs = Math.max.apply(null, run.map(row => row.eventTsMs || 0));
+                    const ttlMs = strongest._ttlMs || (RAIL_ALERT_TTL_MS[strongest.tier] || RAIL_ALERT_TTL_MS.recent);
+                    const ageMs = Math.max(0, Date.now() - newestEventTsMs);
+                    clustered.push(Object.assign({}, strongest, {
+                        id: 'cluster:' + kind + ':' + String(strongest.option_type || '') + ':' + String(strongest.expiry_iso || '') + ':' + _formatRailAlertStrike(start) + ':' + _formatRailAlertStrike(end),
+                        text: optionLabel + ' ' + title + ' cluster @ ' + rangeLabel,
+                        detail: run.length + ' adjacent strikes' + (expiryLabel ? (' · ' + expiryLabel) : ''),
+                        strike: strongest.strike,
+                        eventTsMs: newestEventTsMs,
+                        lastSeenMs: Math.max.apply(null, run.map(row => row.lastSeenMs || 0)),
+                        firstSeenMs: Math.min.apply(null, run.map(row => row.firstSeenMs || newestEventTsMs)),
+                        refreshCount: run.reduce((sum, row) => sum + (row.refreshCount || 1), 0),
+                        priority: (strongest.priority || 0) + Math.min(12, run.length * 3),
+                        clusterCount: run.length,
+                        isCluster: true,
+                        clusterStrongestLabel: _formatRailAlertStrike(strongest.strike),
+                        _ttlMs: ttlMs,
+                        _ageMs: ageMs,
+                        _freshness: Math.max(0, 1 - (ageMs / ttlMs)),
+                    }));
+                    run = [];
+                };
+                sorted.forEach(row => {
+                    if (!run.length) {
+                        run.push(row);
+                        return;
+                    }
+                    const prev = run[run.length - 1];
+                    const sameWindow = Math.abs((row.eventTsMs || 0) - (prev.eventTsMs || 0)) <= Math.max(row._ttlMs || 0, prev._ttlMs || 0, 60000);
+                    const adjacentStrike = Math.abs(Number(row.strike) - Number(prev.strike)) <= adjacencyThreshold;
+                    if (sameWindow && adjacentStrike) {
+                        run.push(row);
+                    } else {
+                        flushRun();
+                        run.push(row);
+                    }
+                });
+                flushRun();
+            });
+            return clustered.concat(passthrough).sort((a, b) => {
+                if ((b.priority || 0) !== (a.priority || 0)) return (b.priority || 0) - (a.priority || 0);
+                if ((b._freshness || 0) !== (a._freshness || 0)) return (b._freshness || 0) - (a._freshness || 0);
+                return (b.eventTsMs || 0) - (a.eventTsMs || 0);
+            });
         }
 
         function _updateAlertsBadge() {
@@ -15333,7 +16059,7 @@ def index():
             let unread = 0;
             if (activeRailTab !== 'overview') {
                 for (const a of _lastRailAlerts) {
-                    if (!_alertsSeenKeys.has(a.text)) unread += 1;
+                    if (!_alertsSeenKeys.has(_alertSeenKey(a))) unread += 1;
                 }
             }
             if (unread > 0) {
@@ -15346,60 +16072,86 @@ def index():
         }
 
         function markRailAlertsSeen() {
-            _alertsSeenKeys = new Set(_lastRailAlerts.map(a => a.text));
+            _alertsSeenKeys = new Set(_lastRailAlerts.map(a => _alertSeenKey(a)));
             _updateAlertsBadge();
         }
 
-        function _relTime(iso) {
-            if (!iso) return '';
-            const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
-            if (mins < 1) return 'now';
-            if (mins < 60) return mins + 'm';
-            return Math.floor(mins / 60) + 'h';
+        function _renderRailAlertCard(a, options = {}) {
+            const lvl = ['warn', 'info', 'flow'].includes(a.level) ? a.level : 'info';
+            const ago = _relTimeMs(a.eventTsMs);
+            const stale = a._ageMs >= (a._ttlMs * 0.65);
+            const refreshed = a._ageMs <= 15000 && a.refreshCount > 1;
+            const classes = ['rail-alert-item', lvl];
+            if (options.lead) classes.push('top', 'lead');
+            if (options.summary) classes.push('summary');
+            if (stale) classes.push('stale');
+            if (refreshed) classes.push('refreshed');
+            if (options.muted) classes.push('muted');
+            const tierLabel = a.tier === 'critical' ? 'hold'
+                : (a.tier === 'active' ? 'active' : 'recent');
+            const countCls = a.clusterCount >= 8 ? ' count-strong' : (a.clusterCount >= 4 ? ' count-mid' : '');
+            const direction = _railAlertDirectionMeta(a.direction_label);
+            return '<div class="' + classes.join(' ') + '">' +
+                       '<div class="rail-alert-topline">' +
+                           '<span class="rail-alert-topline-left">' +
+                               '<span class="rail-alert-tag">' + (options.summary ? 'buffered' : (lvl === 'warn' ? 'active' : (lvl === 'flow' ? 'flow' : 'info'))) + '</span>' +
+                               (!options.summary ? '<span class="rail-alert-tier">' + tierLabel + '</span>' : '') +
+                               (a.direction_classifiable && !options.summary ? '<span class="rail-alert-direction ' + direction.cls + '" title="' + _escapeHtml(a.direction_hint || '') + '">' + direction.text + '</span>' : '') +
+                               (a.clusterCount > 1 ? '<span class="rail-alert-tier' + countCls + '">x' + a.clusterCount + '</span>' : '') +
+                           '</span>' +
+                           (ago ? '<span class="rail-alert-ago">' + ago + '</span>' : '') +
+                       '</div>' +
+                       '<div class="rail-alert-text">' + _escapeHtml(a.text) + '</div>' +
+                       (a.clusterStrongestLabel ? '<div class="rail-alert-strongest">Strongest <span class="rail-alert-strongest-value">' + _escapeHtml(a.clusterStrongestLabel) + '</span></div>' : '') +
+                       (a.detail ? '<div class="rail-alert-detail">' + _escapeHtml(a.detail) + '</div>' : '') +
+                   '</div>';
         }
 
-        function renderRailAlerts(list) {
-            const MAX_AGE_MIN = 15;
-            const now = Date.now();
-            const priority = { warn: 0, flow: 1, info: 2 };
-            const filtered = (Array.isArray(list) ? list : [])
-                .map(a => {
-                    const src = (a && typeof a === 'object') ? a : { text: String(a == null ? '' : a) };
-                    const ts = src.ts ? new Date(src.ts).getTime() : null;
-                    const ageMin = ts == null ? null : Math.max(0, (now - ts) / 60000);
-                    return Object.assign({}, src, { _tsMs: ts, _ageMin: ageMin });
-                })
-                .filter(a => a._ageMin == null || a._ageMin <= MAX_AGE_MIN)
-                .sort((a, b) => {
-                    const pa = priority[a.level] != null ? priority[a.level] : 9;
-                    const pb = priority[b.level] != null ? priority[b.level] : 9;
-                    if (pa !== pb) return pa - pb;
-                    return (b._tsMs || 0) - (a._tsMs || 0);
-                });
-            _lastRailAlerts = filtered;
+        function _renderRailAlertOverflowCard(items) {
+            if (!items.length) return '';
+            const critical = items.filter(a => a.tier === 'critical').length;
+            const active = items.filter(a => a.tier === 'active').length;
+            const recent = items.length - critical - active;
+            const parts = [];
+            if (critical > 0) parts.push(critical + ' hold');
+            if (active > 0) parts.push(active + ' active');
+            if (recent > 0) parts.push(recent + ' recent');
+            return '<div class="rail-alert-item info summary">' +
+                       '<div class="rail-alert-topline">' +
+                           '<span class="rail-alert-tag">buffered</span>' +
+                           '<span class="rail-alert-ago">+' + items.length + '</span>' +
+                       '</div>' +
+                       '<div class="rail-alert-summary-count">+' + items.length + ' more</div>' +
+                       '<div class="rail-alert-summary-text">' + _escapeHtml(parts.join(' · ') || 'Buffered alerts held off-screen.') + '</div>' +
+                   '</div>';
+        }
+
+        function renderRailAlerts(list, options = {}) {
+            const reset = !!(options && options.reset);
             const target = document.getElementById('right-rail-alerts');
+            _ensureRailAlertScope(reset);
+            if (reset) {
+                _lastRailAlerts = [];
+                if (target) target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
+                _updateAlertsBadge();
+                return;
+            }
+            _mergeRailAlerts(list);
+            _pruneRailAlertBuffer();
+            const buffered = _clusterRailAlerts(_getBufferedRailAlerts());
+            _lastRailAlerts = buffered;
             if (target) {
-                if (!filtered.length) {
+                if (!buffered.length) {
                     target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
                 } else {
-                    target.innerHTML = filtered.map((a, idx) => {
-                        const lvl = ['warn', 'info', 'flow'].includes(a.level) ? a.level : 'info';
-                        const ago = _relTime(a.ts);
-                        const tag = lvl === 'warn' ? 'active' : (lvl === 'flow' ? 'flow' : 'info');
-                        const stale = a._ageMin != null && a._ageMin >= 8;
-                        const classes = ['rail-alert-item', lvl];
-                        if (idx === 0) classes.push('top');
-                        if (stale) classes.push('stale');
-                        if (idx > 0 && (stale || lvl === 'info')) classes.push('muted');
-                        return '<div class="' + classes.join(' ') + '">' +
-                                   '<div class="rail-alert-topline">' +
-                                       '<span class="rail-alert-tag">' + tag + '</span>' +
-                                       (ago ? '<span class="rail-alert-ago">' + ago + '</span>' : '') +
-                                   '</div>' +
-                                   '<div class="rail-alert-text">' + _escapeHtml(a.text) + '</div>' +
-                                   (a.detail ? '<div class="rail-alert-detail">' + _escapeHtml(a.detail) + '</div>' : '') +
-                               '</div>';
-                    }).join('');
+                    const pinned = buffered[0];
+                    const supporting = buffered.slice(1, 4);
+                    const overflow = buffered.slice(4);
+                    target.innerHTML = [
+                        _renderRailAlertCard(pinned, { lead: true }),
+                        ...supporting.map((a, idx) => _renderRailAlertCard(a, { muted: idx >= 2 })),
+                        _renderRailAlertOverflowCard(overflow),
+                    ].filter(Boolean).join('');
                 }
             }
             if (activeRailTab === 'overview') {
@@ -16386,14 +17138,19 @@ def index():
 
         function renderFlowPulse(stats) {
             const target = document.getElementById('rail-flow-pulse');
+            const note = document.getElementById('rail-flow-pulse-note');
             if (!target) return;
             const rows = Array.isArray(stats && stats.flow_pulse) ? stats.flow_pulse : [];
+            const summary = (stats && typeof stats.flow_pulse_summary === 'object') ? stats.flow_pulse_summary : null;
             if (!rows.length) {
+                if (note) note.textContent = '1m vs 5m pace';
                 target.innerHTML = '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>';
                 return;
             }
+            if (note) note.textContent = _flowPulseSummaryText(summary);
             target.innerHTML = rows.slice(0, 4).map(row => {
                 const typeKey = row.option_type === 'put' ? 'put' : 'call';
+                const lean = _flowPulseLeanMeta(row.lean_label);
                 const pace = (row.pace_1m != null && isFinite(row.pace_1m)) ? row.pace_1m.toFixed(1) + 'x' : '—';
                 const vol1m = (row.vol_delta_1m != null && isFinite(row.vol_delta_1m) && row.vol_delta_1m > 0)
                     ? '+' + fmtCountCompact(row.vol_delta_1m)
@@ -16407,7 +17164,10 @@ def index():
                                '<div class="rail-pulse-contract">' + _escapeHtml(row.contract_label || '—') +
                                    '<span class="rail-pulse-expiry">' + _escapeHtml(row.expiry_text || '') + '</span>' +
                                '</div>' +
-                               '<div class="rail-pulse-pace">' + pace + '</div>' +
+                               '<div class="rail-pulse-right">' +
+                                   '<span class="rail-pulse-lean ' + lean.cls + '" title="' + _escapeHtml(row.lean_hint || '') + '">' + lean.text + '</span>' +
+                                   '<div class="rail-pulse-pace">' + pace + '</div>' +
+                               '</div>' +
                            '</div>' +
                            '<div class="rail-pulse-meta">' +
                                '<span class="emph">1m ' + vol1m + ' vol</span>' +
