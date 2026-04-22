@@ -184,19 +184,64 @@ def normalize_level_type(level_type):
     return level_type
 
 
-def calculate_expected_move_snapshot(calls, puts, spot_price):
-    """Return the current ATM straddle-based expected move snapshot."""
+def _normalize_expiry_list(values):
+    if not values:
+        return []
+    normalized = []
+    for value in values:
+        expiry_iso = _normalize_expiry_iso(value)
+        if expiry_iso:
+            normalized.append(expiry_iso)
+    return sorted(set(normalized))
+
+
+def _build_stats_scope_id(strike_range, selected_expiries=None, scope_label='all'):
+    normalized_expiries = _normalize_expiry_list(selected_expiries)
+    expiries_token = ','.join(normalized_expiries) if normalized_expiries else '*'
+    try:
+        range_token = f"{float(strike_range):.6f}"
+    except Exception:
+        range_token = 'nan'
+    return f"{scope_label}|range:{range_token}|exp:{expiries_token}"
+
+
+def _select_expected_move_contracts(calls, puts, spot_price, selected_expiries=None):
+    """Pick one deterministic ATM straddle from a shared expiry and strike."""
     if calls is None or puts is None or calls.empty or puts.empty or not spot_price:
         return None
 
-    strikes_sorted = sorted(calls['strike'].unique())
-    if not strikes_sorted:
+    call_scope = calls.copy()
+    put_scope = puts.copy()
+    call_scope['_expiry_iso'] = _expiration_series_iso(call_scope)
+    put_scope['_expiry_iso'] = _expiration_series_iso(put_scope)
+
+    selected_expiry_set = _normalize_expiry_list(selected_expiries)
+    call_expiries = {expiry for expiry in call_scope['_expiry_iso'].dropna().tolist() if expiry}
+    put_expiries = {expiry for expiry in put_scope['_expiry_iso'].dropna().tolist() if expiry}
+    shared_expiries = sorted(call_expiries & put_expiries)
+
+    if selected_expiry_set:
+        expiry_candidates = [expiry for expiry in selected_expiry_set if expiry in shared_expiries]
+    else:
+        expiry_candidates = list(shared_expiries)
+
+    chosen_expiry = None
+    if expiry_candidates:
+        today_iso = datetime.now(pytz.timezone('US/Eastern')).date().isoformat()
+        future_candidates = [expiry for expiry in expiry_candidates if expiry >= today_iso]
+        chosen_expiry = min(future_candidates) if future_candidates else min(expiry_candidates)
+        call_scope = call_scope[call_scope['_expiry_iso'] == chosen_expiry]
+        put_scope = put_scope[put_scope['_expiry_iso'] == chosen_expiry]
+
+    call_strikes = set(pd.to_numeric(call_scope['strike'], errors='coerce').dropna().tolist())
+    put_strikes = set(pd.to_numeric(put_scope['strike'], errors='coerce').dropna().tolist())
+    common_strikes = sorted(call_strikes & put_strikes)
+    if not common_strikes:
         return None
 
-    atm_strike = min(strikes_sorted, key=lambda strike: abs(strike - spot_price))
-
     def _get_mid(df, strike):
-        row = df.loc[df['strike'] == strike]
+        strike_series = pd.to_numeric(df['strike'], errors='coerce')
+        row = df.loc[strike_series == strike]
         if row is None or row.empty:
             return None
         bid = row['bid'].values[0]
@@ -209,14 +254,37 @@ def calculate_expected_move_snapshot(calls, puts, spot_price):
             return ask
         return None
 
-    call_mid = _get_mid(calls, atm_strike)
-    put_mid = _get_mid(puts, atm_strike)
+    atm_strike = min(common_strikes, key=lambda strike: (abs(strike - spot_price), strike))
+    call_mid = _get_mid(call_scope, atm_strike)
+    put_mid = _get_mid(put_scope, atm_strike)
+    if call_mid is None and put_mid is None:
+        return None
+
+    return {
+        'expiry': chosen_expiry,
+        'atm_strike': float(atm_strike),
+        'call_mid': float(call_mid) if call_mid is not None else None,
+        'put_mid': float(put_mid) if put_mid is not None else None,
+    }
+
+
+def calculate_expected_move_snapshot(calls, puts, spot_price, selected_expiries=None):
+    """Return the current deterministic ATM straddle-based expected move snapshot."""
+    contract = _select_expected_move_contracts(
+        calls, puts, spot_price, selected_expiries=selected_expiries
+    )
+    if not contract:
+        return None
+
+    call_mid = contract['call_mid']
+    put_mid = contract['put_mid']
     expected_move = (call_mid or 0) + (put_mid or 0)
     if expected_move <= 0:
         return None
 
     return {
-        'atm_strike': atm_strike,
+        'expiry': contract['expiry'],
+        'atm_strike': contract['atm_strike'],
         'move': float(expected_move),
         'upper': float(spot_price + expected_move),
         'lower': float(spot_price - expected_move),
@@ -3134,35 +3202,10 @@ def create_price_chart(price_data, calls=None, puts=None, exposure_levels_types=
         for i, exposure_levels_type in enumerate(exposure_levels_types):
             # --- Expected Move Chart Level ---
             if exposure_levels_type.lower() == 'expected move':
-                # --- Weighted Expected Move Calculation ---
-                # Find ATM strike (closest to current price)
-                strikes_sorted = sorted(calls['strike'].unique()) if not calls.empty else []
-                if not strikes_sorted:
-                    continue
-                atm_strike = min(strikes_sorted, key=lambda x: abs(x - current_price))
-                atm_idx = strikes_sorted.index(atm_strike)
-                # Helper to get mid price
-                def get_mid(df, strike):
-                    row = df.loc[df['strike'] == strike]
-                    if row is not None and not row.empty:
-                        bid = row['bid'].values[0]
-                        ask = row['ask'].values[0]
-                        if bid > 0 and ask > 0:
-                            return (bid + ask) / 2
-                        elif bid > 0:
-                            return bid
-                        elif ask > 0:
-                            return ask
-                    return None
-                # ATM Straddle
-                call_mid_atm = get_mid(calls, atm_strike)
-                put_mid_atm = get_mid(puts, atm_strike)
-                straddle = (call_mid_atm if call_mid_atm is not None else 0) + (put_mid_atm if put_mid_atm is not None else 0)
-                # Expected Move = ATM Straddle (most common market formula)
-                expected_move = straddle
-                if expected_move > 0:
-                    upper = current_price + expected_move
-                    lower = current_price - expected_move
+                expected_move_snapshot = calculate_expected_move_snapshot(calls, puts, current_price)
+                if expected_move_snapshot:
+                    upper = expected_move_snapshot['upper']
+                    lower = expected_move_snapshot['lower']
                     em_color = '#036bfc'
                     # Plot dashed lines for expected move in #036bfc
                     fig.add_hline(y=upper, line_dash='dash', line_color=em_color, line_width=2)
@@ -4042,7 +4085,7 @@ def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None
             crossings.sort(key=lambda item: (item[0], item[1]))
             out['gamma_flip'] = {'price': float(crossings[0][1])}
 
-    em = calculate_expected_move_snapshot(calls, puts, S)
+    em = calculate_expected_move_snapshot(c, p, S, selected_expiries=selected_expiries)
     if em:
         out['em_upper'] = {'price': float(em['upper']), 'move': float(em['move'])}
         out['em_lower'] = {'price': float(em['lower']), 'move': float(em['move'])}
@@ -4155,14 +4198,14 @@ _SESSION_BASELINE = {}
 _SESSION_LEVEL_BASELINE = {}
 _SESSION_IV_BASELINE = {}
 
-def _compute_session_deltas(ticker, net_gex, net_dex):
+def _compute_session_deltas(ticker, net_gex, net_dex, scope_id=None):
     if ticker is None or net_gex is None:
         return None
     try:
         today = datetime.now(pytz.timezone('US/Eastern')).date()
     except Exception:
         return None
-    key = (ticker, today)
+    key = (ticker, today, scope_id or 'default')
     if key not in _SESSION_BASELINE:
         _SESSION_BASELINE[key] = {'net_gex': net_gex, 'net_dex': net_dex}
     base = _SESSION_BASELINE[key]
@@ -4172,7 +4215,7 @@ def _compute_session_deltas(ticker, net_gex, net_dex):
     }
 
 
-def _compute_level_session_deltas(ticker, levels):
+def _compute_level_session_deltas(ticker, levels, scope_id=None):
     if ticker is None or not isinstance(levels, dict):
         return None
     try:
@@ -4180,7 +4223,7 @@ def _compute_level_session_deltas(ticker, levels):
     except Exception:
         return None
     keys = ('call_wall', 'put_wall', 'gamma_flip', 'em_upper', 'em_lower')
-    key = (ticker, today)
+    key = (ticker, today, scope_id or 'default')
     if key not in _SESSION_LEVEL_BASELINE:
         _SESSION_LEVEL_BASELINE[key] = {name: levels.get(name) for name in keys}
     base = _SESSION_LEVEL_BASELINE[key]
@@ -4328,9 +4371,9 @@ def compute_iv_context(calls, puts, S, ticker=None):
 # Phase 3 Stage 3 — Live flow alerts engine
 # Module-level state; intentionally module-scoped so it survives across ticks.
 _ALERT_COOLDOWNS = {}   # (ticker, alert_id) -> float unix ts of last fire
-_IV_BUFFER = collections.defaultdict(lambda: collections.deque(maxlen=30))  # (ticker, strike) -> deque[float]
+_IV_BUFFER = collections.defaultdict(lambda: collections.deque(maxlen=30))  # (ticker, side, expiry, strike) -> deque[float]
 _LAST_WALLS = {}        # ticker -> {'call_wall': float|None, 'put_wall': float|None}
-_VOL_SPIKE_CACHE = {}   # ticker -> {'ts': float, 'data': {strike: {'avg20', 'curr'}}}
+_VOL_SPIKE_CACHE = {}   # (ticker, date, lo, hi) -> {'ts': float, 'data': {strike: {'avg20', 'curr'}}}
 
 
 def _alert_cooldown_ok(ticker, alert_id, seconds):
@@ -4346,13 +4389,14 @@ def _alert_cooldown_ok(ticker, alert_id, seconds):
 def _fetch_vol_spike_data(ticker, S, strike_range):
     """Batch-load last-20-min per-strike volume from interval_data, cached 30 s."""
     now_ts = time.time()
-    cached = _VOL_SPIKE_CACHE.get(ticker)
-    if cached and now_ts - cached['ts'] < 30:
-        return cached['data']
     cutoff_ts = int(now_ts) - 20 * 60
     today = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
     lo = S * (1 - strike_range)
     hi = S * (1 + strike_range)
+    cache_key = (ticker, today, round(lo, 4), round(hi, 4))
+    cached = _VOL_SPIKE_CACHE.get(cache_key)
+    if cached and now_ts - cached['ts'] < 30:
+        return cached['data']
     try:
         with closing(sqlite3.connect('options_data.db')) as conn:
             with closing(conn.cursor()) as cursor:
@@ -4371,11 +4415,14 @@ def _fetch_vol_spike_data(ticker, S, strike_range):
         by_strike.setdefault(float(s_raw), []).append(float(nvol) if nvol is not None else 0.0)
     result = {}
     for strike, vols in by_strike.items():
-        avols = [abs(v) for v in vols]
-        curr = avols[-1] if avols else 0.0
-        avg20 = (sum(avols[:-1]) / len(avols[:-1])) if len(avols) > 1 else 0.0
+        if len(vols) < 2:
+            continue
+        interval_deltas = [float(curr - prev) for prev, curr in zip(vols[:-1], vols[1:])]
+        abs_deltas = [abs(delta) for delta in interval_deltas]
+        curr = abs_deltas[-1]
+        avg20 = (sum(abs_deltas[:-1]) / len(abs_deltas[:-1])) if len(abs_deltas) > 1 else 0.0
         result[strike] = {'avg20': avg20, 'curr': curr}
-    _VOL_SPIKE_CACHE[ticker] = {'ts': now_ts, 'data': result}
+    _VOL_SPIKE_CACHE[cache_key] = {'ts': now_ts, 'data': result}
     return result
 
 
@@ -4486,20 +4533,18 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
     try:
         lo = S * (1 - strike_range)
         hi = S * (1 + strike_range)
-        seen_strikes = set()
-        for df in (calls, puts):
+        for option_type, df in (('call', calls), ('put', puts)):
             if df is None or getattr(df, 'empty', True):
                 continue
             window = df[(df['strike'] >= lo) & (df['strike'] <= hi)]
             for _, row in window.iterrows():
                 strike = float(row['strike'])
-                if strike in seen_strikes:
-                    continue
-                seen_strikes.add(strike)
+                expiry_iso = _normalize_expiry_iso(row.get('expiration', row.get('expiration_date')))
                 curr_iv = float(row.get('impliedVolatility', 0) or 0)
                 if curr_iv <= 0:
                     continue
-                buf = _IV_BUFFER[(ticker, strike)]
+                buffer_key = (ticker, option_type, expiry_iso, round(strike, 4))
+                buf = _IV_BUFFER[buffer_key]
                 buf.append(curr_iv)
                 if len(buf) < 5:
                     continue
@@ -4509,12 +4554,13 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                     continue
                 z = (curr_iv - mu) / std
                 if z > 2.0:
-                    aid = f'iv_surge:{strike:.0f}'
+                    aid = f'iv_surge:{option_type}:{expiry_iso}:{strike:.0f}'
                     if _passes_key_level_gate('iv_surge', strike) and _alert_cooldown_ok(ticker, aid, 600):
+                        detail = f'Expiry {expiry_iso}' if expiry_iso else None
                         alerts.append({
                             'id': aid, 'level': 'flow',
-                            'text': f'IV surge @ {strike:.0f} (+{z:.1f}σ)',
-                            'strike': strike, 'ts': now_iso, 'detail': None,
+                            'text': f'{option_type.capitalize()} IV surge @ {strike:.0f} (+{z:.1f}σ)',
+                            'strike': strike, 'ts': now_iso, 'detail': detail,
                         })
     except Exception as e:
         print(f'[compute_flow_alerts] iv_surge: {e}')
@@ -4524,7 +4570,8 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
 
 def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None,
                          delta_adjusted: bool = False, calculate_in_notional: bool = True,
-                         ticker: str = None, gate_strike_alerts: bool = True):
+                         ticker: str = None, gate_strike_alerts: bool = True,
+                         scope_id: str = None):
     """High-level trader KPIs + a short alerts list, for the header strip.
 
     Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
@@ -4626,14 +4673,10 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
 
     # Phase 3 Stage 2 — chain activity, gamma profile, session deltas
     try:
-        def _chain_sum(df, col):
-            if df is None or getattr(df, 'empty', True) or col not in df.columns:
-                return 0.0
-            return float(df[col].sum())
-        call_oi  = _chain_sum(calls, 'openInterest')
-        put_oi   = _chain_sum(puts,  'openInterest')
-        call_vol = _chain_sum(calls, 'volume')
-        put_vol  = _chain_sum(puts,  'volume')
+        call_oi  = _window_sum(calls, col='openInterest')
+        put_oi   = _window_sum(puts,  col='openInterest')
+        call_vol = _window_sum(calls, col='volume')
+        put_vol  = _window_sum(puts,  col='volume')
         total_vol = call_vol + put_vol
         sentiment = 0.0
         if total_vol > 0:
@@ -4661,13 +4704,15 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     }
 
     try:
-        out['session_deltas'] = _compute_session_deltas(ticker, out['net_gex'], out['net_dex'])
+        out['session_deltas'] = _compute_session_deltas(
+            ticker, out['net_gex'], out['net_dex'], scope_id=scope_id
+        )
     except Exception as e:
         print(f"[compute_trader_stats] session_deltas failed: {e}")
         out['session_deltas'] = None
 
     try:
-        out['level_deltas'] = _compute_level_session_deltas(ticker, out)
+        out['level_deltas'] = _compute_level_session_deltas(ticker, out, scope_id=scope_id)
     except Exception as e:
         print(f"[compute_trader_stats] level_deltas failed: {e}")
         out['level_deltas'] = None
@@ -4811,7 +4856,8 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
                               exposure_levels_count=3, call_color=CALL_COLOR, put_color=PUT_COLOR,
                               strike_range=0.1, use_heikin_ashi=False,
                               highlight_max_level=False, max_level_color='#800080',
-                              coloring_mode='Linear Intensity', ticker=None):
+                              coloring_mode='Linear Intensity', ticker=None,
+                              selected_expiries=None):
     """Return raw OHLCV + overlay data as JSON for TradingView Lightweight Charts rendering."""
     import json as _json
 
@@ -4919,7 +4965,9 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
 
         for i, etype in enumerate(exposure_levels_types):
             if etype.lower() == 'expected move':
-                expected_move_snapshot = calculate_expected_move_snapshot(calls, puts, current_price)
+                expected_move_snapshot = calculate_expected_move_snapshot(
+                    calls, puts, current_price, selected_expiries=selected_expiries
+                )
                 if expected_move_snapshot:
                     expected_moves.append({
                         'upper': round(expected_move_snapshot['upper'], 2),
@@ -16629,31 +16677,15 @@ def update():
 
             # --- Always Calculate Expected Move Range (same as chart logic) ---
             expected_move_range = None
-            strikes_sorted = sorted(calls['strike'].unique()) if not calls.empty else []
-            if strikes_sorted:
-                atm_strike = min(strikes_sorted, key=lambda x: abs(x - S))
-                atm_idx = strikes_sorted.index(atm_strike)
-                def get_mid(df, strike):
-                    row = df.loc[df['strike'] == strike]
-                    if row is not None and not row.empty:
-                        bid = row['bid'].values[0]
-                        ask = row['ask'].values[0]
-                        if bid > 0 and ask > 0:
-                            return (bid + ask) / 2
-                        elif bid > 0:
-                            return bid
-                        elif ask > 0:
-                            return ask
-                    return None
-                call_mid_atm = get_mid(calls, atm_strike)
-                put_mid_atm = get_mid(puts, atm_strike)
-                straddle = (call_mid_atm if call_mid_atm is not None else 0) + (put_mid_atm if put_mid_atm is not None else 0)
-                # Expected Move = ATM Straddle (most common market formula)
-                expected_move = straddle
-                if expected_move > 0:
-                    upper = S + expected_move
-                    lower = S - expected_move
-                    expected_move_range = {'lower': round(lower, 2), 'upper': round(upper, 2), 'move': round(expected_move, 2)}
+            expected_move_snapshot = calculate_expected_move_snapshot(
+                calls, puts, S, selected_expiries=expiry_dates
+            )
+            if expected_move_snapshot:
+                expected_move_range = {
+                    'lower': round(expected_move_snapshot['lower'], 2),
+                    'upper': round(expected_move_snapshot['upper'], 2),
+                    'move': round(expected_move_snapshot['move'], 2),
+                }
 
             if quote_response.ok:
                 quote_data = quote_response.json()
@@ -16725,10 +16757,17 @@ def update_price():
     """
     data = request.get_json()
     ticker = data.get('ticker')
+    expiry = data.get('expiry')
     ticker = format_ticker(ticker)
     if not ticker:
         return jsonify({'error': 'Missing ticker'}), 400
     try:
+        if isinstance(expiry, list):
+            selected_expiries = expiry
+        elif expiry:
+            selected_expiries = [expiry]
+        else:
+            selected_expiries = []
         timeframe = int(data.get('timeframe', 1))
         call_color = data.get('call_color', '#00ff00')
         put_color = data.get('put_color', '#ff0000')
@@ -16778,6 +16817,7 @@ def update_price():
             max_level_color=max_level_color,
             coloring_mode=coloring_mode,
             ticker=ticker,
+            selected_expiries=selected_expiries,
         )
         # Inject timeframe so the popout candle-close timer knows the selected interval
         try:
@@ -16810,7 +16850,11 @@ def update_price():
                 print(f"[gex_panel] build failed: {e}")
                 gex_panel = None
             try:
-                key_levels = compute_key_levels(calls, puts, S_for_panel, strike_range=strike_range)
+                key_levels = compute_key_levels(
+                    calls, puts, S_for_panel,
+                    selected_expiries=selected_expiries,
+                    strike_range=strike_range,
+                )
             except Exception as e:
                 print(f"[key_levels] build failed: {e}")
                 key_levels = None
@@ -16823,12 +16867,19 @@ def update_price():
         trader_stats = None
         if calls is not None and puts is not None and S_for_panel is not None:
             try:
+                full_scope_id = _build_stats_scope_id(
+                    strike_range,
+                    selected_expiries=selected_expiries,
+                    scope_label='all',
+                )
                 trader_stats = compute_trader_stats(
                     calls, puts, S_for_panel, strike_range=strike_range,
+                    selected_expiries=selected_expiries,
                     delta_adjusted=delta_adjusted,
                     calculate_in_notional=calculate_in_notional,
                     ticker=ticker,
                     gate_strike_alerts=gate_alerts,
+                    scope_id=full_scope_id,
                 )
             except Exception as e:
                 print(f"[trader_stats] build failed: {e}")
@@ -16843,14 +16894,25 @@ def update_price():
                 if nearest_exp:
                     c0 = calls[calls['expiration_date'] == nearest_exp] if 'expiration_date' in calls.columns else calls
                     p0 = puts[puts['expiration_date']   == nearest_exp] if 'expiration_date' in puts.columns  else puts
-                    key_levels_0dte = compute_key_levels(c0, p0, S_for_panel, strike_range=strike_range)
+                    nearest_scope_id = _build_stats_scope_id(
+                        strike_range,
+                        selected_expiries=[nearest_exp],
+                        scope_label=f'expiry:{nearest_exp}',
+                    )
+                    key_levels_0dte = compute_key_levels(
+                        c0, p0, S_for_panel,
+                        selected_expiries=[nearest_exp],
+                        strike_range=strike_range,
+                    )
                     stats_0dte = compute_trader_stats(
                         c0, p0, S_for_panel,
                         strike_range=strike_range,
+                        selected_expiries=[nearest_exp],
                         delta_adjusted=delta_adjusted,
                         calculate_in_notional=calculate_in_notional,
                         ticker=ticker,
                         gate_strike_alerts=gate_alerts,
+                        scope_id=nearest_scope_id,
                     )
             except Exception as e:
                 print(f"[0dte_bundle] build failed: {e}")
