@@ -9033,6 +9033,13 @@ def index():
             padding: 10px 0;
             border-bottom: 1px solid var(--bg-2);
         }
+        .indicator-modal-row.is-target {
+            margin: 0 -10px;
+            padding: 10px;
+            border-color: var(--accent);
+            border-radius: 10px;
+            background: var(--bg-2);
+        }
         .indicator-modal-row:last-child {
             border-bottom: none;
         }
@@ -9932,6 +9939,8 @@ def index():
         let tvDrawingIdCounter = 0;
         let tvLastCandles = [];         // current-day display candles (for streaming OHLCV updates)
         let tvIndicatorCandles = [];    // multi-day candles for indicator warmup (SMA200, EMA, etc.)
+        let tvIndicatorDataCache = {};  // rendered indicator datapoints for click-hit testing
+        let tvIndicatorEditorTargetKey = '';
         let tvCurrentDayStartTime = 0;  // unix seconds of current day's first candle (for daily VWAP)
         let tvLastPriceData = null;     // cache of full priceData for redraw
         // All overlay level prices (exposure, EM, drawn H-lines) — used by autoscaleInfoProvider
@@ -9997,6 +10006,7 @@ def index():
         const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
         const STRIKE_RAIL_TAB_KEY = 'gex.strikeRailTab';
         const GEX_COL_WIDTH_KEY = 'gex.sidePanelWidthPx';
+        const TIMEFRAME_STORAGE_KEY = 'gex.selectedTimeframe';
         const TV_DRAWING_STORE_KEY = 'gex.tvDrawingStore.v2';
         const STRIKE_RAIL_CHART_IDS = ['gamma', 'delta', 'vanna', 'charm', 'open_interest', 'options_volume', 'premium'];
         const STRIKE_RAIL_LABELS = {
@@ -10110,6 +10120,29 @@ def index():
             if (el) el.classList.toggle('compact', !dealerImpactVerbose);
             if (!persist) return;
             try { localStorage.setItem(DEALER_DETAIL_KEY, dealerImpactVerbose ? '1' : '0'); } catch (e) {}
+        }
+
+        function getPersistedTimeframe() {
+            try {
+                const value = localStorage.getItem(TIMEFRAME_STORAGE_KEY);
+                return value ? String(value) : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function persistSelectedTimeframe(value) {
+            try {
+                localStorage.setItem(TIMEFRAME_STORAGE_KEY, String(value || '1'));
+            } catch (e) {}
+        }
+
+        function applyPersistedTimeframePreference() {
+            const select = document.getElementById('timeframe');
+            const persisted = getPersistedTimeframe();
+            if (!select || !persisted) return;
+            const hasOption = Array.from(select.options || []).some(option => option.value === persisted);
+            if (hasOption) select.value = persisted;
         }
 
         // List of Plotly chart div IDs that carry a current-price line shape
@@ -11168,6 +11201,7 @@ def index():
 
         // Coloring mode listeners
         document.getElementById('timeframe').addEventListener('change', function() {
+            persistSelectedTimeframe(this.value);
             tvForceSessionFocus = true;
             updateData();
             startCandleCloseTimer();
@@ -11527,6 +11561,89 @@ def index():
             return defaults;
         }
 
+        function setTVIndicatorDataCache(key, lineSets) {
+            if (!key) return;
+            const normalized = Array.isArray(lineSets)
+                ? lineSets
+                    .map(points => Array.isArray(points)
+                        ? points.filter(point => point && Number.isFinite(point.time) && Number.isFinite(point.value))
+                        : [])
+                    .filter(points => points.length)
+                : [];
+            if (normalized.length) tvIndicatorDataCache[key] = normalized;
+            else delete tvIndicatorDataCache[key];
+        }
+
+        function getTVIndicatorNearestValue(points, targetTime) {
+            if (!Array.isArray(points) || !points.length || !Number.isFinite(targetTime)) return null;
+            let lo = 0;
+            let hi = points.length - 1;
+            while (lo <= hi) {
+                const mid = Math.floor((lo + hi) / 2);
+                const midTime = Number(points[mid] && points[mid].time);
+                if (!Number.isFinite(midTime)) return null;
+                if (midTime === targetTime) return Number(points[mid].value);
+                if (midTime < targetTime) lo = mid + 1;
+                else hi = mid - 1;
+            }
+            const candidates = [];
+            if (lo < points.length) candidates.push(points[lo]);
+            if (lo > 0) candidates.push(points[lo - 1]);
+            if (!candidates.length) return null;
+            const nearest = candidates.reduce((best, point) => {
+                if (!best) return point;
+                return Math.abs(Number(point.time) - targetTime) < Math.abs(Number(best.time) - targetTime) ? point : best;
+            }, null);
+            if (!nearest) return null;
+            const tolerance = Math.max(getTVTimeframeSeconds() * 2, 60);
+            return Math.abs(Number(nearest.time) - targetTime) <= tolerance ? Number(nearest.value) : null;
+        }
+
+        function focusTVIndicatorEditorKey(key) {
+            const grid = document.getElementById('indicator-settings-grid');
+            if (!grid || !key) return;
+            grid.querySelectorAll('[data-indicator-row]').forEach(row => {
+                row.classList.toggle('is-target', row.dataset.indicatorRow === key);
+            });
+            const row = grid.querySelector(`[data-indicator-row="${key}"]`);
+            if (!row) return;
+            row.scrollIntoView({ block: 'nearest' });
+            const focusTarget = row.querySelector(`[data-indicator-color="${key}"]`)
+                || row.querySelector(`[data-indicator-width="${key}"]`)
+                || row.querySelector(`[data-indicator-style="${key}"]`)
+                || row.querySelector(`[data-indicator-visible="${key}"]`);
+            if (focusTarget && typeof focusTarget.focus === 'function') {
+                try { focusTarget.focus({ preventScroll: true }); } catch (e) { focusTarget.focus(); }
+            }
+        }
+
+        function findTVIndicatorHitKey(param) {
+            if (!tvPriceChart || !tvCandleSeries || !param || !param.point) return '';
+            const chartPoint = tvResolveChartPoint(param);
+            if (!chartPoint || !Number.isFinite(chartPoint.price)) return '';
+            const targetTime = Number(chartPoint.time);
+            if (!Number.isFinite(targetTime)) return '';
+            let bestKey = '';
+            let bestDistance = Number.POSITIVE_INFINITY;
+            EDITABLE_TV_INDICATOR_KEYS.forEach(key => {
+                if (!tvActiveInds.has(key)) return;
+                const lineSets = tvIndicatorDataCache[key];
+                if (!Array.isArray(lineSets) || !lineSets.length) return;
+                lineSets.forEach(points => {
+                    const value = getTVIndicatorNearestValue(points, targetTime);
+                    if (!Number.isFinite(value)) return;
+                    const y = tvCandleSeries.priceToCoordinate(value);
+                    if (!Number.isFinite(y)) return;
+                    const distance = Math.abs(y - Number(param.point.y));
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        bestKey = key;
+                    }
+                });
+            });
+            return bestDistance <= 10 ? bestKey : '';
+        }
+
         function getTVIndicatorPref(key) {
             if (!tvIndicatorPrefs || typeof tvIndicatorPrefs !== 'object') {
                 tvIndicatorPrefs = getDefaultTVIndicatorPrefs();
@@ -11616,6 +11733,7 @@ def index():
                     if (Array.isArray(series)) series.forEach(s => { try { tvPriceChart.removeSeries(s); } catch(e){} });
                     else                       { try { tvPriceChart.removeSeries(series); } catch(e){} }
                     delete tvIndicatorSeries[key];
+                    delete tvIndicatorDataCache[key];
                 }
             });
 
@@ -11643,19 +11761,29 @@ def index():
             }
 
             if (activeInds.has('sma20')) {
-                upsertLineSeries('sma20', 'SMA20').setData(todayOnly(calcSMA(closes, 20).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                const data = todayOnly(calcSMA(closes, 20).map((v,i) => v!==null ? {time:times[i], value:v} : null));
+                upsertLineSeries('sma20', 'SMA20').setData(data);
+                setTVIndicatorDataCache('sma20', [data]);
             }
             if (activeInds.has('sma50')) {
-                upsertLineSeries('sma50', 'SMA50').setData(todayOnly(calcSMA(closes, 50).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                const data = todayOnly(calcSMA(closes, 50).map((v,i) => v!==null ? {time:times[i], value:v} : null));
+                upsertLineSeries('sma50', 'SMA50').setData(data);
+                setTVIndicatorDataCache('sma50', [data]);
             }
             if (activeInds.has('sma200')) {
-                upsertLineSeries('sma200', 'SMA200').setData(todayOnly(calcSMA(closes, 200).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                const data = todayOnly(calcSMA(closes, 200).map((v,i) => v!==null ? {time:times[i], value:v} : null));
+                upsertLineSeries('sma200', 'SMA200').setData(data);
+                setTVIndicatorDataCache('sma200', [data]);
             }
             if (activeInds.has('ema9')) {
-                upsertLineSeries('ema9', 'EMA9').setData(todayOnly(calcEMA(closes, 9).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                const data = todayOnly(calcEMA(closes, 9).map((v,i) => v!==null ? {time:times[i], value:v} : null));
+                upsertLineSeries('ema9', 'EMA9').setData(data);
+                setTVIndicatorDataCache('ema9', [data]);
             }
             if (activeInds.has('ema21')) {
-                upsertLineSeries('ema21', 'EMA21').setData(todayOnly(calcEMA(closes, 21).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                const data = todayOnly(calcEMA(closes, 21).map((v,i) => v!==null ? {time:times[i], value:v} : null));
+                upsertLineSeries('ema21', 'EMA21').setData(data);
+                setTVIndicatorDataCache('ema21', [data]);
             }
             if (activeInds.has('vwap')) {
                 // VWAP resets daily — always compute from today's candles only
@@ -11663,7 +11791,9 @@ def index():
                 const vwapVals = calcVWAP(todayCandles.map(c => ({
                     time: c.time, high: c.high, low: c.low, close: c.close, volume: c.volume || 0
                 })));
-                upsertLineSeries('vwap', 'VWAP').setData(vwapVals.map((v, i) => ({time: todayCandles[i].time, value: v})));
+                const data = vwapVals.map((v, i) => ({time: todayCandles[i].time, value: v}));
+                upsertLineSeries('vwap', 'VWAP').setData(data);
+                setTVIndicatorDataCache('vwap', [data]);
             }
             if (activeInds.has('bb')) {
                 const pref = getTVIndicatorPref('bb');
@@ -11683,9 +11813,13 @@ def index():
                     lowerS.applyOptions(tvIndicatorSeriesOptions(upperLowerColor, pref.lineWidth, pref.lineStyle, 'BB Lower'));
                 }
                 const [upperS, midS, lowerS] = tvIndicatorSeries['bb'];
-                upperS.setData(todayOnly(bb.map((v,i) => v.upper!==null ? {time:times[i],value:v.upper} : null)));
-                midS.setData(  todayOnly(bb.map((v,i) => v.mid  !==null ? {time:times[i],value:v.mid}   : null)));
-                lowerS.setData(todayOnly(bb.map((v,i) => v.lower!==null ? {time:times[i],value:v.lower}  : null)));
+                const upperData = todayOnly(bb.map((v,i) => v.upper!==null ? {time:times[i],value:v.upper} : null));
+                const midData = todayOnly(bb.map((v,i) => v.mid!==null ? {time:times[i],value:v.mid} : null));
+                const lowerData = todayOnly(bb.map((v,i) => v.lower!==null ? {time:times[i],value:v.lower} : null));
+                upperS.setData(upperData);
+                midS.setData(midData);
+                lowerS.setData(lowerData);
+                setTVIndicatorDataCache('bb', [upperData, midData, lowerData]);
             }
             if (activeInds.has('atr')) {
                 const atrVals = calcATR(candles);
@@ -11758,7 +11892,7 @@ def index():
                 const def = TV_INDICATOR_DEFS.find(item => item.key === key);
                 const pref = getTVIndicatorPref(key);
                 return (
-                    `<div class="indicator-modal-row" data-indicator-row="${key}">` +
+                    `<div class="indicator-modal-row${tvIndicatorEditorTargetKey === key ? ' is-target' : ''}" data-indicator-row="${key}">` +
                         `<div class="indicator-modal-name">` +
                             `<span class="indicator-modal-swatch" style="background:${pref.color}"></span>` +
                             `<label for="indicator-visible-${key}">${def ? def.label : key}</label>` +
@@ -11796,15 +11930,25 @@ def index():
             grid.querySelectorAll('[data-indicator-style]').forEach(select => {
                 select.addEventListener('change', () => updateTVIndicatorPref(select.dataset.indicatorStyle, { lineStyle: select.value }));
             });
+            if (tvIndicatorEditorTargetKey) {
+                requestAnimationFrame(() => focusTVIndicatorEditorKey(tvIndicatorEditorTargetKey));
+            }
         }
 
-        function openTVIndicatorEditor() {
+        function openTVIndicatorEditor(targetKey = '') {
             const modal = document.getElementById('indicator-settings-modal');
             if (!modal) return;
+            tvIndicatorEditorTargetKey = EDITABLE_TV_INDICATOR_KEYS.includes(targetKey) ? targetKey : '';
             renderTVIndicatorEditor();
-            if (modal.open) return;
+            if (modal.open) {
+                if (tvIndicatorEditorTargetKey) focusTVIndicatorEditorKey(tvIndicatorEditorTargetKey);
+                return;
+            }
             if (modal.showModal) modal.showModal();
             else modal.setAttribute('open', '');
+            if (tvIndicatorEditorTargetKey) {
+                requestAnimationFrame(() => focusTVIndicatorEditorKey(tvIndicatorEditorTargetKey));
+            }
         }
 
         // ── Sub-pane chart helper functions ──────────────────────────────────
@@ -11936,13 +12080,34 @@ def index():
 
         // ── Drawing tools ─────────────────────────────────────────────────────
         function getCurrentTVDrawingScopeKey() {
+            const parts = getCurrentTVDrawingScopeParts();
+            return parts.ticker ? `${parts.ticker}::${parts.heikin}` : '';
+        }
+
+        function getCurrentTVDrawingScopeParts() {
             const tickerEl = document.getElementById('ticker');
             const timeframeEl = document.getElementById('timeframe');
             const haEl = document.getElementById('use_heikin_ashi');
             const ticker = tickerEl ? (tickerEl.value || '').trim().toUpperCase() : '';
             const timeframe = timeframeEl ? String(timeframeEl.value || '1') : '1';
             const heikin = haEl && haEl.checked ? 'ha' : 'candles';
-            return ticker ? `${ticker}::${timeframe}::${heikin}` : '';
+            return { ticker, timeframe, heikin };
+        }
+
+        function getLegacyTVDrawingScopeKey() {
+            const parts = getCurrentTVDrawingScopeParts();
+            return parts.ticker ? `${parts.ticker}::${parts.timeframe}::${parts.heikin}` : '';
+        }
+
+        function findLegacyTVDrawingScopeKey(store, parts) {
+            if (!store || !parts || !parts.ticker) return '';
+            const prefix = `${parts.ticker}::`;
+            const suffix = `::${parts.heikin}`;
+            return Object.keys(store).find(key =>
+                key.startsWith(prefix)
+                && key.endsWith(suffix)
+                && Array.isArray(store[key])
+            ) || '';
         }
 
         function loadTVDrawingStore() {
@@ -12011,6 +12176,17 @@ def index():
                 normalized.text = String(normalized.text || 'Label').slice(0, 40);
             } else {
                 normalized.label = String(normalized.label || '').slice(0, 40);
+            }
+            if (normalized.id !== '__preview__') {
+                if (Number.isFinite(Number(normalized.time))) {
+                    normalized.logical = null;
+                }
+                if (Number.isFinite(Number(normalized.t1))) {
+                    normalized.l1 = null;
+                }
+                if (Number.isFinite(Number(normalized.t2))) {
+                    normalized.l2 = null;
+                }
             }
             return normalized;
         }
@@ -12157,8 +12333,10 @@ def index():
 
         function tvResolveDrawingAnchorX(timeValue, logicalValue, previewX) {
             if (Number.isFinite(previewX)) return previewX;
-            const timeX = Number.isFinite(timeValue) ? tvTimeToCoordinateExtended(timeValue) : null;
-            if (Number.isFinite(timeX)) return timeX;
+            if (Number.isFinite(timeValue)) {
+                const timeX = tvTimeToCoordinateExtended(timeValue);
+                return Number.isFinite(timeX) ? timeX : null;
+            }
             return Number.isFinite(logicalValue) ? tvLogicalToCoordinate(logicalValue) : null;
         }
 
@@ -12553,7 +12731,16 @@ def index():
         function tvLoadDrawingsForScope(scopeKey) {
             tvDrawingScopeKey = scopeKey || '';
             const store = loadTVDrawingStore();
-            const rawDefs = Array.isArray(store[tvDrawingScopeKey]) ? store[tvDrawingScopeKey] : [];
+            const scopeParts = getCurrentTVDrawingScopeParts();
+            const legacyScopeKey = getLegacyTVDrawingScopeKey();
+            const fallbackLegacyKey = legacyScopeKey && !Array.isArray(store[legacyScopeKey])
+                ? findLegacyTVDrawingScopeKey(store, scopeParts)
+                : '';
+            const rawDefs = Array.isArray(store[tvDrawingScopeKey])
+                ? store[tvDrawingScopeKey]
+                : (Array.isArray(store[legacyScopeKey])
+                    ? store[legacyScopeKey]
+                    : (Array.isArray(store[fallbackLegacyKey]) ? store[fallbackLegacyKey] : []));
             tvDrawingDefs = rawDefs.map(normalizeTVDrawingDef).filter(Boolean);
             if (!tvFindDrawingById()) {
                 tvSelectedDrawingId = null;
@@ -13010,6 +13197,16 @@ def index():
         }
 
         function tvHandleChartClick(param) {
+            if (!tvDrawMode && param && param.point) {
+                const indicatorKey = findTVIndicatorHitKey(param);
+                if (indicatorKey) {
+                    tvSelectedDrawingId = null;
+                    updateTVDrawingEditor();
+                    scheduleTVDrawingOverlayDraw();
+                    openTVIndicatorEditor(indicatorKey);
+                    return;
+                }
+            }
             if (!tvDrawMode || !param || !param.point) {
                 if (!tvDrawMode && tvSelectedDrawingId) {
                     tvSelectedDrawingId = null;
@@ -13815,6 +14012,22 @@ def index():
             );
         }
 
+        function ensureFlowEventLane(grid = document.getElementById('chart-grid')) {
+            if (!grid) return null;
+            let lanes = Array.from(grid.querySelectorAll('.flow-event-lane'));
+            if (!lanes.length) {
+                grid.insertAdjacentHTML('beforeend', buildFlowEventLaneHtml());
+                lanes = Array.from(grid.querySelectorAll('.flow-event-lane'));
+            }
+            const lane = lanes[0] || null;
+            lanes.slice(1).forEach(extra => extra.remove());
+            const anchor = grid.querySelector('#right-rail-panels') || grid.querySelector('.price-chart-container');
+            if (lane && anchor && lane.previousElementSibling !== anchor) {
+                anchor.insertAdjacentElement('afterend', lane);
+            }
+            return lane;
+        }
+
         // Single source of truth for the overview-panel markup. Both the initial
         // server-rendered HTML and ensurePriceChartDom's rebuild path must
         // produce identical DOM, or tick rebuilds (ticker switch) drop the
@@ -14021,14 +14234,6 @@ def index():
         function ensurePriceChartDom() {
             const grid = document.getElementById('chart-grid');
             if (!grid) return null;
-            const ensureFlowEventLane = () => {
-                let lane = grid.querySelector('.flow-event-lane');
-                if (!lane) {
-                    grid.insertAdjacentHTML('beforeend', buildFlowEventLaneHtml());
-                    lane = grid.querySelector('.flow-event-lane');
-                }
-                return lane;
-            };
             let priceContainer = grid.querySelector('.price-chart-container');
             if (priceContainer) {
                 ensureStrikeRailResizeHandle(grid);
@@ -15648,6 +15853,7 @@ def index():
                     tvCandleSeries = null;
                     tvVolumeSeries = null;
                     tvIndicatorSeries = {};
+                    tvIndicatorDataCache = {};
                     tvHistoricalPoints = [];
                     tvHistoricalExpectedMoveSeries = [];
                     tvKeyLevelLines = [];
@@ -16435,6 +16641,7 @@ def index():
         });
 
         // Initial load - automatically load saved settings, or use defaults
+        applyPersistedTimeframePreference();
         loadSettings(false);
 
         // Auto-update every 1 second
@@ -16670,10 +16877,16 @@ def index():
                     }
                     // If auto-loading fails, fall back to default initialization
                     if (!showFeedback) {
+                        applyPersistedTimeframePreference();
                         loadExpirations();
                     }
                 } else {
                     applySettings(data);
+                    if (!showFeedback) {
+                        applyPersistedTimeframePreference();
+                    } else {
+                        persistSelectedTimeframe(document.getElementById('timeframe').value);
+                    }
                     if (showFeedback) {
                         const btn = document.getElementById('loadSettings');
                         btn.classList.add('success');
@@ -16693,6 +16906,7 @@ def index():
                 }
                 // If auto-loading fails, fall back to default initialization
                 if (!showFeedback) {
+                    applyPersistedTimeframePreference();
                     loadExpirations();
                 }
             });
@@ -16746,6 +16960,7 @@ def index():
 
         wireRightRailTabs();
         applyRightRailTab();
+        ensureFlowEventLane();
 
         function openDrawer() {
             document.getElementById('settings-drawer').classList.add('open');
@@ -16769,6 +16984,7 @@ def index():
         });
         document.getElementById('modalClose').addEventListener('click', () => settingsModal.close());
         document.getElementById('indicatorModalClose').addEventListener('click', () => {
+            tvIndicatorEditorTargetKey = '';
             if (indicatorSettingsModal.close) indicatorSettingsModal.close();
             else indicatorSettingsModal.removeAttribute('open');
         });
@@ -16777,6 +16993,7 @@ def index():
             if (e.key !== 'Escape') return;
             if (settingsModal.open) { settingsModal.close(); return; }
             if (indicatorSettingsModal.open) {
+                tvIndicatorEditorTargetKey = '';
                 if (indicatorSettingsModal.close) indicatorSettingsModal.close();
                 else indicatorSettingsModal.removeAttribute('open');
                 return;
