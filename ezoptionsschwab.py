@@ -10010,6 +10010,7 @@ def index():
         const GEX_COL_WIDTH_KEY = 'gex.sidePanelWidthPx';
         const TIMEFRAME_STORAGE_KEY = 'gex.selectedTimeframe';
         const TV_DRAWING_STORE_KEY = 'gex.tvDrawingStore.v2';
+        const TV_INDICATOR_STATE_KEY = 'gex.tvIndicatorState.v1';
         const STRIKE_RAIL_CHART_IDS = ['gamma', 'delta', 'vanna', 'charm', 'open_interest', 'options_volume', 'premium'];
         const STRIKE_RAIL_LABELS = {
             gex: 'GEX',
@@ -11647,6 +11648,44 @@ def index():
             return defaults;
         }
 
+        function normalizeTVIndicatorActiveKeys(keys) {
+            const validKeys = new Set(TV_INDICATOR_DEFS.map(def => def.key));
+            const list = Array.isArray(keys) ? keys : [];
+            return Array.from(new Set(list.filter(key => validKeys.has(key))));
+        }
+
+        function readPersistedTVIndicatorState() {
+            try {
+                const raw = localStorage.getItem(TV_INDICATOR_STATE_KEY);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                if (!parsed || typeof parsed !== 'object') return null;
+                return {
+                    active: normalizeTVIndicatorActiveKeys(parsed.active),
+                    prefs: normalizeTVIndicatorPrefMap(parsed.prefs),
+                };
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function persistTVIndicatorState() {
+            try {
+                localStorage.setItem(TV_INDICATOR_STATE_KEY, JSON.stringify({
+                    active: normalizeTVIndicatorActiveKeys(Array.from(tvActiveInds)),
+                    prefs: normalizeTVIndicatorPrefMap(tvIndicatorPrefs),
+                }));
+            } catch (e) {}
+        }
+
+        function hydrateTVIndicatorStateFromLocalStorage() {
+            const persisted = readPersistedTVIndicatorState();
+            if (!persisted) return false;
+            tvActiveInds = new Set(persisted.active);
+            tvIndicatorPrefs = persisted.prefs;
+            return true;
+        }
+
         function setTVIndicatorDataCache(key, lineSets) {
             if (!key) return;
             const normalized = Array.isArray(lineSets)
@@ -11790,6 +11829,7 @@ def index():
             if (!key) return;
             if (enabled) tvActiveInds.add(key);
             else tvActiveInds.delete(key);
+            persistTVIndicatorState();
             syncTVIndicatorToggleButtons();
             renderTVIndicatorEditor();
             reapplyTVIndicators();
@@ -11803,6 +11843,7 @@ def index():
                 ...tvIndicatorPrefs,
                 [key]: { ...current, ...(patch || {}) },
             })[key];
+            persistTVIndicatorState();
             reapplyTVIndicators();
         }
 
@@ -14099,15 +14140,25 @@ def index():
             );
         }
 
+        function pruneDuplicateFlowEventMarkup(grid = document.getElementById('chart-grid')) {
+            const root = grid || document;
+            const lanes = Array.from(root.querySelectorAll('.flow-event-lane'));
+            lanes.slice(1).forEach(extra => extra.remove());
+            ['flow-event-lane', 'right-rail-alerts', 'rail-flow-pulse'].forEach(id => {
+                const nodes = Array.from(document.querySelectorAll('#' + id));
+                nodes.slice(1).forEach(extra => extra.remove());
+            });
+            return lanes[0] || document.getElementById('flow-event-lane') || null;
+        }
+
         function ensureFlowEventLane(grid = document.getElementById('chart-grid')) {
             if (!grid) return null;
-            let lanes = Array.from(grid.querySelectorAll('.flow-event-lane'));
-            if (!lanes.length) {
+            let lane = pruneDuplicateFlowEventMarkup(grid);
+            if (!lane || !grid.contains(lane)) {
+                if (lane && lane.parentNode) lane.parentNode.removeChild(lane);
                 grid.insertAdjacentHTML('beforeend', buildFlowEventLaneHtml());
-                lanes = Array.from(grid.querySelectorAll('.flow-event-lane'));
+                lane = pruneDuplicateFlowEventMarkup(grid);
             }
-            const lane = lanes[0] || null;
-            lanes.slice(1).forEach(extra => extra.remove());
             const anchor = grid.querySelector('#right-rail-panels') || grid.querySelector('.price-chart-container');
             if (lane && anchor && lane.previousElementSibling !== anchor) {
                 anchor.insertAdjacentElement('afterend', lane);
@@ -16838,7 +16889,8 @@ def index():
             };
         }
 
-        function applySettings(settings) {
+        function applySettings(settings, options = {}) {
+            const preferLocalIndicatorState = !!options.preferLocalIndicatorState;
             const settingsSchemaVersion = Number(settings.settings_schema_version || 0);
             if (settings.ticker) document.getElementById('ticker').value = settings.ticker;
             if (settings.timeframe) document.getElementById('timeframe').value = settings.timeframe;
@@ -16910,12 +16962,25 @@ def index():
             if (settings.em_range_locked !== undefined) {
                 setEmRangeLocked(settings.em_range_locked);
             }
+            let nextTvActiveInds;
             if (Array.isArray(settings.tv_active_indicators)) {
-                tvActiveInds = new Set(settings.tv_active_indicators.filter(key => TV_INDICATOR_DEFS.some(def => def.key === key)));
+                nextTvActiveInds = new Set(normalizeTVIndicatorActiveKeys(settings.tv_active_indicators));
             } else if (settingsSchemaVersion < 4) {
-                tvActiveInds = new Set();
+                nextTvActiveInds = new Set();
+            } else {
+                nextTvActiveInds = new Set();
             }
-            tvIndicatorPrefs = normalizeTVIndicatorPrefMap(settings.tv_indicator_prefs);
+            let nextTvIndicatorPrefs = normalizeTVIndicatorPrefMap(settings.tv_indicator_prefs);
+            if (preferLocalIndicatorState) {
+                const persistedTvIndicatorState = readPersistedTVIndicatorState();
+                if (persistedTvIndicatorState) {
+                    nextTvActiveInds = new Set(persistedTvIndicatorState.active);
+                    nextTvIndicatorPrefs = persistedTvIndicatorState.prefs;
+                }
+            }
+            tvActiveInds = nextTvActiveInds;
+            tvIndicatorPrefs = nextTvIndicatorPrefs;
+            persistTVIndicatorState();
             syncTVIndicatorToggleButtons();
             renderTVIndicatorEditor();
             reapplyTVIndicators();
@@ -16968,7 +17033,7 @@ def index():
                         loadExpirations();
                     }
                 } else {
-                    applySettings(data);
+                    applySettings(data, { preferLocalIndicatorState: !showFeedback });
                     if (!showFeedback) {
                         applyPersistedTimeframePreference();
                     } else {
@@ -17043,6 +17108,7 @@ def index():
         }
         renderChartVisibilitySection();
         tvIndicatorPrefs = normalizeTVIndicatorPrefMap(tvIndicatorPrefs);
+        hydrateTVIndicatorStateFromLocalStorage();
         renderTVIndicatorEditor();
 
         wireRightRailTabs();
