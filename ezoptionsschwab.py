@@ -2243,7 +2243,8 @@ def create_options_volume_chart(calls, puts, S, strike_range=0.02, call_color=CA
     max_total_volume = max(total_volume + [1.0])
     max_net_volume = max([abs(val) for val in net_volume] + [1.0])
     label_threshold = max_side_volume * 0.16
-    poc_idx = total_volume.index(max_total_volume) if all_strikes_list and max_total_volume > 0 else None
+    raw_max_total_volume = max(total_volume) if total_volume else 0.0
+    poc_idx = total_volume.index(raw_max_total_volume) if all_strikes_list and raw_max_total_volume > 0 else None
     atm_idx = min(range(len(all_strikes_list)), key=lambda idx: abs(all_strikes_list[idx] - S)) if all_strikes_list else None
 
     def _call_put_customdata():
@@ -9845,7 +9846,7 @@ def index():
          */
         function updateAllPlotlyPriceLines(price) {
             const priceStr = price.toFixed(2);
-            const numericAnnotationRe = /^-?\d+(?:\.\d+)?$/;
+            const numericAnnotationRe = /^-?\\d+(?:\\.\\d+)?$/;
 
             const plotIds = PLOTLY_PRICE_LINE_CHARTS.concat(['gex-side-panel']);
 
