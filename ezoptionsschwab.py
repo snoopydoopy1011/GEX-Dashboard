@@ -8891,6 +8891,77 @@ def index():
             justify-content: flex-end;
             margin-top: 14px;
         }
+        .indicator-modal {
+            max-width: 640px;
+        }
+        .indicator-modal-head,
+        .indicator-modal-row {
+            display: grid;
+            grid-template-columns: minmax(132px, 1fr) 56px 84px 84px 108px;
+            gap: 10px;
+            align-items: center;
+        }
+        .indicator-modal-head {
+            margin-bottom: 8px;
+            padding: 0 0 8px;
+            border-bottom: 1px solid var(--border);
+            font-size: 10px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--fg-2);
+        }
+        .indicator-modal-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .indicator-modal-row {
+            padding: 10px 0;
+            border-bottom: 1px solid var(--bg-2);
+        }
+        .indicator-modal-row:last-child {
+            border-bottom: none;
+        }
+        .indicator-modal-name {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+        .indicator-modal-swatch {
+            width: 18px;
+            height: 3px;
+            border-radius: 999px;
+            flex: 0 0 auto;
+        }
+        .indicator-modal-name label {
+            color: var(--fg-0);
+            font-size: 13px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .indicator-modal-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .indicator-modal-toggle input {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent);
+        }
+        .indicator-modal-row input[type="color"] {
+            width: 40px;
+            height: 28px;
+            padding: 0;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+        }
+        .indicator-modal-row select {
+            min-width: 0;
+            width: 100%;
+        }
 
         /* Add new CSS for the responsive grid layout */
         .charts-grid {
@@ -9404,6 +9475,20 @@ def index():
                 <button id="modalClose" class="btn-ghost">Done</button>
             </div>
         </dialog>
+        <dialog class="settings-modal indicator-modal" id="indicator-settings-modal">
+            <h3>Indicator Styles</h3>
+            <div class="indicator-modal-head">
+                <span>Indicator</span>
+                <span>Show</span>
+                <span>Color</span>
+                <span>Width</span>
+                <span>Style</span>
+            </div>
+            <div class="indicator-modal-grid" id="indicator-settings-grid"></div>
+            <div class="modal-actions">
+                <button id="indicatorModalClose" class="btn-ghost">Done</button>
+            </div>
+        </dialog>
         
         <div class="chart-grid" id="chart-grid">
             <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
@@ -9487,23 +9572,10 @@ def index():
                         </div>
                         <div class="rail-profile-blurb" data-met="profile_blurb">—</div>
                     </div>
-                    <div class="rail-card" id="rail-card-iv">
-                        <div class="rail-card-header-row">
-                            <div class="rail-card-header">Skew / IV</div>
-                            <div class="rail-card-note" data-met="iv_expiry">Near expiry</div>
-                        </div>
-                        <div class="rail-iv-top">
-                            <div class="rail-iv-atm" data-met="iv_atm">—</div>
-                            <div class="rail-iv-headline" data-met="iv_headline">IV context unavailable</div>
-                        </div>
-                        <div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>
-                        <div class="rail-iv-grid">
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Call</span><span class="rail-iv-stat-value" data-met="iv_atm_call">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Put</span><span class="rail-iv-stat-value" data-met="iv_atm_put">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put Wing</span><span class="rail-iv-stat-value" data-met="iv_put_wing">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Call Wing</span><span class="rail-iv-stat-value" data-met="iv_call_wing">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
+                    <div class="rail-card" id="rail-card-alerts">
+                        <div class="rail-card-header">Live Alerts</div>
+                        <div class="rail-alerts-list" id="right-rail-alerts">
+                            <div class="rail-alerts-empty">No active alerts.</div>
                         </div>
                     </div>
                     <div class="rail-card" id="rail-card-dealer">
@@ -9589,6 +9661,25 @@ def index():
                             <span class="num" data-met="vol_cp">—</span>
                         </div>
                     </div>
+                    <div class="rail-card" id="rail-card-iv">
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Skew / IV</div>
+                            <div class="rail-card-note" data-met="iv_expiry">Near expiry</div>
+                        </div>
+                        <div class="rail-iv-top">
+                            <div class="rail-iv-atm" data-met="iv_atm">—</div>
+                            <div class="rail-iv-headline" data-met="iv_headline">IV context unavailable</div>
+                        </div>
+                        <div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>
+                        <div class="rail-iv-grid">
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Call</span><span class="rail-iv-stat-value" data-met="iv_atm_call">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Put</span><span class="rail-iv-stat-value" data-met="iv_atm_put">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put Wing</span><span class="rail-iv-stat-value" data-met="iv_put_wing">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Call Wing</span><span class="rail-iv-stat-value" data-met="iv_call_wing">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
+                        </div>
+                    </div>
                     <div class="rail-card" id="rail-card-flow-pulse">
                         <div class="rail-card-header-row">
                             <div class="rail-card-header">Flow Pulse</div>
@@ -9636,12 +9727,6 @@ def index():
                             <div class="rail-centroid-read" data-met="centroid_drift_read">—</div>
                         </div>
                     </div>
-                    <div class="rail-card" id="rail-card-alerts">
-                        <div class="rail-card-header">Live Alerts</div>
-                        <div class="rail-alerts-list" id="right-rail-alerts">
-                            <div class="rail-alerts-empty">No active alerts.</div>
-                        </div>
-                    </div>
                 </div>
                 <div class="right-rail-panel" data-rail-panel="levels">
                     <div class="rail-levels-table" id="right-rail-levels">
@@ -9686,6 +9771,30 @@ def index():
         let tvMacdChart = null, tvMacdSeries = {};
         // Persist active indicators across data refreshes
         let tvActiveInds = new Set();
+        const TV_INDICATOR_DEFS = [
+            { key:'sma20',  label:'SMA20',  title:'Simple Moving Average (20)', editable:true },
+            { key:'sma50',  label:'SMA50',  title:'Simple Moving Average (50)', editable:true },
+            { key:'sma200', label:'SMA200', title:'Simple Moving Average (200)', editable:true },
+            { key:'ema9',   label:'EMA9',   title:'Exponential Moving Average (9)', editable:true },
+            { key:'ema21',  label:'EMA21',  title:'Exponential Moving Average (21)', editable:true },
+            { key:'vwap',   label:'VWAP',   title:'Volume Weighted Average Price', editable:true },
+            { key:'bb',     label:'BB',     title:'Bollinger Bands (20, 2)', editable:true },
+            { key:'rsi',    label:'RSI',    title:'Relative Strength Index (14) — sub-pane', editable:false },
+            { key:'macd',   label:'MACD',   title:'MACD (12, 26, 9) — sub-pane', editable:false },
+            { key:'atr',    label:'ATR',    title:'Average True Range (14) — sub-pane', editable:false },
+            { key:'oi',     label:'OI',     title:'Top OI strikes (nearest expiry)', editable:false },
+        ];
+        const EDITABLE_TV_INDICATOR_KEYS = TV_INDICATOR_DEFS.filter(def => def.editable).map(def => def.key);
+        const DEFAULT_TV_INDICATOR_PREFS = {
+            sma20:  { color: '#f0c040', lineWidth: 1, lineStyle: 'solid' },
+            sma50:  { color: '#40a0f0', lineWidth: 1, lineStyle: 'solid' },
+            sma200: { color: '#e040fb', lineWidth: 1, lineStyle: 'solid' },
+            ema9:   { color: '#ff9900', lineWidth: 1, lineStyle: 'solid' },
+            ema21:  { color: '#00e5ff', lineWidth: 1, lineStyle: 'solid' },
+            vwap:   { color: '#ffffff', lineWidth: 1, lineStyle: 'solid' },
+            bb:     { color: '#64b4ff', lineWidth: 1, lineStyle: 'solid' }
+        };
+        let tvIndicatorPrefs = {};
         // Auto-range: when true, chart fits all data on every update; when false, zoom/pan is preserved
         let tvAutoRange = false;
         // Time-scale sync state
@@ -11259,13 +11368,124 @@ def index():
             return result;
         }
 
+        function getDefaultTVIndicatorPrefs() {
+            return Object.fromEntries(
+                Object.entries(DEFAULT_TV_INDICATOR_PREFS).map(([key, pref]) => [key, { ...pref }])
+            );
+        }
+
+        function normalizeTVIndicatorColor(color, fallback) {
+            const value = String(color || '').trim();
+            return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+        }
+
+        function normalizeTVIndicatorLineWidth(width, fallback = 1) {
+            const value = Number(width);
+            if (!Number.isFinite(value)) return fallback;
+            return Math.max(1, Math.min(4, Math.round(value)));
+        }
+
+        function normalizeTVIndicatorLineStyle(style, fallback = 'solid') {
+            const value = String(style || '').trim().toLowerCase();
+            return ['solid', 'dashed', 'dotted'].includes(value) ? value : fallback;
+        }
+
+        function normalizeTVIndicatorPrefMap(prefs) {
+            const defaults = getDefaultTVIndicatorPrefs();
+            const source = prefs && typeof prefs === 'object' ? prefs : {};
+            Object.keys(defaults).forEach(key => {
+                const base = defaults[key];
+                const next = source[key] && typeof source[key] === 'object' ? source[key] : {};
+                defaults[key] = {
+                    color: normalizeTVIndicatorColor(next.color, base.color),
+                    lineWidth: normalizeTVIndicatorLineWidth(next.lineWidth, base.lineWidth),
+                    lineStyle: normalizeTVIndicatorLineStyle(next.lineStyle, base.lineStyle),
+                };
+            });
+            return defaults;
+        }
+
+        function getTVIndicatorPref(key) {
+            if (!tvIndicatorPrefs || typeof tvIndicatorPrefs !== 'object') {
+                tvIndicatorPrefs = getDefaultTVIndicatorPrefs();
+            }
+            if (!tvIndicatorPrefs[key] && DEFAULT_TV_INDICATOR_PREFS[key]) {
+                tvIndicatorPrefs[key] = { ...DEFAULT_TV_INDICATOR_PREFS[key] };
+            }
+            return tvIndicatorPrefs[key] || null;
+        }
+
+        function tvIndicatorLineStyleValue(style) {
+            if (style === 'dashed') return LightweightCharts.LineStyle.Dashed;
+            if (style === 'dotted') return LightweightCharts.LineStyle.Dotted;
+            return LightweightCharts.LineStyle.Solid;
+        }
+
+        function tvIndicatorSeriesOptions(color, lineWidth, lineStyle, title='') {
+            return {
+                color,
+                lineWidth,
+                lineStyle: tvIndicatorLineStyleValue(lineStyle),
+                priceScaleId: 'right',
+                lastValueVisible: true,
+                priceLineVisible: false,
+                title,
+            };
+        }
+
+        function colorWithAlpha(hex, alpha) {
+            const match = String(hex || '').trim().match(/^#?([0-9a-f]{6})$/i);
+            if (!match) return hex;
+            const value = match[1];
+            const r = parseInt(value.slice(0, 2), 16);
+            const g = parseInt(value.slice(2, 4), 16);
+            const b = parseInt(value.slice(4, 6), 16);
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+
+        function getTVIndicatorSourceCandles() {
+            if (Array.isArray(tvIndicatorCandles) && tvIndicatorCandles.length) return tvIndicatorCandles;
+            if (Array.isArray(tvLastCandles) && tvLastCandles.length) return tvLastCandles;
+            return [];
+        }
+
+        function syncTVIndicatorToggleButtons() {
+            document.querySelectorAll('.tv-tb-btn[data-indicator-key]').forEach(btn => {
+                btn.classList.toggle('active', tvActiveInds.has(btn.dataset.indicatorKey));
+            });
+        }
+
+        function reapplyTVIndicators() {
+            const candles = getTVIndicatorSourceCandles();
+            if (candles.length) applyIndicators(candles, tvActiveInds);
+            else updateIndicatorLegend();
+        }
+
+        function setTVIndicatorEnabled(key, enabled) {
+            if (!key) return;
+            if (enabled) tvActiveInds.add(key);
+            else tvActiveInds.delete(key);
+            syncTVIndicatorToggleButtons();
+            renderTVIndicatorEditor();
+            reapplyTVIndicators();
+            if (key === 'oi' && enabled) ensureTopOILoaded();
+        }
+
+        function updateTVIndicatorPref(key, patch) {
+            const current = getTVIndicatorPref(key);
+            if (!current) return;
+            tvIndicatorPrefs[key] = normalizeTVIndicatorPrefMap({
+                ...tvIndicatorPrefs,
+                [key]: { ...current, ...(patch || {}) },
+            })[key];
+            reapplyTVIndicators();
+        }
+
         // ── Apply/remove indicators on existing chart ─────────────────────────
         function applyIndicators(candles, activeInds) {
             if (!tvPriceChart || !tvCandleSeries) return;
             const times  = candles.map(c => c.time);
             const closes = candles.map(c => c.close);
-            const highs  = candles.map(c => c.high);
-            const lows   = candles.map(c => c.low);
 
             // Remove deactivated indicators
             Object.keys(tvIndicatorSeries).forEach(key => {
@@ -11277,10 +11497,20 @@ def index():
                 }
             });
 
-            // Create-or-update helper: always setData so streaming updates are reflected
-            function mkLineSeries(color, lineWidth=1, priceScaleId='right', title='') {
-                return tvPriceChart.addLineSeries({ color, lineWidth, priceScaleId,
-                    lastValueVisible: true, priceLineVisible: false, title });
+            function upsertLineSeries(slotKey, title, prefKey = slotKey, colorOverride = null) {
+                const pref = getTVIndicatorPref(prefKey);
+                const options = tvIndicatorSeriesOptions(
+                    colorOverride || (pref && pref.color) || '#888888',
+                    pref && pref.lineWidth,
+                    pref && pref.lineStyle,
+                    title
+                );
+                if (!tvIndicatorSeries[slotKey]) {
+                    tvIndicatorSeries[slotKey] = tvPriceChart.addLineSeries(options);
+                } else {
+                    tvIndicatorSeries[slotKey].applyOptions(options);
+                }
+                return tvIndicatorSeries[slotKey];
             }
 
             // Helper: filter computed (time, value) pairs to today only.
@@ -11291,24 +11521,19 @@ def index():
             }
 
             if (activeInds.has('sma20')) {
-                if (!tvIndicatorSeries['sma20']) tvIndicatorSeries['sma20'] = mkLineSeries('#f0c040', 1, 'right', 'SMA20');
-                tvIndicatorSeries['sma20'].setData(todayOnly(calcSMA(closes, 20).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                upsertLineSeries('sma20', 'SMA20').setData(todayOnly(calcSMA(closes, 20).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
             }
             if (activeInds.has('sma50')) {
-                if (!tvIndicatorSeries['sma50']) tvIndicatorSeries['sma50'] = mkLineSeries('#40a0f0', 1, 'right', 'SMA50');
-                tvIndicatorSeries['sma50'].setData(todayOnly(calcSMA(closes, 50).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                upsertLineSeries('sma50', 'SMA50').setData(todayOnly(calcSMA(closes, 50).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
             }
             if (activeInds.has('sma200')) {
-                if (!tvIndicatorSeries['sma200']) tvIndicatorSeries['sma200'] = mkLineSeries('#e040fb', 1, 'right', 'SMA200');
-                tvIndicatorSeries['sma200'].setData(todayOnly(calcSMA(closes, 200).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                upsertLineSeries('sma200', 'SMA200').setData(todayOnly(calcSMA(closes, 200).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
             }
             if (activeInds.has('ema9')) {
-                if (!tvIndicatorSeries['ema9']) tvIndicatorSeries['ema9'] = mkLineSeries('#ff9900', 1, 'right', 'EMA9');
-                tvIndicatorSeries['ema9'].setData(todayOnly(calcEMA(closes, 9).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                upsertLineSeries('ema9', 'EMA9').setData(todayOnly(calcEMA(closes, 9).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
             }
             if (activeInds.has('ema21')) {
-                if (!tvIndicatorSeries['ema21']) tvIndicatorSeries['ema21'] = mkLineSeries('#00e5ff', 1, 'right', 'EMA21');
-                tvIndicatorSeries['ema21'].setData(todayOnly(calcEMA(closes, 21).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
+                upsertLineSeries('ema21', 'EMA21').setData(todayOnly(calcEMA(closes, 21).map((v,i) => v!==null ? {time:times[i], value:v} : null)));
             }
             if (activeInds.has('vwap')) {
                 // VWAP resets daily — always compute from today's candles only
@@ -11316,17 +11541,24 @@ def index():
                 const vwapVals = calcVWAP(todayCandles.map(c => ({
                     time: c.time, high: c.high, low: c.low, close: c.close, volume: c.volume || 0
                 })));
-                if (!tvIndicatorSeries['vwap']) tvIndicatorSeries['vwap'] = mkLineSeries('#ffffff', 1, 'right', 'VWAP');
-                tvIndicatorSeries['vwap'].setData(vwapVals.map((v, i) => ({time: todayCandles[i].time, value: v})));
+                upsertLineSeries('vwap', 'VWAP').setData(vwapVals.map((v, i) => ({time: todayCandles[i].time, value: v})));
             }
             if (activeInds.has('bb')) {
+                const pref = getTVIndicatorPref('bb');
+                const upperLowerColor = colorWithAlpha(pref.color, 0.82);
+                const midColor = colorWithAlpha(pref.color, 0.48);
                 const bb = calcBB(closes);
                 if (!tvIndicatorSeries['bb']) {
                     tvIndicatorSeries['bb'] = [
-                        mkLineSeries('rgba(100,180,255,0.8)', 1, 'right', 'BB Upper'),
-                        mkLineSeries('rgba(100,180,255,0.5)', 1, 'right', 'BB Mid'),
-                        mkLineSeries('rgba(100,180,255,0.8)', 1, 'right', 'BB Lower'),
+                        tvPriceChart.addLineSeries(tvIndicatorSeriesOptions(upperLowerColor, pref.lineWidth, pref.lineStyle, 'BB Upper')),
+                        tvPriceChart.addLineSeries(tvIndicatorSeriesOptions(midColor, pref.lineWidth, pref.lineStyle, 'BB Mid')),
+                        tvPriceChart.addLineSeries(tvIndicatorSeriesOptions(upperLowerColor, pref.lineWidth, pref.lineStyle, 'BB Lower')),
                     ];
+                } else {
+                    const [upperS, midS, lowerS] = tvIndicatorSeries['bb'];
+                    upperS.applyOptions(tvIndicatorSeriesOptions(upperLowerColor, pref.lineWidth, pref.lineStyle, 'BB Upper'));
+                    midS.applyOptions(tvIndicatorSeriesOptions(midColor, pref.lineWidth, pref.lineStyle, 'BB Mid'));
+                    lowerS.applyOptions(tvIndicatorSeriesOptions(upperLowerColor, pref.lineWidth, pref.lineStyle, 'BB Lower'));
                 }
                 const [upperS, midS, lowerS] = tvIndicatorSeries['bb'];
                 upperS.setData(todayOnly(bb.map((v,i) => v.upper!==null ? {time:times[i],value:v.upper} : null)));
@@ -11339,8 +11571,8 @@ def index():
                 const mult    = 1.5;
                 if (!tvIndicatorSeries['atr']) {
                     tvIndicatorSeries['atr'] = [
-                        mkLineSeries('rgba(255,152,0,0.8)', 1, 'right', 'ATR Upper'),
-                        mkLineSeries('rgba(255,152,0,0.8)', 1, 'right', 'ATR Lower'),
+                        tvPriceChart.addLineSeries(tvIndicatorSeriesOptions('rgba(255,152,0,0.8)', 1, 'solid', 'ATR Upper')),
+                        tvPriceChart.addLineSeries(tvIndicatorSeriesOptions('rgba(255,152,0,0.8)', 1, 'solid', 'ATR Lower')),
                     ];
                 }
                 const [atrUpper, atrLower] = tvIndicatorSeries['atr'];
@@ -11371,20 +11603,86 @@ def index():
                 legend.className = 'tv-indicator-legend';
                 container.appendChild(legend);
             }
-            const items = {
-                sma20:'SMA20',sma50:'SMA50',sma200:'SMA200',
-                ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',bb:'BB(20,2)',rsi:'RSI14',macd:'MACD',atr:'ATR Bands'
+            const labels = {
+                sma20:'SMA20', sma50:'SMA50', sma200:'SMA200',
+                ema9:'EMA9', ema21:'EMA21', vwap:'VWAP', bb:'BB(20,2)',
+                rsi:'RSI14', macd:'MACD', atr:'ATR Bands'
             };
-            const colors = {
-                sma20:'#f0c040',sma50:'#40a0f0',sma200:'#e040fb',
-                ema9:'#ff9900',ema21:'#00e5ff',vwap:'#ffffff',bb:'rgba(100,180,255,0.8)',
-                rsi:'#e91e63',macd:'#2196f3',atr:'rgba(255,152,0,0.8)'
+            const fallbackColors = {
+                rsi:'#e91e63',
+                macd:'#2196f3',
+                atr:'rgba(255,152,0,0.8)'
             };
-            legend.innerHTML = Object.keys(tvIndicatorSeries).map(k => `
+            const legendKeys = TV_INDICATOR_DEFS.map(def => def.key).filter(key => tvIndicatorSeries[key]);
+            legend.innerHTML = legendKeys.map(k => `
                 <div class="tv-legend-item">
-                    <div class="tv-legend-swatch" style="background:${colors[k]||'#888'}"></div>
-                    ${items[k]||k}
+                    <div class="tv-legend-swatch" style="background:${(getTVIndicatorPref(k) && getTVIndicatorPref(k).color) || fallbackColors[k] || '#888'}"></div>
+                    ${labels[k]||k}
                 </div>`).join('');
+        }
+
+        function renderTVIndicatorEditor() {
+            const grid = document.getElementById('indicator-settings-grid');
+            if (!grid) return;
+            const widthOptions = [1, 2, 3, 4].map(value =>
+                `<option value="${value}">${value}px</option>`
+            ).join('');
+            const styleOptions = [
+                ['solid', 'Solid'],
+                ['dashed', 'Dashed'],
+                ['dotted', 'Dotted'],
+            ].map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+            grid.innerHTML = EDITABLE_TV_INDICATOR_KEYS.map(key => {
+                const def = TV_INDICATOR_DEFS.find(item => item.key === key);
+                const pref = getTVIndicatorPref(key);
+                return (
+                    `<div class="indicator-modal-row" data-indicator-row="${key}">` +
+                        `<div class="indicator-modal-name">` +
+                            `<span class="indicator-modal-swatch" style="background:${pref.color}"></span>` +
+                            `<label for="indicator-visible-${key}">${def ? def.label : key}</label>` +
+                        `</div>` +
+                        `<div class="indicator-modal-toggle">` +
+                            `<input type="checkbox" id="indicator-visible-${key}" data-indicator-visible="${key}" ${tvActiveInds.has(key) ? 'checked' : ''}>` +
+                        `</div>` +
+                        `<input type="color" value="${pref.color}" data-indicator-color="${key}" aria-label="${def ? def.label : key} color">` +
+                        `<select data-indicator-width="${key}" aria-label="${def ? def.label : key} line width">${widthOptions}</select>` +
+                        `<select data-indicator-style="${key}" aria-label="${def ? def.label : key} line style">${styleOptions}</select>` +
+                    `</div>`
+                );
+            }).join('');
+            EDITABLE_TV_INDICATOR_KEYS.forEach(key => {
+                const pref = getTVIndicatorPref(key);
+                const widthEl = grid.querySelector(`[data-indicator-width="${key}"]`);
+                const styleEl = grid.querySelector(`[data-indicator-style="${key}"]`);
+                if (widthEl) widthEl.value = String(pref.lineWidth);
+                if (styleEl) styleEl.value = pref.lineStyle;
+            });
+            grid.querySelectorAll('[data-indicator-visible]').forEach(input => {
+                input.addEventListener('change', () => setTVIndicatorEnabled(input.dataset.indicatorVisible, input.checked));
+            });
+            grid.querySelectorAll('[data-indicator-color]').forEach(input => {
+                input.addEventListener('input', () => {
+                    const row = input.closest('[data-indicator-row]');
+                    const swatch = row && row.querySelector('.indicator-modal-swatch');
+                    if (swatch) swatch.style.background = input.value;
+                    updateTVIndicatorPref(input.dataset.indicatorColor, { color: input.value });
+                });
+            });
+            grid.querySelectorAll('[data-indicator-width]').forEach(select => {
+                select.addEventListener('change', () => updateTVIndicatorPref(select.dataset.indicatorWidth, { lineWidth: Number(select.value) }));
+            });
+            grid.querySelectorAll('[data-indicator-style]').forEach(select => {
+                select.addEventListener('change', () => updateTVIndicatorPref(select.dataset.indicatorStyle, { lineStyle: select.value }));
+            });
+        }
+
+        function openTVIndicatorEditor() {
+            const modal = document.getElementById('indicator-settings-modal');
+            if (!modal) return;
+            renderTVIndicatorEditor();
+            if (modal.open) return;
+            if (modal.showModal) modal.showModal();
+            else modal.setAttribute('open', '');
         }
 
         // ── Sub-pane chart helper functions ──────────────────────────────────
@@ -12758,30 +13056,11 @@ def index():
             }
 
             // Indicator toggles
-            const indicatorDefs = [
-                { key:'sma20',  label:'SMA20',  title:'Simple Moving Average (20)' },
-                { key:'sma50',  label:'SMA50',  title:'Simple Moving Average (50)' },
-                { key:'sma200', label:'SMA200', title:'Simple Moving Average (200)' },
-                { key:'ema9',   label:'EMA9',   title:'Exponential Moving Average (9)' },
-                { key:'ema21',  label:'EMA21',  title:'Exponential Moving Average (21)' },
-                { key:'vwap',   label:'VWAP',   title:'Volume Weighted Average Price' },
-                { key:'bb',     label:'BB',     title:'Bollinger Bands (20, 2)' },
-                { key:'rsi',    label:'RSI',    title:'Relative Strength Index (14) — sub-pane' },
-                { key:'macd',   label:'MACD',   title:'MACD (12, 26, 9) — sub-pane' },
-                { key:'atr',    label:'ATR',    title:'Average True Range (14) — sub-pane' },
-                { key:'oi',     label:'OI',     title:'Top OI strikes (nearest expiry)' },
-            ];
-            indicatorDefs.forEach(def => {
+            TV_INDICATOR_DEFS.forEach(def => {
                 const b = btn(def.label, def.title, () => {
-                    if (tvActiveInds.has(def.key)) tvActiveInds.delete(def.key);
-                    else                           tvActiveInds.add(def.key);
-                    b.classList.toggle('active', tvActiveInds.has(def.key));
-                    applyIndicators(tvIndicatorCandles, tvActiveInds);
-                    // Top-OI lives in the main /update payload, not /update_price. When the user
-                    // toggles OI on before the first /update cycle lands, _lastTopOI is still null;
-                    // kick off a one-shot fetch so the overlay shows immediately.
-                    if (def.key === 'oi' && tvActiveInds.has('oi')) ensureTopOILoaded();
+                    setTVIndicatorEnabled(def.key, !tvActiveInds.has(def.key));
                 });
+                b.dataset.indicatorKey = def.key;
                 if (tvActiveInds.has(def.key)) b.classList.add('active');
                 addToGroup(indicatorsGroup, b);
             });
@@ -12820,6 +13099,7 @@ def index():
             // Undo / Clear
             addToGroup(actionsGroup, btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
             addToGroup(actionsGroup, btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
+            addToGroup(actionsGroup, btn('Indicators', 'Edit built-in indicator styles', openTVIndicatorEditor));
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
@@ -13444,23 +13724,10 @@ def index():
                         '</div>' +
                         '<div class="rail-profile-blurb" data-met="profile_blurb">—</div>' +
                     '</div>' +
-                    '<div class="rail-card" id="rail-card-iv">' +
-                        '<div class="rail-card-header-row">' +
-                            '<div class="rail-card-header">Skew / IV</div>' +
-                            '<div class="rail-card-note" data-met="iv_expiry">Near expiry</div>' +
-                        '</div>' +
-                        '<div class="rail-iv-top">' +
-                            '<div class="rail-iv-atm" data-met="iv_atm">—</div>' +
-                            '<div class="rail-iv-headline" data-met="iv_headline">IV context unavailable</div>' +
-                        '</div>' +
-                        '<div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>' +
-                        '<div class="rail-iv-grid">' +
-                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Call</span><span class="rail-iv-stat-value" data-met="iv_atm_call">—</span></div>' +
-                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Put</span><span class="rail-iv-stat-value" data-met="iv_atm_put">—</span></div>' +
-                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Put Wing</span><span class="rail-iv-stat-value" data-met="iv_put_wing">—</span></div>' +
-                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Call Wing</span><span class="rail-iv-stat-value" data-met="iv_call_wing">—</span></div>' +
-                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>' +
-                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>' +
+                    '<div class="rail-card" id="rail-card-alerts">' +
+                        '<div class="rail-card-header">Live Alerts</div>' +
+                        '<div class="rail-alerts-list" id="right-rail-alerts">' +
+                            '<div class="rail-alerts-empty">No active alerts.</div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-dealer">' +
@@ -13546,6 +13813,25 @@ def index():
                             '<span class="num" data-met="vol_cp">—</span>' +
                         '</div>' +
                     '</div>' +
+                    '<div class="rail-card" id="rail-card-iv">' +
+                        '<div class="rail-card-header-row">' +
+                            '<div class="rail-card-header">Skew / IV</div>' +
+                            '<div class="rail-card-note" data-met="iv_expiry">Near expiry</div>' +
+                        '</div>' +
+                        '<div class="rail-iv-top">' +
+                            '<div class="rail-iv-atm" data-met="iv_atm">—</div>' +
+                            '<div class="rail-iv-headline" data-met="iv_headline">IV context unavailable</div>' +
+                        '</div>' +
+                        '<div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>' +
+                        '<div class="rail-iv-grid">' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Call</span><span class="rail-iv-stat-value" data-met="iv_atm_call">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Put</span><span class="rail-iv-stat-value" data-met="iv_atm_put">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Put Wing</span><span class="rail-iv-stat-value" data-met="iv_put_wing">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Call Wing</span><span class="rail-iv-stat-value" data-met="iv_call_wing">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>' +
+                            '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>' +
+                        '</div>' +
+                    '</div>' +
                     '<div class="rail-card" id="rail-card-flow-pulse">' +
                         '<div class="rail-card-header-row">' +
                             '<div class="rail-card-header">Flow Pulse</div>' +
@@ -13591,12 +13877,6 @@ def index():
                         '<div class="rail-centroid-reads">' +
                             '<div class="rail-centroid-read" data-met="centroid_structure">—</div>' +
                             '<div class="rail-centroid-read" data-met="centroid_drift_read">—</div>' +
-                        '</div>' +
-                    '</div>' +
-                    '<div class="rail-card" id="rail-card-alerts">' +
-                        '<div class="rail-card-header">Live Alerts</div>' +
-                        '<div class="rail-alerts-list" id="right-rail-alerts">' +
-                            '<div class="rail-alerts-empty">No active alerts.</div>' +
                         '</div>' +
                     '</div>' +
                 '</div>'
@@ -16082,7 +16362,7 @@ def index():
         // Settings save/load functions
         function gatherSettings() {
             return {
-                settings_schema_version: 3,
+                settings_schema_version: 4,
                 ticker: document.getElementById('ticker').value,
                 timeframe: document.getElementById('timeframe').value,
                 strike_range: document.getElementById('strike_range').value,
@@ -16113,6 +16393,8 @@ def index():
                 gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
                 dealer_impact_verbose: !!(document.getElementById('dealer_impact_verbose') && document.getElementById('dealer_impact_verbose').checked),
                 em_range_locked: emRangeLocked,
+                tv_active_indicators: Array.from(tvActiveInds),
+                tv_indicator_prefs: normalizeTVIndicatorPrefMap(tvIndicatorPrefs),
                 // Chart visibility
                 charts: getChartVisibility()
             };
@@ -16190,6 +16472,15 @@ def index():
             if (settings.em_range_locked !== undefined) {
                 setEmRangeLocked(settings.em_range_locked);
             }
+            if (Array.isArray(settings.tv_active_indicators)) {
+                tvActiveInds = new Set(settings.tv_active_indicators.filter(key => TV_INDICATOR_DEFS.some(def => def.key === key)));
+            } else if (settingsSchemaVersion < 4) {
+                tvActiveInds = new Set();
+            }
+            tvIndicatorPrefs = normalizeTVIndicatorPrefMap(settings.tv_indicator_prefs);
+            syncTVIndicatorToggleButtons();
+            renderTVIndicatorEditor();
+            reapplyTVIndicators();
             // Chart visibility — persist into localStorage; updateCharts() reads from there
             if (settings.charts) {
                 const chartSettings = Object.assign({}, settings.charts);
@@ -16306,6 +16597,8 @@ def index():
             });
         }
         renderChartVisibilitySection();
+        tvIndicatorPrefs = normalizeTVIndicatorPrefMap(tvIndicatorPrefs);
+        renderTVIndicatorEditor();
 
         wireRightRailTabs();
         applyRightRailTab();
@@ -16325,15 +16618,25 @@ def index():
         document.getElementById('drawer-backdrop').addEventListener('click', closeDrawer);
 
         const settingsModal = document.getElementById('settings-modal');
+        const indicatorSettingsModal = document.getElementById('indicator-settings-modal');
         document.getElementById('settingsToggle').addEventListener('click', () => {
             if (settingsModal.showModal) { settingsModal.showModal(); }
             else { settingsModal.setAttribute('open', ''); } // <dialog> fallback
         });
         document.getElementById('modalClose').addEventListener('click', () => settingsModal.close());
+        document.getElementById('indicatorModalClose').addEventListener('click', () => {
+            if (indicatorSettingsModal.close) indicatorSettingsModal.close();
+            else indicatorSettingsModal.removeAttribute('open');
+        });
 
         document.addEventListener('keydown', (e) => {
             if (e.key !== 'Escape') return;
             if (settingsModal.open) { settingsModal.close(); return; }
+            if (indicatorSettingsModal.open) {
+                if (indicatorSettingsModal.close) indicatorSettingsModal.close();
+                else indicatorSettingsModal.removeAttribute('open');
+                return;
+            }
             if (document.getElementById('settings-drawer').classList.contains('open')) closeDrawer();
         });
 
