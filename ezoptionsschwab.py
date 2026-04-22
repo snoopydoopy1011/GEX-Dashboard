@@ -9945,6 +9945,8 @@ def index():
         let tvLastPriceData = null;     // cache of full priceData for redraw
         // All overlay level prices (exposure, EM, drawn H-lines) — used by autoscaleInfoProvider
         let tvAllLevelPrices = [];
+        // Session focus keeps the Y-axis tighter; Reset / auto-range can still fit everything.
+        let tvYAxisMode = 'session';
         // References to dynamically-added price lines (exposure levels, expected moves)
         // kept so they can be removed without a full chart rebuild
         let tvExposurePriceLines = [];
@@ -10221,18 +10223,83 @@ def index():
             }
         }
 
+        function tvGetVisibleCandlePriceRange(trimLeftBars = 0) {
+            if (!tvLastCandles.length) return null;
+            let fromIndex = 0;
+            let toIndex = tvLastCandles.length - 1;
+            try {
+                const visibleRange = tvPriceChart && tvPriceChart.timeScale
+                    ? tvPriceChart.timeScale().getVisibleLogicalRange()
+                    : null;
+                if (visibleRange) {
+                    fromIndex = Math.max(0, Math.floor(visibleRange.from));
+                    toIndex = Math.min(tvLastCandles.length - 1, Math.ceil(visibleRange.to));
+                }
+            } catch (e) {}
+            if (trimLeftBars > 0) {
+                fromIndex = Math.min(toIndex, fromIndex + trimLeftBars);
+            }
+
+            let minValue = Infinity;
+            let maxValue = -Infinity;
+            for (let index = fromIndex; index <= toIndex; index += 1) {
+                const candle = tvLastCandles[index];
+                if (!candle) continue;
+                if (Number.isFinite(candle.low)) minValue = Math.min(minValue, candle.low);
+                if (Number.isFinite(candle.high)) maxValue = Math.max(maxValue, candle.high);
+            }
+            if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return null;
+            return { minValue, maxValue };
+        }
+
         // Apply (or re-apply) the autoscaleInfoProvider so the Y-axis always fits levels
         function tvApplyAutoscale() {
             if (!tvCandleSeries) return;
             const levelPrices = tvAllLevelPrices.slice(); // snapshot
+            const yAxisMode = tvYAxisMode;
             tvCandleSeries.applyOptions({
                 autoscaleInfoProvider: (original) => {
                     const res = original();
                     if (!res) return res;
-                    if (levelPrices.length === 0) return res;
-                    const pad = (res.priceRange.maxValue - res.priceRange.minValue) * 0.05;
-                    const minVal = Math.min(res.priceRange.minValue, ...levelPrices) - pad;
-                    const maxVal = Math.max(res.priceRange.maxValue, ...levelPrices) + pad;
+                    let minVal = res.priceRange.minValue;
+                    let maxVal = res.priceRange.maxValue;
+                    if (yAxisMode !== 'fit-all') {
+                        let trimLeftBars = 0;
+                        try {
+                            const visibleRange = tvPriceChart && tvPriceChart.timeScale
+                                ? tvPriceChart.timeScale().getVisibleLogicalRange()
+                                : null;
+                            if (visibleRange) {
+                                const visibleBars = Math.max(1, Math.ceil(visibleRange.to) - Math.floor(visibleRange.from) + 1);
+                                trimLeftBars = Math.min(48, Math.max(0, Math.round(visibleBars * 0.12)));
+                            }
+                        } catch (e) {}
+                        const candleRange = tvGetVisibleCandlePriceRange(trimLeftBars);
+                        if (candleRange) {
+                            const span = Math.max(0.01, candleRange.maxValue - candleRange.minValue);
+                            const focusPad = Math.min(1.0, Math.max(span * 0.28, candleRange.maxValue * 0.0009, 0.18));
+                            const focusMin = candleRange.minValue - focusPad;
+                            const focusMax = candleRange.maxValue + focusPad;
+                            minVal = Math.max(minVal, focusMin);
+                            maxVal = Math.min(maxVal, focusMax);
+                            levelPrices.forEach(price => {
+                                if (!Number.isFinite(price)) return;
+                                if (price >= focusMin && price <= focusMax) {
+                                    minVal = Math.min(minVal, price);
+                                    maxVal = Math.max(maxVal, price);
+                                }
+                            });
+                        } else if (levelPrices.length > 0) {
+                            minVal = Math.min(minVal, ...levelPrices);
+                            maxVal = Math.max(maxVal, ...levelPrices);
+                        }
+                    } else if (levelPrices.length > 0) {
+                        minVal = Math.min(minVal, ...levelPrices);
+                        maxVal = Math.max(maxVal, ...levelPrices);
+                    }
+                    const pad = Math.max(0.01, (maxVal - minVal) * 0.05);
+                    minVal -= pad;
+                    maxVal += pad;
                     return { priceRange: { minValue: minVal, maxValue: maxVal }, margins: res.margins };
                 }
             });
@@ -10245,6 +10312,7 @@ def index():
 
         function tvFitAll() {
             if (!tvPriceChart) return;
+            tvYAxisMode = 'fit-all';
             // Use setTimeout so this fires after LightweightCharts finishes its own internal layout pass
             setTimeout(() => {
                 try {
@@ -10261,19 +10329,37 @@ def index():
             }, 50);
         }
 
+        function tvGetCurrentSessionStartIndex() {
+            if (!tvLastCandles.length) return 0;
+            if (tvCurrentDayStartTime) {
+                const idx = tvLastCandles.findIndex(candle => candle.time >= tvCurrentDayStartTime);
+                if (idx >= 0) return idx;
+            }
+            return Math.max(0, tvLastCandles.length - 80);
+        }
+
+        function tvGetSessionFocusLogicalRange() {
+            if (!tvLastCandles.length) return null;
+            const startIndex = tvGetCurrentSessionStartIndex();
+            const sessionBars = Math.max(1, tvLastCandles.length - startIndex);
+            const leftPaddingBars = tvCurrentDayStartTime
+                ? Math.max(24, Math.min(120, Math.round(sessionBars * 0.45)))
+                : Math.max(12, Math.min(64, Math.round(sessionBars * 0.20)));
+            const rightPaddingBars = Math.max(3, Math.min(12, Math.round(sessionBars * 0.06)));
+            return {
+                from: Math.max(0, startIndex - leftPaddingBars),
+                to: (tvLastCandles.length - 1) + rightPaddingBars,
+            };
+        }
+
         function tvFocusCurrentSession() {
             if (!tvPriceChart || !tvLastCandles.length) return;
+            tvYAxisMode = 'session';
             setTimeout(() => {
                 try {
-                    let startIndex = Math.max(0, tvLastCandles.length - 80);
-                    if (tvCurrentDayStartTime) {
-                        const idx = tvLastCandles.findIndex(candle => candle.time >= tvCurrentDayStartTime);
-                        if (idx >= 0) startIndex = idx;
-                    }
-                    tvPriceChart.timeScale().setVisibleLogicalRange({
-                        from: Math.max(0, startIndex - 1),
-                        to: (tvLastCandles.length - 1) + 2,
-                    });
+                    const range = tvGetSessionFocusLogicalRange();
+                    if (!range) return;
+                    tvPriceChart.timeScale().setVisibleLogicalRange(range);
                     tvPriceChart.priceScale('right').applyOptions({ autoScale: true });
                     tvApplyAutoscale();
                     if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
@@ -13968,6 +14054,7 @@ def index():
             const shouldFitAll = tvAutoRange || tvForceFit;
             const shouldFocusSession = !shouldFitAll && (isFirstRender || tvForceSessionFocus);
             if (shouldFitAll) {
+                tvYAxisMode = 'fit-all';
                 const _chart = tvPriceChart;
                 setTimeout(() => {
                     try {
