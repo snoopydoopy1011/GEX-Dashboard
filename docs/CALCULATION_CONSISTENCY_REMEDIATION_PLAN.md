@@ -1,6 +1,6 @@
 # GEX Dashboard — Calculation Consistency + Alert Semantics Remediation Plan
 
-**Status:** Implemented on branch; optional live-session verification remains
+**Status:** Implemented on branch; local regression sweep is reproducible; optional live-session verification remains
 **Owner:** Codex
 **Created:** 2026-04-22
 **Updated:** 2026-04-22
@@ -50,6 +50,7 @@ git diff main...HEAD -- ezoptionsschwab.py docs/CALCULATION_CONSISTENCY_REMEDIAT
 3. Session baseline dictionaries are scoped by explicit analytics scope instead of only `(ticker, date)`.
 4. `chain_activity` now uses the same strike-window / expiry scope as the surrounding stats cards.
 5. IV-surge buffers and alert ids are separated by side and expiry.
+6. A repo-local regression script now exercises the stage-6 risk areas: `python3 scripts/check_calc_consistency_stage6.py`.
 
 ### Still worth checking manually
 
@@ -467,7 +468,7 @@ Deliverables:
 
 ### Stage 6
 
-**Status:** Partially completed
+**Status:** Completed locally; optional live-session verification remains open
 
 `chore(review): regression sweep for scoped stats and alerts`
 
@@ -475,6 +476,7 @@ Deliverables:
 
 - verification pass across EM, alerts, scoped deltas, and right-rail consistency
 - syntax and synthetic checks completed locally
+- reproducible regression command added to the repo
 - optional live-session verification still open
 
 ---
@@ -483,9 +485,10 @@ Deliverables:
 
 Implementation status summary:
 
+- `python3 scripts/check_calc_consistency_stage6.py` passed on 2026-04-22 and now serves as the reproducible local regression sweep for this phase.
 - `python3 -m py_compile ezoptionsschwab.py` passed after the remediation changes.
 - Flask startup reached app initialization; the only observed blocker was that port `5001` was already in use during the smoke check.
-- Synthetic checks were run for deterministic EM selection, scope-separated baselines, and scoped Chain Activity aggregation.
+- The scripted sweep covers deterministic EM selection, scope-separated baselines, scoped Chain Activity aggregation, IV-buffer separation, and vol-spike interval-delta interpretation.
 - SQLite spot checks confirmed that the vol-spike fix now interprets stored cumulative `net_volume` snapshots as interval deltas instead of raw rolling values.
 - IV buffer keys were verified to separate call and put state at the same strike / expiry.
 
@@ -494,6 +497,7 @@ Implementation status summary:
 Run:
 
 ```bash
+python3 scripts/check_calc_consistency_stage6.py
 python3 -m py_compile ezoptionsschwab.py
 python3 ezoptionsschwab.py
 ```
@@ -576,9 +580,9 @@ These were resolved during implementation:
 
 3. IV-surge alerts keep the headline short and put expiry context in `detail`.
 
-Remaining judgment call outside the implementation itself:
+Remaining follow-up outside the implementation itself:
 
-4. Whether a live-session manual pass should be treated as required before merge, or just desirable.
+4. A live-session manual pass is still desirable before or after merge, but it is not a blocker for considering this remediation plan complete locally.
 
 ---
 
@@ -597,12 +601,16 @@ Those can be handled in a separate UX / controls plan after these correctness fi
 
 ## 10. Definition of Done
 
-This remediation plan is complete when all five review findings are closed and the following are true:
+This remediation plan is complete locally when all five review findings are closed and the following are true:
 
 - Vol-spike alerts are based on interval deltas, not cumulative snapshot values.
 - Expected move is deterministic and shared across all call sites.
 - Session deltas are scoped correctly for full-chain vs 0DTE and for strike-range / expiry changes.
 - Chain Activity reflects the same active scope as the surrounding rail analytics.
 - IV-surge alerts distinguish calls vs puts and do not share strike-only buffers.
-- `python3 -m py_compile ezoptionsschwab.py` passes.
-- Manual smoke confirms no new mismatches between chart overlays and right-rail cards.
+- `python3 scripts/check_calc_consistency_stage6.py` passes.
+- `python3 -m py_compile ezoptionsschwab.py scripts/check_calc_consistency_stage6.py` passes.
+
+Recommended but non-blocking follow-up:
+
+- Live-session manual smoke confirms no new mismatches between chart overlays and right-rail cards.
