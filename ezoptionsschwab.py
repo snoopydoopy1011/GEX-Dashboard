@@ -39,8 +39,23 @@ load_dotenv()
 # Initialize Flask app
 app = Flask(__name__)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, 'options_data.db')
 MAX_RETAINED_SESSION_DATES = 2
 _retention_lock = threading.Lock()
+
+
+def sqlite_connect(db_path=DB_PATH, timeout=10, retries=2, retry_delay=0.25):
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            return sqlite3.connect(db_path, timeout=timeout)
+        except sqlite3.OperationalError as e:
+            last_error = e
+            if 'disk i/o error' not in str(e).lower() or attempt >= retries:
+                raise
+            time.sleep(retry_delay * (attempt + 1))
+    raise last_error
 
 # Global error handlers for Flask
 @app.errorhandler(404)
@@ -59,7 +74,7 @@ def internal_error(error):
 
 # Initialize SQLite database
 def init_db():
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS interval_data (
@@ -317,7 +332,7 @@ def store_centroid_data(ticker, price, calls, puts):
     interval_timestamp = (current_time // 300) * 300
     
     # Delete existing data for this 5-minute interval to update with most recent data
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''
                 DELETE FROM centroid_data 
@@ -351,7 +366,7 @@ def store_centroid_data(ticker, price, calls, puts):
     
     # Only store if we have volume data
     if call_volume > 0 or put_volume > 0:
-        with closing(sqlite3.connect('options_data.db')) as conn:
+        with closing(sqlite_connect()) as conn:
             with closing(conn.cursor()) as cursor:
                 cursor.execute('''
                     INSERT INTO centroid_data (ticker, timestamp, price, call_centroid, put_centroid, call_volume, put_volume, date)
@@ -368,7 +383,7 @@ def get_centroid_data(ticker, date=None):
         current_date_est = datetime.now(est).strftime('%Y-%m-%d')
         date = current_date_est
     
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''
                 SELECT timestamp, price, call_centroid, put_centroid, call_volume, put_volume
@@ -516,7 +531,7 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
     interval_timestamp = (current_time // 60) * 60
     
     # Delete existing data for this 1-minute interval to update with most recent data
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''
                 DELETE FROM interval_data 
@@ -605,7 +620,7 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
     expected_move_snapshot = calculate_expected_move_snapshot(calls, puts, price)
     
     # Store data for each strike
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             for strike, exposure in exposure_by_strike.items():
                 abs_gex_total = abs(exposure.get('call_gamma',0)) + abs(exposure.get('put_gamma',0))
@@ -654,7 +669,7 @@ def get_interval_data(ticker, date=None):
     if date is None:
         date = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
     
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''
                   SELECT timestamp, price, strike, net_gamma, net_delta, net_vanna, net_charm,
@@ -680,7 +695,7 @@ def get_interval_session_data(ticker, date=None):
     if date is None:
         date = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
 
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''
                 SELECT timestamp, price, expected_move, expected_move_upper, expected_move_lower
@@ -702,7 +717,7 @@ def get_interval_session_data(ticker, date=None):
 
 def get_last_session_date(ticker, table='interval_data'):
     """Return the most recent date that has data for ticker, or None."""
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute(f'SELECT MAX(date) FROM {table} WHERE ticker = ?', (ticker,))
             row = cursor.fetchone()
@@ -715,7 +730,7 @@ def clear_old_data():
     deleted_rows = {}
 
     with _retention_lock:
-        with closing(sqlite3.connect('options_data.db')) as conn:
+        with closing(sqlite_connect()) as conn:
             with closing(conn.cursor()) as cursor:
                 for table_name in tables:
                     cursor.execute(f'''
@@ -750,7 +765,7 @@ def clear_centroid_session_data(ticker):
     est = pytz.timezone('US/Eastern')
     today = datetime.now(est).strftime('%Y-%m-%d')
     
-    with closing(sqlite3.connect('options_data.db')) as conn:
+    with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''
                 DELETE FROM centroid_data
@@ -4405,7 +4420,7 @@ def _fetch_vol_spike_data(ticker, S, strike_range):
     if cached and now_ts - cached['ts'] < 30:
         return cached['data']
     try:
-        with closing(sqlite3.connect('options_data.db')) as conn:
+        with closing(sqlite_connect()) as conn:
             with closing(conn.cursor()) as cursor:
                 cursor.execute('''
                     SELECT strike, timestamp, net_volume
@@ -6947,7 +6962,7 @@ def index():
             --workspace-pane-h: clamp(700px, 74vh, 840px);
             display: grid;
             grid-template-columns: minmax(0, 1fr) var(--gex-col-w) var(--rail-col-w);
-            grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto;
+            grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto auto;
             column-gap: 2px;
             row-gap: 4px;
             width: 100%;
@@ -6962,9 +6977,11 @@ def index():
         .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
         .chart-grid > .gex-column            { grid-column: 2; grid-row: 2; }
         .chart-grid > .right-rail-panels     { grid-column: 3; grid-row: 2; }
+        /* Row 3: flow event lane spans all columns. */
+        .chart-grid > .flow-event-lane { grid-column: 1 / -1; grid-row: 3; }
         /* Remaining rows span all columns. */
-        .chart-grid > #secondary-tabs { grid-column: 1 / -1; grid-row: 3; }
-        .chart-grid > .charts-grid    { grid-column: 1 / -1; grid-row: 4; }
+        .chart-grid > #secondary-tabs { grid-column: 1 / -1; grid-row: 4; }
+        .chart-grid > .charts-grid    { grid-column: 1 / -1; grid-row: 5; }
         .chart-grid > .gex-resize-handle {
             grid-column: 2;
             grid-row: 1 / span 2;
@@ -7037,6 +7054,96 @@ def index():
             overflow: hidden;
             margin-bottom: 5px;
             min-width: 0;
+        }
+
+        .flow-event-lane {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 6px;
+            min-width: 0;
+        }
+        .flow-event-strip {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 10px 12px;
+            min-width: 0;
+        }
+        .flow-event-strip-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .flow-event-strip-title {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--fg-2);
+        }
+        .flow-event-strip-note {
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .flow-event-list {
+            display: flex;
+            flex-direction: row;
+            gap: 8px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding: 0 0 4px 0;
+            min-width: 0;
+            scrollbar-width: thin;
+        }
+        .flow-event-list::-webkit-scrollbar {
+            height: 8px;
+        }
+        .flow-event-list::-webkit-scrollbar-thumb {
+            background: var(--border-strong);
+            border-radius: 999px;
+        }
+        .flow-event-strip .rail-alerts-list,
+        .flow-event-strip .rail-pulse-list {
+            display: flex;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            align-items: stretch;
+            gap: 8px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding: 0 0 4px 0;
+            min-width: 0;
+        }
+        .flow-event-strip .rail-alert-item,
+        .flow-event-strip .rail-pulse-item,
+        .flow-event-strip .rail-alerts-empty,
+        .flow-event-strip .rail-pulse-empty {
+            flex: 0 0 clamp(168px, 10vw, 220px);
+            width: clamp(168px, 10vw, 220px);
+            min-width: clamp(168px, 10vw, 220px);
+            max-width: clamp(168px, 10vw, 220px);
+            margin: 0;
+        }
+        .flow-event-strip .rail-alerts-empty,
+        .flow-event-strip .rail-pulse-empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 72px;
+            padding: 14px 12px;
+            border: 1px dashed var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-0);
+            text-align: center;
+        }
+        .flow-event-strip .rail-alert-item.top {
+            padding: 9px 10px;
+            background: var(--bg-0);
+            box-shadow: none;
         }
 
         /* ── Right rail (GEX / Alerts / Levels) ──────────────────────── */
@@ -9030,37 +9137,39 @@ def index():
         @media screen and (max-width: 1400px) {
             .chart-grid {
                 grid-template-columns: minmax(0, 1fr) var(--rail-col-w);
-                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) minmax(34px, auto) 420px auto auto;
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px auto auto;
             }
             .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
             .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
-            .chart-grid > .right-rail-panels     { grid-column: 2; grid-row: 2 / span 3; }
-            .chart-grid > .gex-col-header        { grid-column: 1; grid-row: 3; }
-            .chart-grid > .gex-column            { grid-column: 1; grid-row: 4; height: 420px; }
+            .chart-grid > .right-rail-panels     { grid-column: 2; grid-row: 2; }
+            .chart-grid > .flow-event-lane       { grid-column: 1 / -1; grid-row: 3; }
+            .chart-grid > .gex-col-header        { grid-column: 1; grid-row: 4; }
+            .chart-grid > .gex-column            { grid-column: 1; grid-row: 5; height: 420px; }
             .chart-grid > .gex-resize-handle     { display: none; }
             .chart-grid > #secondary-tabs,
             .chart-grid > .charts-grid {
                 grid-column: 1 / -1;
             }
-            .chart-grid > #secondary-tabs { grid-row: 5; }
-            .chart-grid > .charts-grid    { grid-row: 6; }
+            .chart-grid > #secondary-tabs { grid-row: 6; }
+            .chart-grid > .charts-grid    { grid-row: 7; }
         }
 
         /* Collapse right rail below the main chart on narrow widths */
         @media screen and (max-width: 1024px) {
             .chart-grid {
                 grid-template-columns: 1fr;
-                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
             }
             .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
-            .chart-grid > .gex-col-header { grid-column: 1; grid-row: 3; }
-            .chart-grid > .gex-column { grid-column: 1; grid-row: 4; }
-            .chart-grid > .right-rail-tabs { grid-column: 1; grid-row: 5; }
-            .chart-grid > .right-rail-panels { grid-column: 1; grid-row: 6; }
-            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 7; }
-            .chart-grid > .charts-grid { grid-column: 1; grid-row: 8; }
+            .chart-grid > .flow-event-lane { grid-column: 1; grid-row: 3; }
+            .chart-grid > .gex-col-header { grid-column: 1; grid-row: 4; }
+            .chart-grid > .gex-column { grid-column: 1; grid-row: 5; }
+            .chart-grid > .right-rail-tabs { grid-column: 1; grid-row: 6; }
+            .chart-grid > .right-rail-panels { grid-column: 1; grid-row: 7; }
+            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 8; }
+            .chart-grid > .charts-grid { grid-column: 1; grid-row: 9; }
             .chart-grid > .gex-resize-handle { display: none; }
             .gex-column { height: 420px; }
             .right-rail-panels { height: 420px; }
@@ -9508,7 +9617,7 @@ def index():
             </div>
             <div class="gex-resize-handle" id="gex-resize-handle" role="separator" aria-label="Resize strike rail" aria-orientation="vertical"></div>
             <div class="right-rail-tabs" id="right-rail-tabs">
-                <button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
+                <button type="button" class="right-rail-tab active" data-rail-tab="overview">Overview<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
                 <button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>
             </div>
@@ -9529,7 +9638,7 @@ def index():
                 </div>
             </div>
             <div class="right-rail-panels" id="right-rail-panels">
-                <div class="right-rail-panel active" data-rail-panel="alerts">
+                <div class="right-rail-panel active" data-rail-panel="overview">
                     <div class="rail-card" id="rail-card-price">
                         <div class="rail-card-price-big" data-live-price>—</div>
                         <div class="rail-card-price-sub">
@@ -9578,12 +9687,6 @@ def index():
                             <span data-met="profile_headline">—</span>
                         </div>
                         <div class="rail-profile-blurb" data-met="profile_blurb">—</div>
-                    </div>
-                    <div class="rail-card" id="rail-card-alerts">
-                        <div class="rail-card-header">Live Alerts</div>
-                        <div class="rail-alerts-list" id="right-rail-alerts">
-                            <div class="rail-alerts-empty">No active alerts.</div>
-                        </div>
                     </div>
                     <div class="rail-card" id="rail-card-dealer">
                         <div class="rail-card-header-row">
@@ -9687,15 +9790,6 @@ def index():
                             <div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
                         </div>
                     </div>
-                    <div class="rail-card" id="rail-card-flow-pulse">
-                        <div class="rail-card-header-row">
-                            <div class="rail-card-header">Flow Pulse</div>
-                            <div class="rail-card-note">1m vs 5m pace</div>
-                        </div>
-                        <div class="rail-pulse-list" id="rail-flow-pulse">
-                            <div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>
-                        </div>
-                    </div>
                     <div class="rail-card" id="rail-card-centroid">
                         <div class="rail-card-header-row">
                             <div class="rail-card-header">Centroid Drift</div>
@@ -9746,6 +9840,27 @@ def index():
                             <thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>
                             <tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>
                         </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="flow-event-lane" id="flow-event-lane">
+                <div class="flow-event-strip" id="flow-event-strip-alerts">
+                    <div class="flow-event-strip-head">
+                        <div class="flow-event-strip-title">Live Alerts</div>
+                        <div class="flow-event-strip-note">Recent trigger feed</div>
+                    </div>
+                    <div class="rail-alerts-list flow-event-list" id="right-rail-alerts">
+                        <div class="rail-alerts-empty">No active alerts.</div>
+                    </div>
+                </div>
+                <div class="flow-event-strip" id="flow-event-strip-pulse">
+                    <div class="flow-event-strip-head">
+                        <div class="flow-event-strip-title">Flow Pulse</div>
+                        <div class="flow-event-strip-note">1m vs 5m pace</div>
+                    </div>
+                    <div class="rail-pulse-list flow-event-list" id="rail-flow-pulse">
+                        <div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>
                     </div>
                 </div>
             </div>
@@ -13675,13 +13790,38 @@ def index():
         }
         // ─────────────────────────────────────────────────────────────────────
 
-        // Single source of truth for the alerts-panel markup. Both the initial
+        function buildFlowEventLaneHtml() {
+            return (
+                '<div class="flow-event-lane" id="flow-event-lane">' +
+                    '<div class="flow-event-strip" id="flow-event-strip-alerts">' +
+                        '<div class="flow-event-strip-head">' +
+                            '<div class="flow-event-strip-title">Live Alerts</div>' +
+                            '<div class="flow-event-strip-note">Recent trigger feed</div>' +
+                        '</div>' +
+                        '<div class="rail-alerts-list flow-event-list" id="right-rail-alerts">' +
+                            '<div class="rail-alerts-empty">No active alerts.</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="flow-event-strip" id="flow-event-strip-pulse">' +
+                        '<div class="flow-event-strip-head">' +
+                            '<div class="flow-event-strip-title">Flow Pulse</div>' +
+                            '<div class="flow-event-strip-note">1m vs 5m pace</div>' +
+                        '</div>' +
+                        '<div class="rail-pulse-list flow-event-list" id="rail-flow-pulse">' +
+                            '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>' +
+                        '</div>' +
+                    '</div>' +
+                '</div>'
+            );
+        }
+
+        // Single source of truth for the overview-panel markup. Both the initial
         // server-rendered HTML and ensurePriceChartDom's rebuild path must
         // produce identical DOM, or tick rebuilds (ticker switch) drop the
         // cards added in Phase 3. Mirror any change here in the Python HTML.
         function buildAlertsPanelHtml() {
             return (
-                '<div class="right-rail-panel active" data-rail-panel="alerts">' +
+                '<div class="right-rail-panel active" data-rail-panel="overview">' +
                     '<div class="rail-card" id="rail-card-price">' +
                         '<div class="rail-card-price-big" data-live-price>—</div>' +
                         '<div class="rail-card-price-sub">' +
@@ -13730,12 +13870,6 @@ def index():
                             '<span data-met="profile_headline">—</span>' +
                         '</div>' +
                         '<div class="rail-profile-blurb" data-met="profile_blurb">—</div>' +
-                    '</div>' +
-                    '<div class="rail-card" id="rail-card-alerts">' +
-                        '<div class="rail-card-header">Live Alerts</div>' +
-                        '<div class="rail-alerts-list" id="right-rail-alerts">' +
-                            '<div class="rail-alerts-empty">No active alerts.</div>' +
-                        '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-dealer">' +
                         '<div class="rail-card-header-row">' +
@@ -13839,15 +13973,6 @@ def index():
                             '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>' +
                         '</div>' +
                     '</div>' +
-                    '<div class="rail-card" id="rail-card-flow-pulse">' +
-                        '<div class="rail-card-header-row">' +
-                            '<div class="rail-card-header">Flow Pulse</div>' +
-                            '<div class="rail-card-note">1m vs 5m pace</div>' +
-                        '</div>' +
-                        '<div class="rail-pulse-list" id="rail-flow-pulse">' +
-                            '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>' +
-                        '</div>' +
-                    '</div>' +
                     '<div class="rail-card" id="rail-card-centroid">' +
                         '<div class="rail-card-header-row">' +
                             '<div class="rail-card-header">Centroid Drift</div>' +
@@ -13896,9 +14021,18 @@ def index():
         function ensurePriceChartDom() {
             const grid = document.getElementById('chart-grid');
             if (!grid) return null;
+            const ensureFlowEventLane = () => {
+                let lane = grid.querySelector('.flow-event-lane');
+                if (!lane) {
+                    grid.insertAdjacentHTML('beforeend', buildFlowEventLaneHtml());
+                    lane = grid.querySelector('.flow-event-lane');
+                }
+                return lane;
+            };
             let priceContainer = grid.querySelector('.price-chart-container');
             if (priceContainer) {
                 ensureStrikeRailResizeHandle(grid);
+                ensureFlowEventLane();
                 return priceContainer;
             }
 
@@ -13940,7 +14074,7 @@ def index():
                 tabs.className = 'right-rail-tabs';
                 tabs.id = 'right-rail-tabs';
                 tabs.innerHTML =
-                    '<button type="button" class="right-rail-tab active" data-rail-tab="alerts">Alerts<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
+                    '<button type="button" class="right-rail-tab active" data-rail-tab="overview">Overview<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
                     '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>' +
                     '<button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>';
                 grid.appendChild(tabs);
@@ -13995,12 +14129,13 @@ def index():
                 redrawGexScope();
                 applyRightRailTab();
             }
+            ensureFlowEventLane();
             renderStrikeRailPanel();
             return priceContainer;
         }
 
         function showPriceChartUI() {
-            const ids = ['tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels'];
+            const ids = ['tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels', 'flow-event-lane'];
             ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
             const pc = document.querySelector('.price-chart-container');
             if (pc) pc.style.display = 'block';
@@ -14160,16 +14295,16 @@ def index():
             }
         }
 
-        // ── Right-rail tab state (Alerts / Levels / Scenarios) ───────────
+        // ── Right-rail tab state (Overview / Levels / Scenarios) ─────────
         const RAIL_TAB_KEY = 'gex.rightRailTab';
-        let activeRailTab = 'alerts';
+        let activeRailTab = 'overview';
         try {
             const saved = localStorage.getItem(RAIL_TAB_KEY);
-            if (saved === 'alerts' || saved === 'levels' || saved === 'scenarios') {
+            if (saved === 'overview' || saved === 'levels' || saved === 'scenarios') {
                 activeRailTab = saved;
-            } else if (saved === 'gex') {
-                // GEX is now an always-visible column, not a tab. Migrate to Alerts.
-                try { localStorage.setItem(RAIL_TAB_KEY, 'alerts'); } catch (e) {}
+            } else if (saved === 'alerts' || saved === 'gex') {
+                // Migrate older tab keys to the Overview surface.
+                try { localStorage.setItem(RAIL_TAB_KEY, 'overview'); } catch (e) {}
             }
         } catch (e) {}
         let _lastGexPanelJson = null; // retained so re-render paths (resize, uncollapse) can reuse last data
@@ -14181,7 +14316,7 @@ def index():
             document.querySelectorAll('.right-rail-panel').forEach(p => {
                 p.classList.toggle('active', p.dataset.railPanel === activeRailTab);
             });
-            if (activeRailTab === 'alerts') {
+            if (activeRailTab === 'overview') {
                 markRailAlertsSeen();
             } else {
                 _updateAlertsBadge();
@@ -14853,7 +14988,7 @@ def index():
             const badge = document.getElementById('right-rail-alerts-badge');
             if (!badge) return;
             let unread = 0;
-            if (activeRailTab !== 'alerts') {
+            if (activeRailTab !== 'overview') {
                 for (const a of _lastRailAlerts) {
                     if (!_alertsSeenKeys.has(a.text)) unread += 1;
                 }
@@ -14924,7 +15059,7 @@ def index():
                     }).join('');
                 }
             }
-            if (activeRailTab === 'alerts') {
+            if (activeRailTab === 'overview') {
                 markRailAlertsSeen();
             } else {
                 _updateAlertsBadge();
@@ -15498,6 +15633,8 @@ def index():
                 if (railTabs) railTabs.style.display = 'none';
                 const railPanels = document.getElementById('right-rail-panels');
                 if (railPanels) railPanels.style.display = 'none';
+                const flowEventLane = document.getElementById('flow-event-lane');
+                if (flowEventLane) flowEventLane.style.display = 'none';
                 tvDrawStart = null;
                 tvDrawingPreviewDef = null;
                 tvSelectedDrawingId = null;
@@ -16817,7 +16954,7 @@ def update():
                 today = current_time_est.strftime('%Y-%m-%d')
                 market_open_timestamp = int(current_time_est.replace(hour=9, minute=30, second=0, microsecond=0).timestamp())
                 
-                with closing(sqlite3.connect('options_data.db')) as conn:
+                with closing(sqlite_connect()) as conn:
                     with closing(conn.cursor()) as cursor:
                         cursor.execute('''
                             SELECT COUNT(*) FROM centroid_data 
@@ -17313,7 +17450,7 @@ def _read_token_db(db_path):
     """Read token row from the SQLite DB. Returns dict or None."""
     if not os.path.exists(db_path):
         return None
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(sqlite_connect(db_path)) as conn:
         cur = conn.cursor()
         row = cur.execute(
             "SELECT access_token_issued, refresh_token_issued, access_token FROM schwabdev"
@@ -17400,7 +17537,7 @@ def token_delete():
     if not os.path.exists(db_path):
         return jsonify({'success': False, 'error': f'Token DB not found: {db_path}'})
     try:
-        with closing(sqlite3.connect(db_path)) as conn:
+        with closing(sqlite_connect(db_path)) as conn:
             conn.execute("DELETE FROM schwabdev")
             conn.commit()
 
