@@ -3820,7 +3820,7 @@ def _current_session_date_str():
     try:
         return datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
     except Exception:
-        return datetime.utcnow().strftime('%Y-%m-%d')
+        return datetime.now(pytz.UTC).strftime('%Y-%m-%d')
 
 
 def _normalize_expiry_iso(value):
@@ -3883,6 +3883,13 @@ def build_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=0.02, top_n=6
     now_ts = time.time()
     session_date = _current_session_date_str()
     rows = []
+
+    def _sort_metric(value):
+        try:
+            numeric = float(value)
+        except Exception:
+            return 0.0
+        return numeric if np.isfinite(numeric) else 0.0
 
     def _process_df(df, option_type):
         if df is None or getattr(df, 'empty', True):
@@ -3959,9 +3966,9 @@ def build_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=0.02, top_n=6
     _process_df(puts, 'put')
     rows.sort(
         key=lambda row: (
-            row.get('score', 0.0),
-            row.get('premium_delta_1m', 0.0),
-            row.get('vol_delta_1m', 0.0),
+            _sort_metric(row.get('score')),
+            _sort_metric(row.get('premium_delta_1m')),
+            _sort_metric(row.get('vol_delta_1m')),
         ),
         reverse=True,
     )
@@ -4804,7 +4811,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         alerts.append({'level': 'info', 'text': 'Long-gamma regime — dealer hedging dampens moves'})
 
     # Stamp existing rule-based alerts with id + ts (backwards-compatible)
-    now_iso = datetime.utcnow().isoformat() + 'Z'
+    now_iso = datetime.now(pytz.UTC).isoformat().replace('+00:00', 'Z')
     for a in alerts:
         a.setdefault('id', f"{a['level']}:{hash(a['text']) & 0xffff}")
         a.setdefault('ts', now_iso)
