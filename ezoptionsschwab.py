@@ -2913,6 +2913,258 @@ def filter_market_hours(candles):
                 filtered_candles.append(candle)
     return filtered_candles
 
+
+DEFAULT_SESSION_LEVEL_CONFIG = {
+    'enabled': False,
+    'today': True,
+    'yesterday': True,
+    'premarket': True,
+    'after_hours': True,
+    'opening_range': False,
+    'initial_balance': True,
+    'show_or_mid': True,
+    'show_or_cloud': False,
+    'show_ib_mid': True,
+    'show_ib_cloud': False,
+    'show_ib_extensions': True,
+    'opening_range_minutes': 15,
+    'ib_start': '09:30',
+    'ib_end': '10:30',
+    'abbreviate_labels': True,
+    'append_price': True,
+    'today_rth_only': True,
+    'yesterday_rth_only': True,
+}
+
+
+def _coerce_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
+
+
+def _normalize_hhmm(value, default):
+    if not value:
+        return default
+    try:
+        hour_text, minute_text = str(value).split(':', 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f'{hour:02d}:{minute:02d}'
+    except Exception:
+        pass
+    return default
+
+
+def _hhmm_to_minutes(value):
+    hour_text, minute_text = str(value).split(':', 1)
+    return int(hour_text) * 60 + int(minute_text)
+
+
+def normalize_session_level_config(config=None):
+    out = dict(DEFAULT_SESSION_LEVEL_CONFIG)
+    if not isinstance(config, dict):
+        return out
+
+    bool_keys = (
+        'enabled', 'today', 'yesterday', 'premarket', 'after_hours',
+        'opening_range', 'initial_balance', 'show_or_mid',
+        'show_or_cloud', 'show_ib_mid', 'show_ib_cloud',
+        'show_ib_extensions', 'abbreviate_labels', 'append_price',
+        'today_rth_only', 'yesterday_rth_only',
+    )
+    for key in bool_keys:
+        if key in config:
+            out[key] = _coerce_bool(config.get(key), out[key])
+
+    try:
+        out['opening_range_minutes'] = max(1, min(60, int(config.get('opening_range_minutes', out['opening_range_minutes']))))
+    except Exception:
+        pass
+
+    out['ib_start'] = _normalize_hhmm(config.get('ib_start'), out['ib_start'])
+    out['ib_end'] = _normalize_hhmm(config.get('ib_end'), out['ib_end'])
+    if _hhmm_to_minutes(out['ib_end']) <= _hhmm_to_minutes(out['ib_start']):
+        out['ib_start'] = DEFAULT_SESSION_LEVEL_CONFIG['ib_start']
+        out['ib_end'] = DEFAULT_SESSION_LEVEL_CONFIG['ib_end']
+    return out
+
+
+def get_session_level_candles(ticker, lookback_days=5):
+    """Fetch raw 1-minute candles for session-level calculations."""
+    if ticker == "MARKET":
+        ticker = "$SPX"
+    elif ticker == "MARKET2":
+        ticker = "SPY"
+
+    est = datetime.now(pytz.timezone('US/Eastern'))
+    current_date = est.date()
+    lookback_days = max(2, min(int(lookback_days or 5), 10))
+    start_date = datetime.combine(current_date - timedelta(days=lookback_days + 5), datetime.min.time())
+    end_date = datetime.combine(current_date + timedelta(days=1), datetime.min.time())
+
+    response = client.price_history(
+        symbol=ticker,
+        periodType="day",
+        period=min(lookback_days, 10),
+        frequencyType="minute",
+        frequency=1,
+        startDate=int(start_date.timestamp() * 1000),
+        endDate=int(end_date.timestamp() * 1000),
+        needExtendedHoursData=True
+    )
+    if not response.ok:
+        raise Exception(f"Failed to fetch session candles: {response.status_code} {response.reason}")
+
+    data = response.json()
+    candles = filter_market_hours((data or {}).get('candles') or [])
+    candles.sort(key=lambda candle: candle['datetime'])
+    return candles
+
+
+def _build_session_level(price, short_label, full_label, group):
+    if price is None or not np.isfinite(price):
+        return None
+    return {
+        'price': round(float(price), 2),
+        'label': short_label,
+        'short_label': short_label,
+        'full_label': full_label,
+        'group': group,
+    }
+
+
+def compute_session_levels(candles_1m, *, anchor_date=None, timezone='US/Eastern', config=None):
+    cfg = normalize_session_level_config(config)
+    tz = pytz.timezone(timezone)
+    rows_by_ts = {}
+    for candle in candles_1m or []:
+        try:
+            ts_ms = int(candle['datetime'])
+            dt_et = datetime.fromtimestamp(ts_ms / 1000, tz)
+            rows_by_ts[ts_ms] = {
+                'ts_ms': ts_ms,
+                'dt': dt_et,
+                'date': dt_et.date(),
+                'minute': dt_et.hour * 60 + dt_et.minute,
+                'open': float(candle['open']),
+                'high': float(candle['high']),
+                'low': float(candle['low']),
+                'close': float(candle['close']),
+            }
+        except Exception:
+            continue
+
+    rows = [rows_by_ts[key] for key in sorted(rows_by_ts)]
+    if not rows:
+        return {
+            'meta': {
+                'anchor_date': None,
+                'timezone': timezone,
+                'overnight_supported': False,
+                'source_frequency_minutes': 1,
+            }
+        }
+
+    available_dates = sorted({row['date'] for row in rows})
+    resolved_anchor_date = anchor_date or available_dates[-1]
+    if isinstance(resolved_anchor_date, str):
+        try:
+            resolved_anchor_date = datetime.strptime(resolved_anchor_date, '%Y-%m-%d').date()
+        except Exception:
+            resolved_anchor_date = available_dates[-1]
+    if resolved_anchor_date not in available_dates:
+        resolved_anchor_date = available_dates[-1]
+
+    date_index = available_dates.index(resolved_anchor_date)
+    previous_trading_date = available_dates[date_index - 1] if date_index > 0 else None
+    latest_row = rows[-1]
+
+    def rows_for(session_date, start_minute=None, end_minute=None):
+        if not session_date:
+            return []
+        subset = [row for row in rows if row['date'] == session_date]
+        if start_minute is not None:
+            subset = [row for row in subset if row['minute'] >= start_minute]
+        if end_minute is not None:
+            subset = [row for row in subset if row['minute'] < end_minute]
+        return subset
+
+    def session_high(subset):
+        return max((row['high'] for row in subset), default=None)
+
+    def session_low(subset):
+        return min((row['low'] for row in subset), default=None)
+
+    def session_open(subset):
+        return subset[0]['open'] if subset else None
+
+    def session_close(subset):
+        return subset[-1]['close'] if subset else None
+
+    out = {}
+
+    today_start = 9 * 60 + 30 if cfg['today_rth_only'] else 4 * 60
+    today_end = 16 * 60 if cfg['today_rth_only'] else 20 * 60
+    today_rows = rows_for(resolved_anchor_date, today_start, today_end)
+    out['today_high'] = _build_session_level(session_high(today_rows), 'TDH', 'Today High', 'today')
+    out['today_low'] = _build_session_level(session_low(today_rows), 'TDL', 'Today Low', 'today')
+    out['today_open'] = _build_session_level(session_open(today_rows), 'TDO', 'Today Open', 'today')
+
+    yesterday_start = 9 * 60 + 30 if cfg['yesterday_rth_only'] else 4 * 60
+    yesterday_end = 16 * 60 if cfg['yesterday_rth_only'] else 20 * 60
+    yesterday_rows = rows_for(previous_trading_date, yesterday_start, yesterday_end)
+    out['yesterday_high'] = _build_session_level(session_high(yesterday_rows), 'YDH', 'Yesterday High', 'yesterday')
+    out['yesterday_low'] = _build_session_level(session_low(yesterday_rows), 'YDL', 'Yesterday Low', 'yesterday')
+    out['yesterday_open'] = _build_session_level(session_open(yesterday_rows), 'YDO', 'Yesterday Open', 'yesterday')
+    out['yesterday_close'] = _build_session_level(session_close(yesterday_rows), 'YDC', 'Yesterday Close', 'yesterday')
+
+    premarket_rows = rows_for(resolved_anchor_date, 4 * 60, 9 * 60 + 30)
+    out['premarket_high'] = _build_session_level(session_high(premarket_rows), 'PMH', 'Premarket High', 'premarket')
+    out['premarket_low'] = _build_session_level(session_low(premarket_rows), 'PML', 'Premarket Low', 'premarket')
+
+    after_hours_date = resolved_anchor_date if latest_row['date'] == resolved_anchor_date and latest_row['minute'] >= 16 * 60 else previous_trading_date
+    after_hours_rows = rows_for(after_hours_date, 16 * 60, 20 * 60)
+    out['after_hours_high'] = _build_session_level(session_high(after_hours_rows), 'AHH', 'After Hours High', 'after_hours')
+    out['after_hours_low'] = _build_session_level(session_low(after_hours_rows), 'AHL', 'After Hours Low', 'after_hours')
+
+    opening_range_end = 9 * 60 + 30 + int(cfg['opening_range_minutes'])
+    opening_range_rows = rows_for(resolved_anchor_date, 9 * 60 + 30, opening_range_end)
+    opening_range_high = session_high(opening_range_rows)
+    opening_range_low = session_low(opening_range_rows)
+    out['opening_range_high'] = _build_session_level(opening_range_high, 'ORH', 'Opening Range High', 'opening_range')
+    out['opening_range_low'] = _build_session_level(opening_range_low, 'ORL', 'Opening Range Low', 'opening_range')
+    if opening_range_high is not None and opening_range_low is not None:
+        out['opening_range_mid'] = _build_session_level((opening_range_high + opening_range_low) / 2.0, 'ORM', 'Opening Range Mid', 'opening_range')
+
+    ib_start = _hhmm_to_minutes(cfg['ib_start'])
+    ib_end = _hhmm_to_minutes(cfg['ib_end'])
+    ib_rows = rows_for(resolved_anchor_date, ib_start, ib_end)
+    ib_high = session_high(ib_rows)
+    ib_low = session_low(ib_rows)
+    if ib_high is not None and ib_low is not None:
+        ib_range = ib_high - ib_low
+        out['ib_high'] = _build_session_level(ib_high, 'IBH', 'Initial Balance High', 'initial_balance')
+        out['ib_low'] = _build_session_level(ib_low, 'IBL', 'Initial Balance Low', 'initial_balance')
+        out['ib_mid'] = _build_session_level((ib_high + ib_low) / 2.0, 'IBM', 'Initial Balance Mid', 'initial_balance')
+        out['ib_high_x2'] = _build_session_level(ib_high + ib_range, 'IBHx2', 'Initial Balance High x2', 'initial_balance_ext')
+        out['ib_low_x2'] = _build_session_level(ib_low - ib_range, 'IBLx2', 'Initial Balance Low x2', 'initial_balance_ext')
+        out['ib_high_x3'] = _build_session_level(ib_high + (2 * ib_range), 'IBHx3', 'Initial Balance High x3', 'initial_balance_ext')
+        out['ib_low_x3'] = _build_session_level(ib_low - (2 * ib_range), 'IBLx3', 'Initial Balance Low x3', 'initial_balance_ext')
+
+    out['meta'] = {
+        'anchor_date': resolved_anchor_date.isoformat() if hasattr(resolved_anchor_date, 'isoformat') else str(resolved_anchor_date),
+        'timezone': timezone,
+        'overnight_supported': False,
+        'source_frequency_minutes': 1,
+    }
+    return out
+
 def convert_to_heikin_ashi(candles):
     """Convert regular OHLC candles to Heikin-Ashi candles"""
     if not candles:
@@ -8765,6 +9017,18 @@ def index():
             z-index: 2;
             pointer-events: none;
         }
+        .tv-session-cloud-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 3;
+            pointer-events: none;
+            overflow: hidden;
+        }
+        .tv-session-cloud-overlay svg {
+            width: 100%;
+            height: 100%;
+            overflow: visible;
+        }
         .tv-drawing-overlay {
             position: absolute;
             inset: 0;
@@ -9425,6 +9689,9 @@ def index():
         .indicator-modal {
             max-width: 640px;
         }
+        .price-level-modal {
+            max-width: 760px;
+        }
         .indicator-modal-head,
         .indicator-modal-row {
             display: grid;
@@ -9445,6 +9712,19 @@ def index():
             display: flex;
             flex-direction: column;
             gap: 8px;
+        }
+        .price-level-modal .indicator-modal-grid {
+            max-height: min(68vh, 720px);
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+        .price-level-modal-sep {
+            padding: 12px 0 4px;
+            border-top: 1px solid var(--border);
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
         }
         .indicator-modal-row {
             padding: 10px 0;
@@ -9953,6 +10233,79 @@ def index():
                         </div>
                     </div>
                 </details>
+                <details class="drawer-section">
+                    <summary>Session Levels</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="session_levels_enabled">
+                            <label for="session_levels_enabled">Show Session Levels</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_today">
+                            <label for="session_today">Today RTH (TDH / TDL / TDO)</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_yesterday">
+                            <label for="session_yesterday">Yesterday RTH (YDH / YDL / YDO / YDC)</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_premarket">
+                            <label for="session_premarket">Premarket (PMH / PML)</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_after_hours">
+                            <label for="session_after_hours">After Hours (AHH / AHL)</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_opening_range">
+                            <label for="session_opening_range">Opening Range (ORH / ORL / ORM)</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="session_opening_range_minutes">Opening Range Minutes:</label>
+                            <input type="number" id="session_opening_range_minutes" min="1" max="60" value="15" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_show_or_mid">
+                            <label for="session_show_or_mid">Show ORM (50%)</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_show_or_cloud">
+                            <label for="session_show_or_cloud">Opening Range Cloud</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_initial_balance">
+                            <label for="session_initial_balance">Initial Balance</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_show_ib_mid">
+                            <label for="session_show_ib_mid">Show IBM (50%)</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_show_ib_cloud">
+                            <label for="session_show_ib_cloud">Initial Balance Cloud</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_show_ib_extensions">
+                            <label for="session_show_ib_extensions">Show IB Extensions</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="session_ib_start">IB Start:</label>
+                            <input type="time" id="session_ib_start" value="09:30">
+                        </div>
+                        <div class="control-group">
+                            <label for="session_ib_end">IB End:</label>
+                            <input type="time" id="session_ib_end" value="10:30">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_abbreviate_labels">
+                            <label for="session_abbreviate_labels">Abbreviate Labels</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="session_append_price">
+                            <label for="session_append_price">Append Price To Labels</label>
+                        </div>
+                    </div>
+                </details>
                 <details class="drawer-section" open>
                     <summary>Alerts</summary>
                     <div class="drawer-content">
@@ -10027,6 +10380,20 @@ def index():
             <div class="indicator-modal-grid" id="indicator-settings-grid"></div>
             <div class="modal-actions">
                 <button id="indicatorModalClose" class="btn-ghost">Done</button>
+            </div>
+        </dialog>
+        <dialog class="settings-modal indicator-modal price-level-modal" id="price-level-settings-modal">
+            <h3>Key Level Styles</h3>
+            <div class="indicator-modal-head">
+                <span>Level</span>
+                <span>Show</span>
+                <span>Color</span>
+                <span>Width</span>
+                <span>Style</span>
+            </div>
+            <div class="indicator-modal-grid" id="price-level-settings-grid"></div>
+            <div class="modal-actions">
+                <button id="priceLevelModalClose" class="btn-ghost">Done</button>
             </div>
         </dialog>
         
@@ -10341,6 +10708,64 @@ def index():
             bb:     { color: '#64b4ff', lineWidth: 1, lineStyle: 'solid' }
         };
         let tvIndicatorPrefs = {};
+        const PRICE_LEVEL_GROUPS = [
+            {
+                label: 'Dealer Flow',
+                keys: ['call_wall', 'put_wall', 'gamma_flip', 'em_upper', 'em_lower']
+            },
+            {
+                label: 'Dealer Flow Secondary',
+                keys: ['call_wall_2', 'put_wall_2', 'hvl', 'max_positive_gex', 'max_negative_gex', 'em_upper_2', 'em_lower_2']
+            },
+            {
+                label: 'Session Levels',
+                keys: [
+                    'today_high', 'today_low', 'today_open',
+                    'yesterday_high', 'yesterday_low', 'yesterday_open', 'yesterday_close',
+                    'premarket_high', 'premarket_low',
+                    'after_hours_high', 'after_hours_low',
+                    'opening_range_high', 'opening_range_low', 'opening_range_mid',
+                    'ib_high', 'ib_low', 'ib_mid',
+                    'ib_high_x2', 'ib_low_x2', 'ib_high_x3', 'ib_low_x3'
+                ]
+            }
+        ];
+        const DEFAULT_PRICE_LEVEL_PREFS = {
+            call_wall: { label: 'Call Wall', visible: true, color: '#10B981', lineWidth: 2, lineStyle: 'solid' },
+            put_wall: { label: 'Put Wall', visible: true, color: '#EF4444', lineWidth: 2, lineStyle: 'solid' },
+            gamma_flip: { label: 'Gamma Flip', visible: true, color: '#F59E0B', lineWidth: 2, lineStyle: 'dashed' },
+            em_upper: { label: '+1σ EM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
+            em_lower: { label: '-1σ EM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
+            call_wall_2: { label: 'Call Wall 2', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dashed' },
+            put_wall_2: { label: 'Put Wall 2', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dashed' },
+            hvl: { label: 'HVL', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
+            max_positive_gex: { label: 'Max +GEX', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'large-dashed' },
+            max_negative_gex: { label: 'Max -GEX', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'large-dashed' },
+            em_upper_2: { label: '+2σ EM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
+            em_lower_2: { label: '-2σ EM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
+            today_high: { label: 'TDH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'solid' },
+            today_low: { label: 'TDL', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'solid' },
+            today_open: { label: 'TDO', visible: true, color: '#F59E0B', lineWidth: 1, lineStyle: 'dashed' },
+            yesterday_high: { label: 'YDH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'solid' },
+            yesterday_low: { label: 'YDL', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'solid' },
+            yesterday_open: { label: 'YDO', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dashed' },
+            yesterday_close: { label: 'YDC', visible: true, color: '#9CA3AF', lineWidth: 3, lineStyle: 'solid' },
+            premarket_high: { label: 'PMH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dotted' },
+            premarket_low: { label: 'PML', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dotted' },
+            after_hours_high: { label: 'AHH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dashed' },
+            after_hours_low: { label: 'AHL', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dashed' },
+            opening_range_high: { label: 'ORH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'solid' },
+            opening_range_low: { label: 'ORL', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'solid' },
+            opening_range_mid: { label: 'ORM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
+            ib_high: { label: 'IBH', visible: true, color: '#10B981', lineWidth: 2, lineStyle: 'solid' },
+            ib_low: { label: 'IBL', visible: true, color: '#EF4444', lineWidth: 2, lineStyle: 'solid' },
+            ib_mid: { label: 'IBM', visible: true, color: '#F59E0B', lineWidth: 1, lineStyle: 'dotted' },
+            ib_high_x2: { label: 'IBHx2', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dotted' },
+            ib_low_x2: { label: 'IBLx2', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dotted' },
+            ib_high_x3: { label: 'IBHx3', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dotted' },
+            ib_low_x3: { label: 'IBLx3', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dotted' },
+        };
+        let priceLevelPrefs = {};
         // Auto-range: when true, chart fits all data on every update; when false, zoom/pan is preserved
         let tvAutoRange = false;
         // Time-scale sync state
@@ -10353,6 +10778,7 @@ def index():
         let tvDrawingScopeKey = '';
         let tvSelectedDrawingId = null;
         let tvDrawingOverlayPending = false;
+        let tvSessionCloudOverlayPending = false;
         let tvDrawingIdCounter = 0;
         let tvLastCandles = [];         // current-day display candles (for streaming OHLCV updates)
         let tvIndicatorCandles = [];    // multi-day candles for indicator warmup (SMA200, EMA, etc.)
@@ -10369,13 +10795,19 @@ def index():
         let tvExposurePriceLines = [];
         let tvExpectedMovePriceLines = [];
         let tvKeyLevelLines = [];
+        let tvSessionLevelLines = [];
         let tvTopOILines   = [];
         let tvUserHLinePriceLines = new Map();
         let _lastTopOI     = null;
         let _lastTopOIContextKey = '';
         let _lastKeyLevels     = null;
+        let _lastSessionLevels = null;
+        let _lastSessionLevelsMeta = null;
         let _lastKeyLevels0dte = null;
         let _lastStats0dte     = null;
+        let tvKeyLevelPrices = [];
+        let tvSessionLevelPrices = [];
+        let tvTopOIPrices = [];
         let gexScope = (() => { try { return localStorage.getItem('gexScope') || 'all'; } catch(e) { return 'all'; } })();
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
@@ -10428,6 +10860,7 @@ def index():
         const TIMEFRAME_STORAGE_KEY = 'gex.selectedTimeframe';
         const TV_DRAWING_STORE_KEY = 'gex.tvDrawingStore.v2';
         const TV_INDICATOR_STATE_KEY = 'gex.tvIndicatorState.v1';
+        const PRICE_LEVEL_PREFS_KEY = 'gex.priceLevelPrefs.v1';
         const STRIKE_RAIL_CHART_IDS = ['gamma', 'delta', 'vanna', 'charm', 'open_interest', 'options_volume', 'premium'];
         const STRIKE_RAIL_LABELS = {
             gex: 'GEX',
@@ -10540,6 +10973,162 @@ def index():
             if (el) el.classList.toggle('compact', !dealerImpactVerbose);
             if (!persist) return;
             try { localStorage.setItem(DEALER_DETAIL_KEY, dealerImpactVerbose ? '1' : '0'); } catch (e) {}
+        }
+
+        const DEFAULT_SESSION_LEVEL_SETTINGS = {
+            enabled: false,
+            today: true,
+            yesterday: true,
+            premarket: true,
+            after_hours: true,
+            opening_range: false,
+            initial_balance: true,
+            show_or_mid: true,
+            show_or_cloud: false,
+            show_ib_mid: true,
+            show_ib_cloud: false,
+            show_ib_extensions: true,
+            opening_range_minutes: 15,
+            ib_start: '09:30',
+            ib_end: '10:30',
+            abbreviate_labels: true,
+            append_price: true,
+        };
+
+        function normalizeSessionLevelSettings(raw = {}) {
+            const base = Object.assign({}, DEFAULT_SESSION_LEVEL_SETTINGS, raw || {});
+            const timeToMinutes = value => {
+                const match = String(value || '').match(/^(\d{2}):(\d{2})$/);
+                if (!match) return null;
+                return (parseInt(match[1], 10) * 60) + parseInt(match[2], 10);
+            };
+            const settings = {
+                enabled: !!base.enabled,
+                today: !!base.today,
+                yesterday: !!base.yesterday,
+                premarket: !!base.premarket,
+                after_hours: !!base.after_hours,
+                opening_range: !!base.opening_range,
+                initial_balance: !!base.initial_balance,
+                show_or_mid: !!base.show_or_mid,
+                show_or_cloud: !!base.show_or_cloud,
+                show_ib_mid: !!base.show_ib_mid,
+                show_ib_cloud: !!base.show_ib_cloud,
+                show_ib_extensions: !!base.show_ib_extensions,
+                opening_range_minutes: Math.max(1, Math.min(60, parseInt(base.opening_range_minutes, 10) || DEFAULT_SESSION_LEVEL_SETTINGS.opening_range_minutes)),
+                ib_start: /^\d{2}:\d{2}$/.test(String(base.ib_start || '')) ? String(base.ib_start) : DEFAULT_SESSION_LEVEL_SETTINGS.ib_start,
+                ib_end: /^\d{2}:\d{2}$/.test(String(base.ib_end || '')) ? String(base.ib_end) : DEFAULT_SESSION_LEVEL_SETTINGS.ib_end,
+                abbreviate_labels: !!base.abbreviate_labels,
+                append_price: !!base.append_price,
+            };
+            if ((timeToMinutes(settings.ib_end) ?? 0) <= (timeToMinutes(settings.ib_start) ?? 0)) {
+                settings.ib_start = DEFAULT_SESSION_LEVEL_SETTINGS.ib_start;
+                settings.ib_end = DEFAULT_SESSION_LEVEL_SETTINGS.ib_end;
+            }
+            return settings;
+        }
+
+        function getSessionLevelSettingsFromDom() {
+            const readChecked = (id, fallback) => {
+                const el = document.getElementById(id);
+                return el ? !!el.checked : fallback;
+            };
+            const readValue = (id, fallback) => {
+                const el = document.getElementById(id);
+                return el ? el.value : fallback;
+            };
+            return normalizeSessionLevelSettings({
+                enabled: readChecked('session_levels_enabled', DEFAULT_SESSION_LEVEL_SETTINGS.enabled),
+                today: readChecked('session_today', DEFAULT_SESSION_LEVEL_SETTINGS.today),
+                yesterday: readChecked('session_yesterday', DEFAULT_SESSION_LEVEL_SETTINGS.yesterday),
+                premarket: readChecked('session_premarket', DEFAULT_SESSION_LEVEL_SETTINGS.premarket),
+                after_hours: readChecked('session_after_hours', DEFAULT_SESSION_LEVEL_SETTINGS.after_hours),
+                opening_range: readChecked('session_opening_range', DEFAULT_SESSION_LEVEL_SETTINGS.opening_range),
+                initial_balance: readChecked('session_initial_balance', DEFAULT_SESSION_LEVEL_SETTINGS.initial_balance),
+                show_or_mid: readChecked('session_show_or_mid', DEFAULT_SESSION_LEVEL_SETTINGS.show_or_mid),
+                show_or_cloud: readChecked('session_show_or_cloud', DEFAULT_SESSION_LEVEL_SETTINGS.show_or_cloud),
+                show_ib_mid: readChecked('session_show_ib_mid', DEFAULT_SESSION_LEVEL_SETTINGS.show_ib_mid),
+                show_ib_cloud: readChecked('session_show_ib_cloud', DEFAULT_SESSION_LEVEL_SETTINGS.show_ib_cloud),
+                show_ib_extensions: readChecked('session_show_ib_extensions', DEFAULT_SESSION_LEVEL_SETTINGS.show_ib_extensions),
+                opening_range_minutes: readValue('session_opening_range_minutes', DEFAULT_SESSION_LEVEL_SETTINGS.opening_range_minutes),
+                ib_start: readValue('session_ib_start', DEFAULT_SESSION_LEVEL_SETTINGS.ib_start),
+                ib_end: readValue('session_ib_end', DEFAULT_SESSION_LEVEL_SETTINGS.ib_end),
+                abbreviate_labels: readChecked('session_abbreviate_labels', DEFAULT_SESSION_LEVEL_SETTINGS.abbreviate_labels),
+                append_price: readChecked('session_append_price', DEFAULT_SESSION_LEVEL_SETTINGS.append_price),
+            });
+        }
+
+        function applySessionLevelSettingsToDom(raw = {}) {
+            const settings = normalizeSessionLevelSettings(raw);
+            const setChecked = (id, value) => {
+                const el = document.getElementById(id);
+                if (el) el.checked = !!value;
+            };
+            const setValue = (id, value) => {
+                const el = document.getElementById(id);
+                if (el) el.value = value;
+            };
+            setChecked('session_levels_enabled', settings.enabled);
+            setChecked('session_today', settings.today);
+            setChecked('session_yesterday', settings.yesterday);
+            setChecked('session_premarket', settings.premarket);
+            setChecked('session_after_hours', settings.after_hours);
+            setChecked('session_opening_range', settings.opening_range);
+            setChecked('session_initial_balance', settings.initial_balance);
+            setChecked('session_show_or_mid', settings.show_or_mid);
+            setChecked('session_show_or_cloud', settings.show_or_cloud);
+            setChecked('session_show_ib_mid', settings.show_ib_mid);
+            setChecked('session_show_ib_cloud', settings.show_ib_cloud);
+            setChecked('session_show_ib_extensions', settings.show_ib_extensions);
+            setValue('session_opening_range_minutes', settings.opening_range_minutes);
+            setValue('session_ib_start', settings.ib_start);
+            setValue('session_ib_end', settings.ib_end);
+            setChecked('session_abbreviate_labels', settings.abbreviate_labels);
+            setChecked('session_append_price', settings.append_price);
+            syncSessionLevelToolbarButton();
+            return settings;
+        }
+
+        function syncSessionLevelToolbarButton() {
+            const settings = getSessionLevelSettingsFromDom();
+            document.querySelectorAll('[data-session-toggle]').forEach(btn => {
+                btn.classList.toggle('active', settings.enabled);
+            });
+        }
+
+        function wireSessionLevelControls() {
+            const ids = [
+                'session_levels_enabled',
+                'session_today',
+                'session_yesterday',
+                'session_premarket',
+                'session_after_hours',
+                'session_opening_range',
+                'session_initial_balance',
+                'session_show_or_mid',
+                'session_show_or_cloud',
+                'session_show_ib_mid',
+                'session_show_ib_cloud',
+                'session_show_ib_extensions',
+                'session_opening_range_minutes',
+                'session_ib_start',
+                'session_ib_end',
+                'session_abbreviate_labels',
+                'session_append_price',
+            ];
+            ids.forEach(id => {
+                const el = document.getElementById(id);
+                if (!el || el.__sessionLevelsWired) return;
+                el.__sessionLevelsWired = true;
+                el.addEventListener('change', () => {
+                    syncSessionLevelToolbarButton();
+                    renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+                    if (getSessionLevelSettingsFromDom().enabled) {
+                        _priceHistoryLastKey = '';
+                        fetchPriceHistory(true);
+                    }
+                });
+            });
         }
 
         function getPersistedTimeframe() {
@@ -11772,7 +12361,14 @@ def index():
                 // Reset symbol-scoped overlay caches
                 _lastTopOI = null;
                 _lastTopOIContextKey = '';
+                _lastKeyLevels = null;
+                _lastKeyLevels0dte = null;
+                _lastSessionLevels = null;
+                _lastSessionLevelsMeta = null;
+                _lastStats0dte = null;
                 clearTopOILines();
+                clearKeyLevels();
+                clearSessionLevels();
                 // Reset zoom on the next render
                 tvLastCandles = [];
                 tvIndicatorCandles = [];
@@ -12065,6 +12661,45 @@ def index():
             return defaults;
         }
 
+        function getDefaultPriceLevelPrefs() {
+            return Object.fromEntries(
+                Object.entries(DEFAULT_PRICE_LEVEL_PREFS).map(([key, pref]) => [key, { ...pref }])
+            );
+        }
+
+        function normalizePriceLevelColor(color, fallback) {
+            const value = String(color || '').trim();
+            return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+        }
+
+        function normalizePriceLevelLineWidth(width, fallback = 1) {
+            const value = Number(width);
+            if (!Number.isFinite(value)) return fallback;
+            return Math.max(1, Math.min(4, Math.round(value)));
+        }
+
+        function normalizePriceLevelLineStyle(style, fallback = 'solid') {
+            const value = String(style || '').trim().toLowerCase();
+            return ['solid', 'dashed', 'dotted', 'large-dashed'].includes(value) ? value : fallback;
+        }
+
+        function normalizePriceLevelPrefMap(prefs) {
+            const defaults = getDefaultPriceLevelPrefs();
+            const source = prefs && typeof prefs === 'object' ? prefs : {};
+            Object.keys(defaults).forEach(key => {
+                const base = defaults[key];
+                const next = source[key] && typeof source[key] === 'object' ? source[key] : {};
+                defaults[key] = {
+                    label: base.label,
+                    visible: next.visible === undefined ? base.visible : !!next.visible,
+                    color: normalizePriceLevelColor(next.color, base.color),
+                    lineWidth: normalizePriceLevelLineWidth(next.lineWidth, base.lineWidth),
+                    lineStyle: normalizePriceLevelLineStyle(next.lineStyle, base.lineStyle),
+                };
+            });
+            return defaults;
+        }
+
         function normalizeTVIndicatorActiveKeys(keys) {
             const validKeys = new Set(TV_INDICATOR_DEFS.map(def => def.key));
             const list = Array.isArray(keys) ? keys : [];
@@ -12100,6 +12735,29 @@ def index():
             if (!persisted) return false;
             tvActiveInds = new Set(persisted.active);
             tvIndicatorPrefs = persisted.prefs;
+            return true;
+        }
+
+        function readPersistedPriceLevelPrefs() {
+            try {
+                const raw = localStorage.getItem(PRICE_LEVEL_PREFS_KEY);
+                if (!raw) return null;
+                return normalizePriceLevelPrefMap(JSON.parse(raw));
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function persistPriceLevelPrefs() {
+            try {
+                localStorage.setItem(PRICE_LEVEL_PREFS_KEY, JSON.stringify(normalizePriceLevelPrefMap(priceLevelPrefs)));
+            } catch (e) {}
+        }
+
+        function hydratePriceLevelPrefsFromLocalStorage() {
+            const persisted = readPersistedPriceLevelPrefs();
+            if (!persisted) return false;
+            priceLevelPrefs = persisted;
             return true;
         }
 
@@ -12196,7 +12854,18 @@ def index():
             return tvIndicatorPrefs[key] || null;
         }
 
+        function getPriceLevelPref(key) {
+            if (!priceLevelPrefs || typeof priceLevelPrefs !== 'object') {
+                priceLevelPrefs = getDefaultPriceLevelPrefs();
+            }
+            if (!priceLevelPrefs[key] && DEFAULT_PRICE_LEVEL_PREFS[key]) {
+                priceLevelPrefs[key] = { ...DEFAULT_PRICE_LEVEL_PREFS[key] };
+            }
+            return priceLevelPrefs[key] || null;
+        }
+
         function tvIndicatorLineStyleValue(style) {
+            if (style === 'large-dashed') return LightweightCharts.LineStyle.LargeDashed;
             if (style === 'dashed') return LightweightCharts.LineStyle.Dashed;
             if (style === 'dotted') return LightweightCharts.LineStyle.Dotted;
             return LightweightCharts.LineStyle.Solid;
@@ -12262,6 +12931,19 @@ def index():
             })[key];
             persistTVIndicatorState();
             reapplyTVIndicators();
+        }
+
+        function updatePriceLevelPref(key, patch) {
+            const current = getPriceLevelPref(key);
+            if (!current) return;
+            priceLevelPrefs[key] = normalizePriceLevelPrefMap({
+                ...priceLevelPrefs,
+                [key]: { ...current, ...(patch || {}) },
+            })[key];
+            persistPriceLevelPrefs();
+            renderKeyLevels(getScopedKeyLevels());
+            renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+            scheduleSessionLevelCloudDraw();
         }
 
         // ── Apply/remove indicators on existing chart ─────────────────────────
@@ -12493,6 +13175,74 @@ def index():
             if (tvIndicatorEditorTargetKey) {
                 requestAnimationFrame(() => focusTVIndicatorEditorKey(tvIndicatorEditorTargetKey));
             }
+        }
+
+        function renderPriceLevelEditor() {
+            const grid = document.getElementById('price-level-settings-grid');
+            if (!grid) return;
+            const widthOptions = [1, 2, 3, 4].map(value =>
+                `<option value="${value}">${value}px</option>`
+            ).join('');
+            const styleOptions = [
+                ['solid', 'Solid'],
+                ['dashed', 'Dashed'],
+                ['large-dashed', 'Long Dash'],
+                ['dotted', 'Dotted'],
+            ].map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+            grid.innerHTML = PRICE_LEVEL_GROUPS.map(group => {
+                const rows = group.keys.map(key => {
+                    const pref = getPriceLevelPref(key);
+                    if (!pref) return '';
+                    return (
+                        `<div class="indicator-modal-row" data-price-level-row="${key}">` +
+                            `<div class="indicator-modal-name">` +
+                                `<span class="indicator-modal-swatch" style="background:${pref.color}"></span>` +
+                                `<label for="price-level-visible-${key}">${pref.label}</label>` +
+                            `</div>` +
+                            `<div class="indicator-modal-toggle">` +
+                                `<input type="checkbox" id="price-level-visible-${key}" data-price-level-visible="${key}" ${pref.visible ? 'checked' : ''}>` +
+                            `</div>` +
+                            `<input type="color" value="${pref.color}" data-price-level-color="${key}" aria-label="${pref.label} color">` +
+                            `<select data-price-level-width="${key}" aria-label="${pref.label} line width">${widthOptions}</select>` +
+                            `<select data-price-level-style="${key}" aria-label="${pref.label} line style">${styleOptions}</select>` +
+                        `</div>`
+                    );
+                }).join('');
+                return `<div class="price-level-modal-sep">${group.label}</div>${rows}`;
+            }).join('');
+            Object.keys(DEFAULT_PRICE_LEVEL_PREFS).forEach(key => {
+                const pref = getPriceLevelPref(key);
+                const widthEl = grid.querySelector(`[data-price-level-width="${key}"]`);
+                const styleEl = grid.querySelector(`[data-price-level-style="${key}"]`);
+                if (widthEl) widthEl.value = String(pref.lineWidth);
+                if (styleEl) styleEl.value = pref.lineStyle;
+            });
+            grid.querySelectorAll('[data-price-level-visible]').forEach(input => {
+                input.addEventListener('change', () => updatePriceLevelPref(input.dataset.priceLevelVisible, { visible: input.checked }));
+            });
+            grid.querySelectorAll('[data-price-level-color]').forEach(input => {
+                input.addEventListener('input', () => {
+                    const row = input.closest('[data-price-level-row]');
+                    const swatch = row && row.querySelector('.indicator-modal-swatch');
+                    if (swatch) swatch.style.background = input.value;
+                    updatePriceLevelPref(input.dataset.priceLevelColor, { color: input.value });
+                });
+            });
+            grid.querySelectorAll('[data-price-level-width]').forEach(select => {
+                select.addEventListener('change', () => updatePriceLevelPref(select.dataset.priceLevelWidth, { lineWidth: Number(select.value) }));
+            });
+            grid.querySelectorAll('[data-price-level-style]').forEach(select => {
+                select.addEventListener('change', () => updatePriceLevelPref(select.dataset.priceLevelStyle, { lineStyle: select.value }));
+            });
+        }
+
+        function openPriceLevelEditor() {
+            const modal = document.getElementById('price-level-settings-modal');
+            if (!modal) return;
+            renderPriceLevelEditor();
+            if (modal.open) return;
+            if (modal.showModal) modal.showModal();
+            else modal.setAttribute('open', '');
         }
 
         // ── Sub-pane chart helper functions ──────────────────────────────────
@@ -12752,18 +13502,7 @@ def index():
         }
 
         function tvRefreshDrawingLevels() {
-            tvAllLevelPrices = tvHistoricalPoints.map(point => point.price);
-            tvDrawingDefs.forEach(def => {
-                if (!def) return;
-                if (def.type === 'hline' || def.type === 'text') {
-                    tvAllLevelPrices.push(def.price);
-                } else if (def.type === 'trendline') {
-                    tvAllLevelPrices.push(def.p1, def.p2);
-                } else if (def.type === 'rect') {
-                    tvAllLevelPrices.push(def.top, def.bot);
-                }
-            });
-            tvApplyAutoscale();
+            tvRefreshOverlayLevelPrices();
         }
 
         function tvDrawingDashArray(def) {
@@ -13105,6 +13844,132 @@ def index():
                 container.appendChild(overlay);
             }
             return overlay;
+        }
+
+        function scheduleSessionLevelCloudDraw() {
+            if (tvSessionCloudOverlayPending) return;
+            tvSessionCloudOverlayPending = true;
+            requestAnimationFrame(() => {
+                tvSessionCloudOverlayPending = false;
+                drawSessionLevelClouds();
+            });
+        }
+
+        function ensureSessionLevelCloudOverlay() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let overlay = container.querySelector('.tv-session-cloud-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.className = 'tv-session-cloud-overlay';
+                overlay.innerHTML = '<svg class="tv-session-cloud-svg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>';
+                const drawingOverlay = container.querySelector('.tv-drawing-overlay');
+                if (drawingOverlay) container.insertBefore(overlay, drawingOverlay);
+                else container.appendChild(overlay);
+            }
+            return overlay;
+        }
+
+        function appendSessionLevelCloud(svg, options = {}) {
+            if (!svg || !tvCandleSeries) return;
+            const topPrice = Number(options.topPrice);
+            const bottomPrice = Number(options.bottomPrice);
+            if (!Number.isFinite(topPrice) || !Number.isFinite(bottomPrice)) return;
+            const yTopRaw = tvCandleSeries.priceToCoordinate(Math.max(topPrice, bottomPrice));
+            const yBotRaw = tvCandleSeries.priceToCoordinate(Math.min(topPrice, bottomPrice));
+            if ([yTopRaw, yBotRaw].some(v => v == null || Number.isNaN(v))) return;
+            const width = Math.max(0, Number(options.width) || 0);
+            const y = Math.min(yTopRaw, yBotRaw);
+            const h = Math.max(1, Math.abs(yBotRaw - yTopRaw));
+            if (!width || !h) return;
+            const gradientId = `session-cloud-${options.key || 'range'}`;
+            const defs = createSvgEl('defs');
+            const gradient = createSvgEl('linearGradient', {
+                id: gradientId,
+                x1: 0,
+                y1: y,
+                x2: 0,
+                y2: y + h,
+                gradientUnits: 'userSpaceOnUse',
+            });
+            gradient.appendChild(createSvgEl('stop', {
+                offset: '0%',
+                'stop-color': options.topColor || '#10B981',
+                'stop-opacity': options.opacityTop || 0.12,
+            }));
+            gradient.appendChild(createSvgEl('stop', {
+                offset: '100%',
+                'stop-color': options.bottomColor || '#EF4444',
+                'stop-opacity': options.opacityBottom || 0.10,
+            }));
+            defs.appendChild(gradient);
+            svg.appendChild(defs);
+            svg.appendChild(createSvgEl('rect', {
+                x: 0,
+                y,
+                width,
+                height: h,
+                fill: `url(#${gradientId})`,
+                stroke: options.stroke || 'rgba(255,255,255,0.08)',
+                'stroke-width': 1,
+            }));
+        }
+
+        function drawSessionLevelClouds() {
+            const overlay = ensureSessionLevelCloudOverlay();
+            if (!overlay) return;
+            const svg = overlay.querySelector('svg');
+            if (!svg) return;
+            const width = Math.max(0, overlay.clientWidth);
+            const height = Math.max(0, overlay.clientHeight);
+            svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+            svg.replaceChildren();
+            const settings = normalizeSessionLevelSettings(getSessionLevelSettingsFromDom());
+            const levels = _lastSessionLevels;
+            if (!settings.enabled || !levels || !tvCandleSeries || !width || !height) {
+                overlay.style.display = 'none';
+                return;
+            }
+            let visible = 0;
+            if (settings.opening_range && settings.show_or_cloud) {
+                const highPref = getPriceLevelPref('opening_range_high');
+                const lowPref = getPriceLevelPref('opening_range_low');
+                const high = levels.opening_range_high && levels.opening_range_high.price;
+                const low = levels.opening_range_low && levels.opening_range_low.price;
+                if (Number.isFinite(high) && Number.isFinite(low)) {
+                    appendSessionLevelCloud(svg, {
+                        key: 'or',
+                        width,
+                        topPrice: high,
+                        bottomPrice: low,
+                        topColor: (highPref && highPref.color) || '#10B981',
+                        bottomColor: (lowPref && lowPref.color) || '#EF4444',
+                        opacityTop: 0.12,
+                        opacityBottom: 0.10,
+                    });
+                    visible += 1;
+                }
+            }
+            if (settings.initial_balance && settings.show_ib_cloud) {
+                const highPref = getPriceLevelPref('ib_high');
+                const lowPref = getPriceLevelPref('ib_low');
+                const high = levels.ib_high && levels.ib_high.price;
+                const low = levels.ib_low && levels.ib_low.price;
+                if (Number.isFinite(high) && Number.isFinite(low)) {
+                    appendSessionLevelCloud(svg, {
+                        key: 'ib',
+                        width,
+                        topPrice: high,
+                        bottomPrice: low,
+                        topColor: (highPref && highPref.color) || '#10B981',
+                        bottomColor: (lowPref && lowPref.color) || '#EF4444',
+                        opacityTop: 0.10,
+                        opacityBottom: 0.09,
+                    });
+                    visible += 1;
+                }
+            }
+            overlay.style.display = visible > 0 ? 'block' : 'none';
         }
 
         function ensureTVDrawingEditor() {
@@ -13919,6 +14784,19 @@ def index():
             }
 
             // Indicator toggles
+            const sessionBtn = btn('Sess Lvls', 'Session levels and Initial Balance', () => {
+                const next = !getSessionLevelSettingsFromDom().enabled;
+                applySessionLevelSettingsToDom(Object.assign({}, getSessionLevelSettingsFromDom(), { enabled: next }));
+                renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+                if (next) {
+                    _priceHistoryLastKey = '';
+                    fetchPriceHistory(true);
+                }
+            });
+            sessionBtn.dataset.sessionToggle = 'session_levels';
+            if (getSessionLevelSettingsFromDom().enabled) sessionBtn.classList.add('active');
+            addToGroup(indicatorsGroup, sessionBtn);
+
             TV_INDICATOR_DEFS.forEach(def => {
                 const b = btn(def.label, def.title, () => {
                     setTVIndicatorEnabled(def.key, !tvActiveInds.has(def.key));
@@ -13963,6 +14841,7 @@ def index():
             addToGroup(actionsGroup, btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
             addToGroup(actionsGroup, btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
             addToGroup(actionsGroup, btn('Indicators', 'Edit built-in indicator styles', openTVIndicatorEditor));
+            addToGroup(actionsGroup, btn('Levels', 'Edit key/session level visibility and styles', openPriceLevelEditor));
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
@@ -14403,18 +15282,20 @@ def index():
                 // Toolbar + title (only built once)
                 buildTVToolbar(container, candles, upColor, downColor);
                 ensureTVDrawingOverlay();
+                ensureSessionLevelCloudOverlay();
                 ensureTVDrawingEditor();
                 ensureTVHistoricalOverlay();
                 tvPriceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+                    scheduleSessionLevelCloudDraw();
                     scheduleTVDrawingOverlayDraw();
                     scheduleTVHistoricalOverlayDraw();
                     scheduleGexPanelSync();
                 });
                 if (!tvHistoricalOverlayDomEventsBound) {
                     tvHistoricalOverlayDomEventsBound = true;
-                    container.addEventListener('wheel',    () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
-                    container.addEventListener('mouseup',  () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); });
-                    container.addEventListener('touchend', () => { scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
+                    container.addEventListener('wheel',    () => { scheduleSessionLevelCloudDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
+                    container.addEventListener('mouseup',  () => { scheduleSessionLevelCloudDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); });
+                    container.addEventListener('touchend', () => { scheduleSessionLevelCloudDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
                     container.addEventListener('mousemove', (event) => updateTVHistoricalTooltip(event));
                     container.addEventListener('mouseleave', () => {
                         if (tvDrawMode) clearTVDrawingPreview();
@@ -14501,11 +15382,14 @@ def index():
             tvExpectedMovePriceLines = [];
             clearTVHistoricalExpectedMoveSeries();
 
-            tvAllLevelPrices = [];
             tvHistoricalPoints = priceData.historical_exposure_levels || [];
             tvRestoreDrawings();
+            scheduleSessionLevelCloudDraw();
             scheduleTVHistoricalOverlayDraw();
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
+            renderKeyLevels(getScopedKeyLevels());
+            renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+            tvRefreshOverlayLevelPrices();
             // Re-sync GEX side panel after candles + autoscale settle
             scheduleGexPanelSync();
 
@@ -14521,6 +15405,7 @@ def index():
                         tvApplyAutoscale();
                         if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
                         if (tvMacdChart) tvMacdChart.priceScale('right').applyOptions({ autoScale: true });
+                        scheduleSessionLevelCloudDraw();
                         scheduleTVHistoricalOverlayDraw();
                     } catch(e) {}
                 }, 50);
@@ -15402,6 +16287,7 @@ def index():
             renderRailAlerts(Array.isArray(stats && stats.alerts) ? stats.alerts : []);
             renderRailKeyLevels(stats);
             renderKeyLevels(levels);
+            renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
         }
 
         function renderGexSidePanel(panelJson) {
@@ -16490,65 +17376,170 @@ def index():
 
         // ── Key levels (Call Wall / Put Wall / Gamma Flip / ±1σ EM) ──────────
         function clearKeyLevels() {
+            tvKeyLevelPrices = [];
             if (!tvCandleSeries) { tvKeyLevelLines = []; return; }
             tvKeyLevelLines.forEach(l => {
                 try { tvCandleSeries.removePriceLine(l); } catch (e) {}
             });
             tvKeyLevelLines = [];
+            tvRefreshOverlayLevelPrices();
         }
 
         function renderKeyLevels(levels) {
             clearKeyLevels();
             if (!levels || !tvCandleSeries || !window.LightweightCharts) return;
-            const LS = LightweightCharts.LineStyle;
             const vis = getChartVisibility();
             const showWalls2  = vis.walls_2          !== false;
             const showHvl     = vis.hvl              !== false;
             const showEm2     = vis.em_2s            !== false;
             const showLiveGex = vis.live_gex_extrema !== false;
             const defs = [
-                { key: 'call_wall',   title: 'Call Wall',   color: '#10B981', style: LS.Solid,  width: 2 },
-                { key: 'put_wall',    title: 'Put Wall',    color: '#EF4444', style: LS.Solid,  width: 2 },
-                { key: 'gamma_flip',  title: 'Gamma Flip',  color: '#FFC400', style: LS.Dashed, width: 2 },
-                { key: 'em_upper',    title: '+1σ EM',      color: '#9CA3AF', style: LS.Dotted, width: 1 },
-                { key: 'em_lower',    title: '-1σ EM',      color: '#9CA3AF', style: LS.Dotted, width: 1 },
-                { key: 'call_wall_2', title: 'Call Wall 2', color: 'rgba(16,185,129,0.55)',  style: LS.Dashed, width: 1, show: showWalls2 },
-                { key: 'put_wall_2',  title: 'Put Wall 2',  color: 'rgba(239,68,68,0.55)',   style: LS.Dashed, width: 1, show: showWalls2 },
-                { key: 'hvl',         title: 'HVL',         color: 'rgba(156,163,175,0.8)',  style: LS.Dotted, width: 1, show: showHvl },
-                { key: 'max_positive_gex', title: 'Max +GEX', color: 'rgba(16,185,129,0.75)',  style: LS.LargeDashed, width: 1, show: showLiveGex },
-                { key: 'max_negative_gex', title: 'Max -GEX', color: 'rgba(239,68,68,0.75)',   style: LS.LargeDashed, width: 1, show: showLiveGex },
-                { key: 'em_upper_2',  title: '+2σ EM',      color: 'rgba(156,163,175,0.45)', style: LS.Dotted, width: 1, show: showEm2 },
-                { key: 'em_lower_2',  title: '-2σ EM',      color: 'rgba(156,163,175,0.45)', style: LS.Dotted, width: 1, show: showEm2 },
+                { key: 'call_wall',   show: true },
+                { key: 'put_wall',    show: true },
+                { key: 'gamma_flip',  show: true },
+                { key: 'em_upper',    show: true },
+                { key: 'em_lower',    show: true },
+                { key: 'call_wall_2', show: showWalls2 },
+                { key: 'put_wall_2',  show: showWalls2 },
+                { key: 'hvl',         show: showHvl },
+                { key: 'max_positive_gex', show: showLiveGex },
+                { key: 'max_negative_gex', show: showLiveGex },
+                { key: 'em_upper_2',  show: showEm2 },
+                { key: 'em_lower_2',  show: showEm2 },
             ];
+            const renderedPrices = [];
             defs.forEach(def => {
                 if (def.show === false) return;
+                const pref = getPriceLevelPref(def.key);
+                if (!pref || pref.visible === false) return;
                 const entry = levels[def.key];
                 if (!entry || entry.price == null || !isFinite(entry.price)) return;
                 try {
                     const line = tvCandleSeries.createPriceLine({
                         price: entry.price,
-                        color: def.color,
-                        lineWidth: def.width,
-                        lineStyle: def.style,
+                        color: pref.color,
+                        lineWidth: pref.lineWidth,
+                        lineStyle: tvIndicatorLineStyleValue(pref.lineStyle),
                         axisLabelVisible: true,
-                        title: def.title,
+                        title: pref.label,
                     });
                     tvKeyLevelLines.push(line);
+                    renderedPrices.push(entry.price);
                 } catch (e) {
-                    console.warn('createPriceLine failed for', def.title, e);
+                    console.warn('createPriceLine failed for', pref.label, e);
                 }
             });
+            tvKeyLevelPrices = renderedPrices.filter(price => Number.isFinite(price));
+            tvRefreshOverlayLevelPrices();
+        }
+
+        function tvRefreshOverlayLevelPrices() {
+            tvAllLevelPrices = (tvHistoricalPoints || []).map(point => point.price);
+            tvAllLevelPrices.push(...tvKeyLevelPrices, ...tvSessionLevelPrices, ...tvTopOIPrices);
+            tvDrawingDefs.forEach(def => {
+                if (!def) return;
+                if (def.type === 'hline' || def.type === 'text') {
+                    tvAllLevelPrices.push(def.price);
+                } else if (def.type === 'trendline') {
+                    tvAllLevelPrices.push(def.p1, def.p2);
+                } else if (def.type === 'rect') {
+                    tvAllLevelPrices.push(def.top, def.bot);
+                }
+            });
+            tvAllLevelPrices = tvAllLevelPrices.filter(price => Number.isFinite(price));
+            tvApplyAutoscale();
+        }
+
+        function clearSessionLevels() {
+            tvSessionLevelPrices = [];
+            if (!tvCandleSeries) { tvSessionLevelLines = []; return; }
+            tvSessionLevelLines.forEach(line => {
+                try { tvCandleSeries.removePriceLine(line); } catch (e) {}
+            });
+            tvSessionLevelLines = [];
+            scheduleSessionLevelCloudDraw();
+            tvRefreshOverlayLevelPrices();
+        }
+
+        function renderSessionLevels(levels, rawSettings) {
+            clearSessionLevels();
+            const settings = normalizeSessionLevelSettings(rawSettings);
+            if (!settings.enabled || !levels || !tvCandleSeries || !window.LightweightCharts) return;
+
+            const overlayLevelPrices = (tvKeyLevelPrices || []).filter(price => Number.isFinite(price));
+            const tick = 0.01;
+            const renderedPrices = [];
+            const shouldSkipPrice = (price) => {
+                if (!Number.isFinite(price)) return true;
+                if (overlayLevelPrices.some(levelPrice => Math.abs(levelPrice - price) <= tick)) return true;
+                if (renderedPrices.some(levelPrice => Math.abs(levelPrice - price) <= tick)) return true;
+                return false;
+            };
+            const formatTitle = (entry) => {
+                const base = settings.abbreviate_labels
+                    ? (entry.short_label || entry.label || '')
+                    : (entry.full_label || entry.label || '');
+                if (!settings.append_price) return base;
+                const price = Number(entry.price);
+                return `${base} ${price.toFixed(2)}`.trim();
+            };
+            const defs = [
+                { key: 'ib_high',            enabled: settings.initial_balance },
+                { key: 'ib_low',             enabled: settings.initial_balance },
+                { key: 'ib_mid',             enabled: settings.initial_balance && settings.show_ib_mid },
+                { key: 'ib_high_x2',         enabled: settings.initial_balance && settings.show_ib_extensions },
+                { key: 'ib_low_x2',          enabled: settings.initial_balance && settings.show_ib_extensions },
+                { key: 'ib_high_x3',         enabled: settings.initial_balance && settings.show_ib_extensions },
+                { key: 'ib_low_x3',          enabled: settings.initial_balance && settings.show_ib_extensions },
+                { key: 'opening_range_high', enabled: settings.opening_range },
+                { key: 'opening_range_low',  enabled: settings.opening_range },
+                { key: 'opening_range_mid',  enabled: settings.opening_range && settings.show_or_mid },
+                { key: 'today_open',         enabled: settings.today },
+                { key: 'today_high',         enabled: settings.today },
+                { key: 'today_low',          enabled: settings.today },
+                { key: 'yesterday_high',     enabled: settings.yesterday },
+                { key: 'yesterday_low',      enabled: settings.yesterday },
+                { key: 'yesterday_open',     enabled: settings.yesterday },
+                { key: 'yesterday_close',    enabled: settings.yesterday },
+                { key: 'premarket_high',     enabled: settings.premarket },
+                { key: 'premarket_low',      enabled: settings.premarket },
+                { key: 'after_hours_high',   enabled: settings.after_hours },
+                { key: 'after_hours_low',    enabled: settings.after_hours },
+            ];
+            defs.forEach(def => {
+                if (!def.enabled) return;
+                const pref = getPriceLevelPref(def.key);
+                if (!pref || pref.visible === false) return;
+                const entry = levels[def.key];
+                if (!entry || !Number.isFinite(entry.price) || shouldSkipPrice(entry.price)) return;
+                try {
+                    const line = tvCandleSeries.createPriceLine({
+                        price: entry.price,
+                        color: pref.color,
+                        lineWidth: pref.lineWidth,
+                        lineStyle: tvIndicatorLineStyleValue(pref.lineStyle),
+                        axisLabelVisible: true,
+                        title: formatTitle(entry),
+                    });
+                    tvSessionLevelLines.push(line);
+                    tvSessionLevelPrices.push(entry.price);
+                    renderedPrices.push(entry.price);
+                } catch (e) {
+                    console.warn('createPriceLine failed for session level', def.key, e);
+                }
+            });
+            scheduleSessionLevelCloudDraw();
+            tvRefreshOverlayLevelPrices();
         }
 
         // ── Top-OI overlay (dotted price lines, nearest expiry) ───────────────
-        let tvTopOIPrices = [];
-
         function clearTopOILines() {
             const hadLines = tvTopOILines.length > 0 || tvTopOIPrices.length > 0;
             tvTopOIPrices = [];
             if (!tvCandleSeries) { tvTopOILines = []; return; }
             tvTopOILines.forEach(l => { try { tvCandleSeries.removePriceLine(l); } catch (e) {} });
             tvTopOILines = [];
+            tvRefreshOverlayLevelPrices();
             return hadLines;
         }
 
@@ -16583,8 +17574,8 @@ def index():
                     tvTopOIPrices.push(strike);
                 } catch (e) { console.warn('renderTopOI createPriceLine failed:', e); }
             });
+            tvRefreshOverlayLevelPrices();
             if (tvTopOILines.length && tvAutoRange) {
-                tvApplyAutoscale();
                 tvRefreshPriceScale();
             }
         }
@@ -16651,6 +17642,7 @@ def index():
                 max_level_color: maxLevelColor,
                 coloring_mode: document.getElementById('coloring_mode').value,
                 top_oi_count: getTopOICountSetting(),
+                session_levels: getSessionLevelSettingsFromDom(),
                 gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
             };
         }
@@ -16674,8 +17666,15 @@ def index():
             })
             .then(r => r.json())
             .then(priceResp => {
+                _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
+                _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
+                _lastKeyLevels = priceResp ? (priceResp.key_levels || null) : null;
+                _lastKeyLevels0dte = priceResp ? (priceResp.key_levels_0dte || null) : null;
+                _lastStats0dte = priceResp ? (priceResp.stats_0dte || null) : null;
                 if (!priceResp.error && priceResp.price) {
                     applyPriceData(priceResp.price);
+                } else {
+                    renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
                 }
                 if (priceResp && priceResp.top_oi && requestTopOIContextKey === getTopOIContextKey()) {
                     _lastTopOI = priceResp.top_oi;
@@ -16683,9 +17682,6 @@ def index():
                     if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
                 }
                 renderGexSidePanel(priceResp ? priceResp.gex_panel : null);
-                _lastKeyLevels = priceResp ? (priceResp.key_levels || null) : null;
-                _lastKeyLevels0dte = priceResp ? (priceResp.key_levels_0dte || null) : null;
-                _lastStats0dte = priceResp ? (priceResp.stats_0dte || null) : null;
                 renderTraderStats(priceResp ? (priceResp.trader_stats || null) : null);
                 redrawGexScope();
             })
@@ -16747,7 +17743,11 @@ def index():
                     tvHistoricalPoints = [];
                     tvHistoricalExpectedMoveSeries = [];
                     tvKeyLevelLines = [];
+                    tvSessionLevelLines = [];
                     tvTopOILines = [];
+                    tvKeyLevelPrices = [];
+                    tvSessionLevelPrices = [];
+                    tvTopOIPrices = [];
                 }
                 if (tvResizeObserver) {
                     tvResizeObserver.disconnect();
@@ -17593,6 +18593,8 @@ def index():
         document.getElementById('streamToggle').addEventListener('click', toggleStreaming);
         syncAlertGateCheckbox();
         syncDealerDetailCheckbox();
+        applySessionLevelSettingsToDom(DEFAULT_SESSION_LEVEL_SETTINGS);
+        wireSessionLevelControls();
         const gateAlertsToggle = document.getElementById('gate_alerts');
         if (gateAlertsToggle) {
             gateAlertsToggle.addEventListener('change', () => {
@@ -17611,7 +18613,7 @@ def index():
         // Settings save/load functions
         function gatherSettings() {
             return {
-                settings_schema_version: 4,
+                settings_schema_version: 6,
                 ticker: document.getElementById('ticker').value,
                 timeframe: document.getElementById('timeframe').value,
                 strike_range: document.getElementById('strike_range').value,
@@ -17644,6 +18646,8 @@ def index():
                 em_range_locked: emRangeLocked,
                 tv_active_indicators: Array.from(tvActiveInds),
                 tv_indicator_prefs: normalizeTVIndicatorPrefMap(tvIndicatorPrefs),
+                price_level_prefs: normalizePriceLevelPrefMap(priceLevelPrefs),
+                session_levels: getSessionLevelSettingsFromDom(),
                 // Chart visibility
                 charts: getChartVisibility()
             };
@@ -17722,6 +18726,7 @@ def index():
             if (settings.em_range_locked !== undefined) {
                 setEmRangeLocked(settings.em_range_locked);
             }
+            applySessionLevelSettingsToDom(settings.session_levels || DEFAULT_SESSION_LEVEL_SETTINGS);
             let nextTvActiveInds;
             if (Array.isArray(settings.tv_active_indicators)) {
                 nextTvActiveInds = new Set(normalizeTVIndicatorActiveKeys(settings.tv_active_indicators));
@@ -17744,6 +18749,16 @@ def index():
             syncTVIndicatorToggleButtons();
             renderTVIndicatorEditor();
             reapplyTVIndicators();
+            let nextPriceLevelPrefs = normalizePriceLevelPrefMap(settings.price_level_prefs);
+            if (preferLocalIndicatorState) {
+                const persistedPriceLevelPrefs = readPersistedPriceLevelPrefs();
+                if (persistedPriceLevelPrefs) nextPriceLevelPrefs = persistedPriceLevelPrefs;
+            }
+            priceLevelPrefs = nextPriceLevelPrefs;
+            persistPriceLevelPrefs();
+            renderPriceLevelEditor();
+            renderKeyLevels(getScopedKeyLevels());
+            renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
             // Chart visibility — persist into localStorage; updateCharts() reads from there
             if (settings.charts) {
                 const chartSettings = Object.assign({}, settings.charts);
@@ -17868,8 +18883,11 @@ def index():
         }
         renderChartVisibilitySection();
         tvIndicatorPrefs = normalizeTVIndicatorPrefMap(tvIndicatorPrefs);
+        priceLevelPrefs = normalizePriceLevelPrefMap(priceLevelPrefs);
         hydrateTVIndicatorStateFromLocalStorage();
+        hydratePriceLevelPrefsFromLocalStorage();
         renderTVIndicatorEditor();
+        renderPriceLevelEditor();
 
         wireRightRailTabs();
         applyRightRailTab();
@@ -17891,6 +18909,7 @@ def index():
 
         const settingsModal = document.getElementById('settings-modal');
         const indicatorSettingsModal = document.getElementById('indicator-settings-modal');
+        const priceLevelSettingsModal = document.getElementById('price-level-settings-modal');
         document.getElementById('settingsToggle').addEventListener('click', () => {
             if (settingsModal.showModal) { settingsModal.showModal(); }
             else { settingsModal.setAttribute('open', ''); } // <dialog> fallback
@@ -17901,6 +18920,10 @@ def index():
             if (indicatorSettingsModal.close) indicatorSettingsModal.close();
             else indicatorSettingsModal.removeAttribute('open');
         });
+        document.getElementById('priceLevelModalClose').addEventListener('click', () => {
+            if (priceLevelSettingsModal.close) priceLevelSettingsModal.close();
+            else priceLevelSettingsModal.removeAttribute('open');
+        });
 
         document.addEventListener('keydown', (e) => {
             if (e.key !== 'Escape') return;
@@ -17909,6 +18932,11 @@ def index():
                 tvIndicatorEditorTargetKey = '';
                 if (indicatorSettingsModal.close) indicatorSettingsModal.close();
                 else indicatorSettingsModal.removeAttribute('open');
+                return;
+            }
+            if (priceLevelSettingsModal.open) {
+                if (priceLevelSettingsModal.close) priceLevelSettingsModal.close();
+                else priceLevelSettingsModal.removeAttribute('open');
                 return;
             }
             if (document.getElementById('settings-drawer').classList.contains('open')) closeDrawer();
@@ -18356,6 +19384,7 @@ def update_price():
         max_level_color = data.get('max_level_color', '#800080')
         coloring_mode = data.get('coloring_mode', 'Linear Intensity')
         top_oi_count = data.get('top_oi_count', 5)
+        session_level_config = normalize_session_level_config(data.get('session_levels'))
         # Mirror /update_data semantics. compute_trader_stats has needed these
         # since Phase 2 Stage 3 (commit 6fc40bb); without them every tick raised
         # a silent NameError and trader_stats stayed None.
@@ -18372,6 +19401,23 @@ def update_price():
             gate_alerts = bool(gate_val)
 
         price_data = get_price_history(ticker, timeframe=timeframe)
+        session_levels = None
+        session_levels_meta = None
+        if session_level_config.get('enabled'):
+            try:
+                session_candles = price_data.get('candles') if timeframe == 1 else None
+                if not session_candles:
+                    session_candles = get_session_level_candles(ticker)
+                session_levels = compute_session_levels(
+                    session_candles,
+                    timezone='US/Eastern',
+                    config=session_level_config,
+                )
+                session_levels_meta = (session_levels or {}).get('meta')
+            except Exception as e:
+                print(f"[session_levels] build failed: {e}")
+                session_levels = None
+                session_levels_meta = None
 
         # Use the most recently cached options data for exposure overlays.
         # If no cache exists yet the chart renders without overlays and
@@ -18498,6 +19544,8 @@ def update_price():
             'price': price_chart,
             'gex_panel': gex_panel,
             'key_levels': key_levels,
+            'session_levels': session_levels,
+            'session_levels_meta': session_levels_meta,
             'top_oi': top_oi,
             'trader_stats': trader_stats,
             'key_levels_0dte': key_levels_0dte,
