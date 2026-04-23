@@ -3090,8 +3090,6 @@ def compute_session_levels(candles_1m, *, anchor_date=None, timezone='US/Eastern
 
     date_index = available_dates.index(resolved_anchor_date)
     previous_trading_date = available_dates[date_index - 1] if date_index > 0 else None
-    latest_row = rows[-1]
-
     def rows_for(session_date, start_minute=None, end_minute=None):
         if not session_date:
             return []
@@ -3139,7 +3137,9 @@ def compute_session_levels(candles_1m, *, anchor_date=None, timezone='US/Eastern
     out['premarket_high'] = _build_session_level(session_high(premarket_rows), 'PMH', 'Premarket High', 'premarket')
     out['premarket_low'] = _build_session_level(session_low(premarket_rows), 'PML', 'Premarket Low', 'premarket')
 
-    after_hours_date = resolved_anchor_date if latest_row['date'] == resolved_anchor_date and latest_row['minute'] >= 16 * 60 else previous_trading_date
+    anchor_session_rows = rows_for(resolved_anchor_date)
+    anchor_latest_row = anchor_session_rows[-1] if anchor_session_rows else None
+    after_hours_date = resolved_anchor_date if anchor_latest_row and anchor_latest_row['minute'] >= 16 * 60 else previous_trading_date
     after_hours_rows = rows_for(after_hours_date, 16 * 60, 20 * 60)
     out['after_hours_high'] = _build_session_level(session_high(after_hours_rows), 'AHH', 'After Hours High', 'after_hours')
     out['after_hours_low'] = _build_session_level(session_low(after_hours_rows), 'AHL', 'After Hours Low', 'after_hours')

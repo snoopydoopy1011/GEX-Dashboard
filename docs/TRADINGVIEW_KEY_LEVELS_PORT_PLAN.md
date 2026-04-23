@@ -1,6 +1,6 @@
 # GEX Dashboard — TradingView Session Levels + IB Port Plan
 
-**Status:** Implementation and polish are landed locally on `codex/session-level-colors`; browser/live Schwab validation still needed
+**Status:** Implementation, polish, and committed synthetic regression coverage are landed locally on `codex/session-level-colors`; browser/live Schwab validation still needed
 **Owner:** Codex
 **Created:** 2026-04-22
 **Suggested branch:** `codex/session-level-colors`
@@ -106,6 +106,20 @@ This document scopes a port of the user's TradingView "Key Levels + IB" indicato
 - Persisted near-open visibility and minute-window settings through the existing save/load path.
 - Kept overnight out of scope; this pass only ports the pre-open window immediately preceding the 09:30 ET cash open.
 
+### What landed in the regression-test pass
+
+- Added a committed synthetic regression test file for `compute_session_levels()`.
+- Covered:
+  - today / yesterday RTH levels
+  - premarket
+  - near open
+  - opening range
+  - initial balance and extensions
+  - previous-session after-hours fallback
+  - same-day after-hours selection
+  - explicit `anchor_date` after-hours selection when newer sessions also exist
+- Fixed the backend after-hours selection bug for explicit `anchor_date` runs by resolving the AH block from the anchor session's latest candle instead of the global latest candle.
+
 ### What is implemented right now
 
 - Today:
@@ -159,17 +173,12 @@ This document scopes a port of the user's TradingView "Key Levels + IB" indicato
 
 ### What is left to do
 
-- Run the Flask app and verify runtime behavior against live Schwab data.
-- Verify save/load round-trip from the real UI.
-- Verify ticker switches, Heikin-Ashi toggles, and timeframe changes in-browser.
-- Verify `Near Open` visibility and value changes across different `Near Open Minutes` settings.
-- Verify OR / IB cloud positioning on:
-  - 1m
-  - 5m
-  - 15m
-  - 30m
-  - 60m
-- Verify the new `Levels` modal round-trips all per-level preferences through save / load.
+- Manual browser/live validation remains recommended but is no longer blocking this implementation pass:
+  - verify save/load round-trip from the real UI
+  - verify ticker switches, Heikin-Ashi toggles, and timeframe changes in-browser
+  - verify `Near Open` visibility and value changes across different `Near Open Minutes` settings
+  - verify OR / IB cloud positioning on 1m / 5m / 15m / 30m / 60m
+  - verify the `Levels` modal round-trips all per-level preferences through save / load
 - Decide whether `Today` / `Yesterday` should remain hard-labeled RTH-only or expose user-facing RTH toggles.
 - Optional later:
   - IB intermediate levels
