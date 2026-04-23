@@ -9470,6 +9470,18 @@ def index():
             min-width: 30px;
             text-align: center;
         }
+        .tv-tb-btn.pill {
+            padding: 3px 7px;
+            min-width: 0;
+            border-radius: 999px;
+            font-size: 10px;
+            letter-spacing: 0.02em;
+        }
+        .tv-draw-inline {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
         .tv-toolbar-status {
             font-size: 10px;
             letter-spacing: 0.03em;
@@ -13678,6 +13690,11 @@ def index():
             return normalizeTVHLinePresetKey(prefs.hlinePreset);
         }
 
+        function getTVChannelAxisSnapEnabled() {
+            const prefs = loadTVDrawingToolPrefs();
+            return prefs.channelAxisSnap === true;
+        }
+
         function setActiveTVHLinePresetKey(nextKey, options = {}) {
             const presetKey = normalizeTVHLinePresetKey(nextKey);
             const prefs = loadTVDrawingToolPrefs();
@@ -13689,6 +13706,16 @@ def index():
             return presetKey;
         }
 
+        function setTVChannelAxisSnapEnabled(enabled, options = {}) {
+            const prefs = loadTVDrawingToolPrefs();
+            prefs.channelAxisSnap = !!enabled;
+            saveTVDrawingToolPrefs(prefs);
+            if (options.syncToolbar !== false) {
+                syncTVChannelSnapToolbarButton();
+            }
+            return prefs.channelAxisSnap;
+        }
+
         function getTVHLinePresetColor(presetKey, fallback = '#FFD700') {
             const preset = getTVHLinePreset(presetKey);
             return preset.color || fallback;
@@ -13696,6 +13723,10 @@ def index():
 
         function normalizeTVDrawingMidlineVisible(value) {
             return value !== false;
+        }
+
+        function normalizeTVDrawingExtendRight(value) {
+            return value === true;
         }
 
         function getTVDrawingColorFallback(mode = tvDrawMode) {
@@ -13733,6 +13764,17 @@ def index():
                     nodePreset.label;
                 node.classList.toggle('active', node.dataset.hlinePreset === presetKey);
             });
+        }
+
+        function syncTVChannelSnapToolbarButton() {
+            const button = document.getElementById('tv-channel-snap-toggle');
+            if (!button) return;
+            const enabled = getTVChannelAxisSnapEnabled();
+            button.classList.toggle('active', enabled);
+            button.textContent = enabled ? '🔒 HV' : '🔓 HV';
+            button.title = enabled
+                ? 'Channel base line snaps horizontal/vertical while placing the second point'
+                : 'Turn on horizontal/vertical snapping for the first channel segment';
         }
 
         function applyTVHLinePresetToDef(def, presetKey, options = {}) {
@@ -13794,8 +13836,10 @@ def index():
             }
             if (normalized.type === 'channel') {
                 normalized.showMidline = normalizeTVDrawingMidlineVisible(normalized.showMidline);
+                normalized.extendRight = normalizeTVDrawingExtendRight(normalized.extendRight);
             } else {
                 delete normalized.showMidline;
+                delete normalized.extendRight;
             }
             if (normalized.id !== '__preview__') {
                 if (Number.isFinite(Number(normalized.time))) {
@@ -13986,6 +14030,7 @@ def index():
             const q2 = p3 + (slope * (l2 - l3));
             return {
                 vertical: false,
+                slope,
                 l1,
                 l2,
                 l3,
@@ -14403,6 +14448,10 @@ def index():
                         '<label for="tv-selected-draw-midline">Midline</label>' +
                         '<input type="checkbox" id="tv-selected-draw-midline" />' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-extend-right-row">' +
+                        '<label for="tv-selected-draw-extend-right">Extend Right</label>' +
+                        '<input type="checkbox" id="tv-selected-draw-extend-right" />' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-actions">' +
                         '<button type="button" class="tv-tb-btn danger" data-action="delete">Delete</button>' +
                     '</div>';
@@ -14491,6 +14540,13 @@ def index():
                     persistTVDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
+                editor.querySelector('#tv-selected-draw-extend-right').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || def.type !== 'channel') return;
+                    def.extendRight = !!event.target.checked;
+                    persistTVDrawings();
+                    scheduleTVDrawingOverlayDraw();
+                });
             }
             return editor;
         }
@@ -14514,6 +14570,8 @@ def index():
             const labelPositionSelect = editor.querySelector('#tv-selected-draw-label-position');
             const midlineRow = editor.querySelector('#tv-drawing-midline-row');
             const midlineInput = editor.querySelector('#tv-selected-draw-midline');
+            const extendRightRow = editor.querySelector('#tv-drawing-extend-right-row');
+            const extendRightInput = editor.querySelector('#tv-selected-draw-extend-right');
             if (titleEl) {
                 const typeLabel = def.type === 'hline' ? 'H-Line'
                     : def.type === 'trendline' ? 'Trend Line'
@@ -14561,6 +14619,12 @@ def index():
                 midlineRow.style.display = isChannel ? 'flex' : 'none';
                 midlineInput.checked = isChannel ? normalizeTVDrawingMidlineVisible(def.showMidline) : true;
                 midlineInput.disabled = !isChannel;
+            }
+            if (extendRightRow && extendRightInput) {
+                const isChannel = def.type === 'channel';
+                extendRightRow.style.display = isChannel ? 'flex' : 'none';
+                extendRightInput.checked = isChannel ? normalizeTVDrawingExtendRight(def.extendRight) : false;
+                extendRightInput.disabled = !isChannel;
             }
             editor.classList.add('visible');
         }
@@ -14662,7 +14726,7 @@ def index():
                 const my1 = tvCandleSeries.priceToCoordinate(channel.mid1);
                 const my2 = tvCandleSeries.priceToCoordinate(channel.mid2);
                 if ([py1, py2, my1, my2].some(v => v == null || Number.isNaN(v))) return null;
-                return {
+                const screen = {
                     type: 'channel',
                     vertical: false,
                     x1,
@@ -14678,6 +14742,39 @@ def index():
                     mx2: x2,
                     my2,
                 };
+                if (def.extendRight === true) {
+                    const rightLogical = tvCoordinateToLogical(width);
+                    const anchorLogical = channel.l2 >= channel.l1 ? channel.l2 : channel.l1;
+                    const anchorBase = channel.l2 >= channel.l1 ? channel.p2 : channel.p1;
+                    const anchorParallel = channel.l2 >= channel.l1 ? channel.q2 : channel.q1;
+                    const anchorMid = channel.l2 >= channel.l1 ? channel.mid2 : channel.mid1;
+                    if (Number.isFinite(rightLogical) && rightLogical > anchorLogical) {
+                        const delta = rightLogical - anchorLogical;
+                        const baseExtY = tvCandleSeries.priceToCoordinate(anchorBase + (channel.slope * delta));
+                        const parallelExtY = tvCandleSeries.priceToCoordinate(anchorParallel + (channel.slope * delta));
+                        const midExtY = tvCandleSeries.priceToCoordinate(anchorMid + (channel.slope * delta));
+                        if ([baseExtY, parallelExtY, midExtY].every(v => v != null && !Number.isNaN(v))) {
+                            const rightIsSecond = channel.l2 >= channel.l1;
+                            screen.extendRight = {
+                                leftBaseX: rightIsSecond ? x1 : x2,
+                                leftBaseY: rightIsSecond ? y1 : y2,
+                                leftParallelX: rightIsSecond ? x1 : x2,
+                                leftParallelY: rightIsSecond ? py1 : py2,
+                                baseFromX: channel.l2 >= channel.l1 ? x2 : x1,
+                                baseFromY: channel.l2 >= channel.l1 ? y2 : y1,
+                                parallelFromX: channel.l2 >= channel.l1 ? x2 : x1,
+                                parallelFromY: channel.l2 >= channel.l1 ? py2 : py1,
+                                midFromX: channel.l2 >= channel.l1 ? x2 : x1,
+                                midFromY: channel.l2 >= channel.l1 ? my2 : my1,
+                                toX: width,
+                                baseToY: baseExtY,
+                                parallelToY: parallelExtY,
+                                midToY: midExtY,
+                            };
+                        }
+                    }
+                }
+                return screen;
             }
             if (def.type === 'rect') {
                 const startY = tvCandleSeries.priceToCoordinate(def.startPrice != null ? def.startPrice : def.top);
@@ -14831,7 +14928,9 @@ def index():
             } else if (screen.type === 'channel') {
                 group.appendChild(createSvgEl('polygon', {
                     class: 'tv-drawing-shape',
-                    points: `${screen.x1},${screen.y1} ${screen.x2},${screen.y2} ${screen.px2},${screen.py2} ${screen.px1},${screen.py1}`,
+                    points: screen.extendRight
+                        ? `${screen.extendRight.leftBaseX},${screen.extendRight.leftBaseY} ${screen.extendRight.toX},${screen.extendRight.baseToY} ${screen.extendRight.toX},${screen.extendRight.parallelToY} ${screen.extendRight.leftParallelX},${screen.extendRight.leftParallelY}`
+                        : `${screen.x1},${screen.y1} ${screen.x2},${screen.y2} ${screen.px2},${screen.py2} ${screen.px1},${screen.py1}`,
                     fill: def.color,
                     'fill-opacity': isPreview ? 0.07 : 0.1,
                     stroke: 'none',
@@ -14870,6 +14969,25 @@ def index():
                         opacity: isPreview ? 0.8 : 1,
                     }));
                 });
+                if (screen.extendRight) {
+                    [
+                        { x1: screen.extendRight.baseFromX, y1: screen.extendRight.baseFromY, x2: screen.extendRight.toX, y2: screen.extendRight.baseToY },
+                        { x1: screen.extendRight.parallelFromX, y1: screen.extendRight.parallelFromY, x2: screen.extendRight.toX, y2: screen.extendRight.parallelToY },
+                    ].forEach(line => {
+                        group.appendChild(createSvgEl('line', {
+                            class: 'tv-drawing-shape',
+                            x1: line.x1,
+                            y1: line.y1,
+                            x2: line.x2,
+                            y2: line.y2,
+                            stroke: def.color,
+                            'stroke-width': strokeWidth,
+                            'stroke-dasharray': dashArray || null,
+                            'stroke-linecap': 'round',
+                            opacity: isPreview ? 0.7 : 0.94,
+                        }));
+                    });
+                }
                 if (def.showMidline !== false) {
                     group.appendChild(createSvgEl('line', {
                         class: 'tv-drawing-shape',
@@ -14883,6 +15001,20 @@ def index():
                         'stroke-linecap': 'round',
                         opacity: 0.72,
                     }));
+                    if (screen.extendRight) {
+                        group.appendChild(createSvgEl('line', {
+                            class: 'tv-drawing-shape',
+                            x1: screen.extendRight.midFromX,
+                            y1: screen.extendRight.midFromY,
+                            x2: screen.extendRight.toX,
+                            y2: screen.extendRight.midToY,
+                            stroke: def.color,
+                            'stroke-width': Math.max(1, strokeWidth - 1),
+                            'stroke-dasharray': '7 6',
+                            'stroke-linecap': 'round',
+                            opacity: 0.68,
+                        }));
+                    }
                 }
                 if (labelText) {
                     appendTVDrawingBadge(group, Object.assign({
@@ -15066,6 +15198,39 @@ def index():
             return { price, time, logical };
         }
 
+        function getTVChannelSnappedPoint(startPoint, point, previewPoint = null) {
+            if (!getTVChannelAxisSnapEnabled() || !startPoint || !point) return point;
+            const startPrice = Number(startPoint.price);
+            const nextPrice = Number(point.price);
+            const startLogical = Number(startPoint.logical);
+            const nextLogical = Number(point.logical);
+            if (![startPrice, nextPrice, startLogical, nextLogical].every(Number.isFinite)) {
+                return point;
+            }
+            const snapHorizontal = Math.abs(nextLogical - startLogical) >= Math.abs(nextPrice - startPrice);
+            if (snapHorizontal) {
+                const snappedY = tvCandleSeries ? tvCandleSeries.priceToCoordinate(startPrice) : null;
+                return {
+                    ...point,
+                    price: startPrice,
+                    previewX: previewPoint && Number.isFinite(previewPoint.x) ? previewPoint.x : null,
+                    previewY: Number.isFinite(snappedY)
+                        ? snappedY
+                        : (previewPoint && Number.isFinite(previewPoint.y) ? previewPoint.y : null),
+                };
+            }
+            const snappedX = tvResolveDrawingAnchorX(startPoint.time, startPoint.logical, null);
+            return {
+                ...point,
+                time: startPoint.time,
+                logical: startPoint.logical,
+                previewX: Number.isFinite(snappedX)
+                    ? snappedX
+                    : (previewPoint && Number.isFinite(previewPoint.x) ? previewPoint.x : null),
+                previewY: previewPoint && Number.isFinite(previewPoint.y) ? previewPoint.y : null,
+            };
+        }
+
         function updateTVDrawingPreview(param) {
             if (!tvDrawMode || !tvPriceChart || !tvCandleSeries || !param || !param.point) return;
             const previewPoint = tvResolvePreviewPoint(param);
@@ -15133,17 +15298,18 @@ def index():
                 } else if (tvDrawMode === 'channel') {
                     if (drawPoints.length === 1) {
                         const startPoint = drawPoints[0];
+                        const snappedPoint = getTVChannelSnappedPoint(startPoint, point, previewPoint);
                         nextPreview = normalizeTVDrawingDef({
                             id: '__preview__',
                             type: 'trendline',
                             t1: startPoint.time,
                             l1: startPoint.logical,
                             p1: startPoint.price,
-                            t2: point.time || startPoint.time,
-                            l2: point.logical,
-                            p2: previewPoint.price,
-                            previewX2: previewPoint.x,
-                            previewY2: previewPoint.y,
+                            t2: snappedPoint.time || startPoint.time,
+                            l2: snappedPoint.logical,
+                            p2: snappedPoint.price,
+                            previewX2: Number.isFinite(snappedPoint.previewX) ? snappedPoint.previewX : previewPoint.x,
+                            previewY2: Number.isFinite(snappedPoint.previewY) ? snappedPoint.previewY : previewPoint.y,
                             color: drawColor,
                             lineWidth: 2,
                             lineStyle: 'dashed',
@@ -15243,8 +15409,9 @@ def index():
             }, true);
         }
 
-        function setDrawMode(mode) {
-            tvDrawMode = (tvDrawMode === mode) ? null : mode;  // toggle
+        function setDrawMode(mode, options = {}) {
+            const shouldToggle = options.force !== true;
+            tvDrawMode = shouldToggle && tvDrawMode === mode ? null : mode;
             tvDrawStart = null;
             clearTVDrawingPreview();
             closeTVToolbarMenus();
@@ -15366,11 +15533,18 @@ def index():
             if (tvDrawMode === 'channel') {
                 if (!clickTime) return;
                 const drawPoints = Array.isArray(tvDrawStart && tvDrawStart.points) ? tvDrawStart.points.slice() : [];
-                drawPoints.push({ price, time: clickTime, logical });
+                const nextPoint = drawPoints.length === 1
+                    ? getTVChannelSnappedPoint(drawPoints[0], { price, time: clickTime, logical })
+                    : { price, time: clickTime, logical };
+                drawPoints.push(nextPoint);
                 if (drawPoints.length === 1) {
                     tvDrawStart = { points: drawPoints };
                     const container = document.getElementById('price-chart');
-                    if (container) container.title = 'Click second point to set the channel trend';
+                    if (container) {
+                        container.title = getTVChannelAxisSnapEnabled()
+                            ? 'Click second point to set the channel trend (Snap HV ON)'
+                            : 'Click second point to set the channel trend';
+                    }
                     scheduleTVDrawingOverlayDraw();
                     return;
                 }
@@ -15532,23 +15706,15 @@ def index():
             // Drawing tools
             const hLineWrap = document.createElement('div');
             hLineWrap.className = 'tv-draw-dropdown';
-            const hLineButton = btn('— H-Line', 'Draw horizontal price line (single click)', event => {
+            const hLineButton = btn('— H-Line', 'Toggle horizontal price line drawing', event => {
                 event.preventDefault();
                 event.stopPropagation();
-                if (tvDrawMode === 'hline') {
-                    if (hLineWrap.classList.contains('open')) {
-                        closeTVToolbarMenus();
-                    } else {
-                        openTVToolbarMenu(hLineWrap, hLineButton, hLineMenu);
-                    }
-                    return;
-                }
                 setDrawMode('hline');
             });
             hLineButton.id = 'tv-hline-draw-button';
             hLineButton.dataset.draw = 'hline';
             if (tvDrawMode === 'hline') hLineButton.classList.add('active');
-            const hLineMenuToggle = btn('', 'Choose H-Line preset', event => {
+            const hLineMenuToggle = btn('', 'Choose H-Line type/color', event => {
                 event.preventDefault();
                 event.stopPropagation();
                 const isOpen = hLineWrap.classList.contains('open');
@@ -15579,7 +15745,7 @@ def index():
                     event.preventDefault();
                     event.stopPropagation();
                     setActiveTVHLinePresetKey(presetDef.key);
-                    setDrawMode('hline');
+                    setDrawMode('hline', { force: true });
                 });
                 hLineMenu.appendChild(option);
             });
@@ -15602,7 +15768,20 @@ def index():
                 const b = btn(def.label, def.title, () => setDrawMode(def.key));
                 b.dataset.draw = def.key;
                 if (tvDrawMode === def.key) b.classList.add('active');
-                addToGroup(drawGroup, b);
+                if (def.key === 'channel') {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'tv-draw-inline';
+                    wrap.appendChild(b);
+                    const channelSnapBtn = btn('', '', () => {
+                        setTVChannelAxisSnapEnabled(!getTVChannelAxisSnapEnabled());
+                    }, 'pill');
+                    channelSnapBtn.id = 'tv-channel-snap-toggle';
+                    wrap.appendChild(channelSnapBtn);
+                    addToGroup(drawGroup, wrap);
+                    syncTVChannelSnapToolbarButton();
+                } else {
+                    addToGroup(drawGroup, b);
+                }
             });
 
             // Draw color picker
