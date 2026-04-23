@@ -2918,6 +2918,7 @@ DEFAULT_SESSION_LEVEL_CONFIG = {
     'enabled': False,
     'today': True,
     'yesterday': True,
+    'near_open': False,
     'premarket': True,
     'after_hours': True,
     'opening_range': False,
@@ -2927,6 +2928,7 @@ DEFAULT_SESSION_LEVEL_CONFIG = {
     'show_ib_mid': True,
     'show_ib_cloud': False,
     'show_ib_extensions': True,
+    'near_open_minutes': 60,
     'opening_range_minutes': 15,
     'ib_start': '09:30',
     'ib_end': '10:30',
@@ -2972,7 +2974,7 @@ def normalize_session_level_config(config=None):
         return out
 
     bool_keys = (
-        'enabled', 'today', 'yesterday', 'premarket', 'after_hours',
+        'enabled', 'today', 'yesterday', 'near_open', 'premarket', 'after_hours',
         'opening_range', 'initial_balance', 'show_or_mid',
         'show_or_cloud', 'show_ib_mid', 'show_ib_cloud',
         'show_ib_extensions', 'abbreviate_labels', 'append_price',
@@ -2981,6 +2983,11 @@ def normalize_session_level_config(config=None):
     for key in bool_keys:
         if key in config:
             out[key] = _coerce_bool(config.get(key), out[key])
+
+    try:
+        out['near_open_minutes'] = max(0, min(330, int(config.get('near_open_minutes', out['near_open_minutes']))))
+    except Exception:
+        pass
 
     try:
         out['opening_range_minutes'] = max(1, min(60, int(config.get('opening_range_minutes', out['opening_range_minutes']))))
@@ -3083,8 +3090,6 @@ def compute_session_levels(candles_1m, *, anchor_date=None, timezone='US/Eastern
 
     date_index = available_dates.index(resolved_anchor_date)
     previous_trading_date = available_dates[date_index - 1] if date_index > 0 else None
-    latest_row = rows[-1]
-
     def rows_for(session_date, start_minute=None, end_minute=None):
         if not session_date:
             return []
@@ -3125,10 +3130,16 @@ def compute_session_levels(candles_1m, *, anchor_date=None, timezone='US/Eastern
     out['yesterday_close'] = _build_session_level(session_close(yesterday_rows), 'YDC', 'Yesterday Close', 'yesterday')
 
     premarket_rows = rows_for(resolved_anchor_date, 4 * 60, 9 * 60 + 30)
+    near_open_start = max(4 * 60, (9 * 60 + 30) - int(cfg['near_open_minutes']))
+    near_open_rows = rows_for(resolved_anchor_date, near_open_start, 9 * 60 + 30)
+    out['near_open_high'] = _build_session_level(session_high(near_open_rows), 'NOH', 'Near Open High', 'near_open')
+    out['near_open_low'] = _build_session_level(session_low(near_open_rows), 'NOL', 'Near Open Low', 'near_open')
     out['premarket_high'] = _build_session_level(session_high(premarket_rows), 'PMH', 'Premarket High', 'premarket')
     out['premarket_low'] = _build_session_level(session_low(premarket_rows), 'PML', 'Premarket Low', 'premarket')
 
-    after_hours_date = resolved_anchor_date if latest_row['date'] == resolved_anchor_date and latest_row['minute'] >= 16 * 60 else previous_trading_date
+    anchor_session_rows = rows_for(resolved_anchor_date)
+    anchor_latest_row = anchor_session_rows[-1] if anchor_session_rows else None
+    after_hours_date = resolved_anchor_date if anchor_latest_row and anchor_latest_row['minute'] >= 16 * 60 else previous_trading_date
     after_hours_rows = rows_for(after_hours_date, 16 * 60, 20 * 60)
     out['after_hours_high'] = _build_session_level(session_high(after_hours_rows), 'AHH', 'After Hours High', 'after_hours')
     out['after_hours_low'] = _build_session_level(session_low(after_hours_rows), 'AHL', 'After Hours Low', 'after_hours')
@@ -10249,6 +10260,14 @@ def index():
                             <label for="session_yesterday">Yesterday RTH (YDH / YDL / YDO / YDC)</label>
                         </div>
                         <div class="control-group">
+                            <input type="checkbox" id="session_near_open">
+                            <label for="session_near_open">Near Open (NOH / NOL)</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="session_near_open_minutes">Near Open Minutes:</label>
+                            <input type="number" id="session_near_open_minutes" min="0" max="330" value="60" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
                             <input type="checkbox" id="session_premarket">
                             <label for="session_premarket">Premarket (PMH / PML)</label>
                         </div>
@@ -10722,6 +10741,7 @@ def index():
                 keys: [
                     'today_high', 'today_low', 'today_open',
                     'yesterday_high', 'yesterday_low', 'yesterday_open', 'yesterday_close',
+                    'near_open_high', 'near_open_low',
                     'premarket_high', 'premarket_low',
                     'after_hours_high', 'after_hours_low',
                     'opening_range_high', 'opening_range_low', 'opening_range_mid',
@@ -10731,39 +10751,51 @@ def index():
             }
         ];
         const DEFAULT_PRICE_LEVEL_PREFS = {
-            call_wall: { label: 'Call Wall', visible: true, color: '#10B981', lineWidth: 2, lineStyle: 'solid' },
-            put_wall: { label: 'Put Wall', visible: true, color: '#EF4444', lineWidth: 2, lineStyle: 'solid' },
-            gamma_flip: { label: 'Gamma Flip', visible: true, color: '#F59E0B', lineWidth: 2, lineStyle: 'dashed' },
-            em_upper: { label: '+1σ EM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
-            em_lower: { label: '-1σ EM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
-            call_wall_2: { label: 'Call Wall 2', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dashed' },
-            put_wall_2: { label: 'Put Wall 2', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dashed' },
-            hvl: { label: 'HVL', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
-            max_positive_gex: { label: 'Max +GEX', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'large-dashed' },
-            max_negative_gex: { label: 'Max -GEX', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'large-dashed' },
-            em_upper_2: { label: '+2σ EM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
-            em_lower_2: { label: '-2σ EM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
-            today_high: { label: 'TDH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'solid' },
-            today_low: { label: 'TDL', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'solid' },
-            today_open: { label: 'TDO', visible: true, color: '#F59E0B', lineWidth: 1, lineStyle: 'dashed' },
-            yesterday_high: { label: 'YDH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'solid' },
-            yesterday_low: { label: 'YDL', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'solid' },
-            yesterday_open: { label: 'YDO', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dashed' },
-            yesterday_close: { label: 'YDC', visible: true, color: '#9CA3AF', lineWidth: 3, lineStyle: 'solid' },
-            premarket_high: { label: 'PMH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dotted' },
-            premarket_low: { label: 'PML', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dotted' },
-            after_hours_high: { label: 'AHH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dashed' },
-            after_hours_low: { label: 'AHL', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dashed' },
-            opening_range_high: { label: 'ORH', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'solid' },
-            opening_range_low: { label: 'ORL', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'solid' },
-            opening_range_mid: { label: 'ORM', visible: true, color: '#9CA3AF', lineWidth: 1, lineStyle: 'dotted' },
-            ib_high: { label: 'IBH', visible: true, color: '#10B981', lineWidth: 2, lineStyle: 'solid' },
-            ib_low: { label: 'IBL', visible: true, color: '#EF4444', lineWidth: 2, lineStyle: 'solid' },
-            ib_mid: { label: 'IBM', visible: true, color: '#F59E0B', lineWidth: 1, lineStyle: 'dotted' },
-            ib_high_x2: { label: 'IBHx2', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dotted' },
-            ib_low_x2: { label: 'IBLx2', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dotted' },
-            ib_high_x3: { label: 'IBHx3', visible: true, color: '#10B981', lineWidth: 1, lineStyle: 'dotted' },
-            ib_low_x3: { label: 'IBLx3', visible: true, color: '#EF4444', lineWidth: 1, lineStyle: 'dotted' },
+            call_wall: { label: 'Call Wall', visible: true, color: 'var(--call)', lineWidth: 2, lineStyle: 'solid' },
+            put_wall: { label: 'Put Wall', visible: true, color: 'var(--put)', lineWidth: 2, lineStyle: 'solid' },
+            gamma_flip: { label: 'Gamma Flip', visible: true, color: 'var(--warn)', lineWidth: 2, lineStyle: 'dashed' },
+            em_upper: { label: '+1σ EM', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dotted' },
+            em_lower: { label: '-1σ EM', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dotted' },
+            call_wall_2: { label: 'Call Wall 2', visible: true, color: 'var(--call)', lineWidth: 1, lineStyle: 'dashed' },
+            put_wall_2: { label: 'Put Wall 2', visible: true, color: 'var(--put)', lineWidth: 1, lineStyle: 'dashed' },
+            hvl: { label: 'HVL', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dotted' },
+            max_positive_gex: { label: 'Max +GEX', visible: true, color: 'var(--call)', lineWidth: 1, lineStyle: 'large-dashed' },
+            max_negative_gex: { label: 'Max -GEX', visible: true, color: 'var(--put)', lineWidth: 1, lineStyle: 'large-dashed' },
+            em_upper_2: { label: '+2σ EM', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dotted' },
+            em_lower_2: { label: '-2σ EM', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dotted' },
+            today_high: { label: 'TDH', visible: true, color: 'var(--call)', lineWidth: 1, lineStyle: 'solid' },
+            today_low: { label: 'TDL', visible: true, color: 'var(--put)', lineWidth: 1, lineStyle: 'solid' },
+            today_open: { label: 'TDO', visible: true, color: 'var(--warn)', lineWidth: 1, lineStyle: 'dashed' },
+            yesterday_high: { label: 'YDH', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'solid' },
+            yesterday_low: { label: 'YDL', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'solid' },
+            yesterday_open: { label: 'YDO', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dashed' },
+            yesterday_close: { label: 'YDC', visible: true, color: 'var(--fg-1)', lineWidth: 3, lineStyle: 'solid' },
+            near_open_high: { label: 'NOH', visible: true, color: 'var(--warn)', lineWidth: 1, lineStyle: 'dotted' },
+            near_open_low: { label: 'NOL', visible: true, color: 'var(--warn)', lineWidth: 1, lineStyle: 'dotted' },
+            premarket_high: { label: 'PMH', visible: true, color: 'var(--info)', lineWidth: 1, lineStyle: 'dotted' },
+            premarket_low: { label: 'PML', visible: true, color: 'var(--info)', lineWidth: 1, lineStyle: 'dotted' },
+            after_hours_high: { label: 'AHH', visible: true, color: 'var(--warn)', lineWidth: 1, lineStyle: 'dashed' },
+            after_hours_low: { label: 'AHL', visible: true, color: 'var(--warn)', lineWidth: 1, lineStyle: 'dashed' },
+            opening_range_high: { label: 'ORH', visible: true, color: 'var(--accent)', lineWidth: 1, lineStyle: 'solid' },
+            opening_range_low: { label: 'ORL', visible: true, color: 'var(--accent)', lineWidth: 1, lineStyle: 'solid' },
+            opening_range_mid: { label: 'ORM', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dotted' },
+            ib_high: { label: 'IBH', visible: true, color: 'var(--call)', lineWidth: 2, lineStyle: 'solid' },
+            ib_low: { label: 'IBL', visible: true, color: 'var(--put)', lineWidth: 2, lineStyle: 'solid' },
+            ib_mid: { label: 'IBM', visible: true, color: 'var(--warn)', lineWidth: 1, lineStyle: 'dotted' },
+            ib_high_x2: { label: 'IBHx2', visible: true, color: 'var(--call)', lineWidth: 1, lineStyle: 'dotted' },
+            ib_low_x2: { label: 'IBLx2', visible: true, color: 'var(--put)', lineWidth: 1, lineStyle: 'dotted' },
+            ib_high_x3: { label: 'IBHx3', visible: true, color: 'var(--call)', lineWidth: 1, lineStyle: 'dotted' },
+            ib_low_x3: { label: 'IBLx3', visible: true, color: 'var(--put)', lineWidth: 1, lineStyle: 'dotted' },
+        };
+        const LEGACY_SESSION_LEVEL_COLORS = {
+            yesterday_high: '#10B981',
+            yesterday_low: '#EF4444',
+            premarket_high: '#10B981',
+            premarket_low: '#EF4444',
+            after_hours_high: '#10B981',
+            after_hours_low: '#EF4444',
+            opening_range_high: '#10B981',
+            opening_range_low: '#EF4444',
         };
         let priceLevelPrefs = {};
         // Auto-range: when true, chart fits all data on every update; when false, zoom/pan is preserved
@@ -10979,6 +11011,7 @@ def index():
             enabled: false,
             today: true,
             yesterday: true,
+            near_open: false,
             premarket: true,
             after_hours: true,
             opening_range: false,
@@ -10988,6 +11021,7 @@ def index():
             show_ib_mid: true,
             show_ib_cloud: false,
             show_ib_extensions: true,
+            near_open_minutes: 60,
             opening_range_minutes: 15,
             ib_start: '09:30',
             ib_end: '10:30',
@@ -11006,6 +11040,7 @@ def index():
                 enabled: !!base.enabled,
                 today: !!base.today,
                 yesterday: !!base.yesterday,
+                near_open: !!base.near_open,
                 premarket: !!base.premarket,
                 after_hours: !!base.after_hours,
                 opening_range: !!base.opening_range,
@@ -11015,6 +11050,7 @@ def index():
                 show_ib_mid: !!base.show_ib_mid,
                 show_ib_cloud: !!base.show_ib_cloud,
                 show_ib_extensions: !!base.show_ib_extensions,
+                near_open_minutes: Math.max(0, Math.min(330, parseInt(base.near_open_minutes, 10) || 0)),
                 opening_range_minutes: Math.max(1, Math.min(60, parseInt(base.opening_range_minutes, 10) || DEFAULT_SESSION_LEVEL_SETTINGS.opening_range_minutes)),
                 ib_start: /^\d{2}:\d{2}$/.test(String(base.ib_start || '')) ? String(base.ib_start) : DEFAULT_SESSION_LEVEL_SETTINGS.ib_start,
                 ib_end: /^\d{2}:\d{2}$/.test(String(base.ib_end || '')) ? String(base.ib_end) : DEFAULT_SESSION_LEVEL_SETTINGS.ib_end,
@@ -11041,6 +11077,7 @@ def index():
                 enabled: readChecked('session_levels_enabled', DEFAULT_SESSION_LEVEL_SETTINGS.enabled),
                 today: readChecked('session_today', DEFAULT_SESSION_LEVEL_SETTINGS.today),
                 yesterday: readChecked('session_yesterday', DEFAULT_SESSION_LEVEL_SETTINGS.yesterday),
+                near_open: readChecked('session_near_open', DEFAULT_SESSION_LEVEL_SETTINGS.near_open),
                 premarket: readChecked('session_premarket', DEFAULT_SESSION_LEVEL_SETTINGS.premarket),
                 after_hours: readChecked('session_after_hours', DEFAULT_SESSION_LEVEL_SETTINGS.after_hours),
                 opening_range: readChecked('session_opening_range', DEFAULT_SESSION_LEVEL_SETTINGS.opening_range),
@@ -11050,6 +11087,7 @@ def index():
                 show_ib_mid: readChecked('session_show_ib_mid', DEFAULT_SESSION_LEVEL_SETTINGS.show_ib_mid),
                 show_ib_cloud: readChecked('session_show_ib_cloud', DEFAULT_SESSION_LEVEL_SETTINGS.show_ib_cloud),
                 show_ib_extensions: readChecked('session_show_ib_extensions', DEFAULT_SESSION_LEVEL_SETTINGS.show_ib_extensions),
+                near_open_minutes: readValue('session_near_open_minutes', DEFAULT_SESSION_LEVEL_SETTINGS.near_open_minutes),
                 opening_range_minutes: readValue('session_opening_range_minutes', DEFAULT_SESSION_LEVEL_SETTINGS.opening_range_minutes),
                 ib_start: readValue('session_ib_start', DEFAULT_SESSION_LEVEL_SETTINGS.ib_start),
                 ib_end: readValue('session_ib_end', DEFAULT_SESSION_LEVEL_SETTINGS.ib_end),
@@ -11071,6 +11109,7 @@ def index():
             setChecked('session_levels_enabled', settings.enabled);
             setChecked('session_today', settings.today);
             setChecked('session_yesterday', settings.yesterday);
+            setChecked('session_near_open', settings.near_open);
             setChecked('session_premarket', settings.premarket);
             setChecked('session_after_hours', settings.after_hours);
             setChecked('session_opening_range', settings.opening_range);
@@ -11080,6 +11119,7 @@ def index():
             setChecked('session_show_ib_mid', settings.show_ib_mid);
             setChecked('session_show_ib_cloud', settings.show_ib_cloud);
             setChecked('session_show_ib_extensions', settings.show_ib_extensions);
+            setValue('session_near_open_minutes', settings.near_open_minutes);
             setValue('session_opening_range_minutes', settings.opening_range_minutes);
             setValue('session_ib_start', settings.ib_start);
             setValue('session_ib_end', settings.ib_end);
@@ -11101,6 +11141,7 @@ def index():
                 'session_levels_enabled',
                 'session_today',
                 'session_yesterday',
+                'session_near_open',
                 'session_premarket',
                 'session_after_hours',
                 'session_opening_range',
@@ -11110,6 +11151,7 @@ def index():
                 'session_show_ib_mid',
                 'session_show_ib_cloud',
                 'session_show_ib_extensions',
+                'session_near_open_minutes',
                 'session_opening_range_minutes',
                 'session_ib_start',
                 'session_ib_end',
@@ -12662,14 +12704,36 @@ def index():
         }
 
         function getDefaultPriceLevelPrefs() {
-            return Object.fromEntries(
-                Object.entries(DEFAULT_PRICE_LEVEL_PREFS).map(([key, pref]) => [key, { ...pref }])
-            );
+            return normalizePriceLevelPrefMap(DEFAULT_PRICE_LEVEL_PREFS, { migrateLegacyDefaults: false });
+        }
+
+        function rgbToHexColor(color) {
+            const value = String(color || '').trim();
+            const match = value.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i);
+            if (!match) return '';
+            const channels = match.slice(1, 4).map(v => Math.max(0, Math.min(255, Number(v) || 0)));
+            return `#${channels.map(v => v.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+        }
+
+        function resolveCssColor(color) {
+            const value = String(color || '').trim();
+            if (!value) return '';
+            const hex = value.match(/^#([0-9a-f]{6})$/i);
+            if (hex) return `#${hex[1].toUpperCase()}`;
+            const token = value.match(/^var\((--[a-z0-9-]+)\)$/i);
+            const tokenName = token ? token[1] : (/^--[a-z0-9-]+$/i.test(value) ? value : '');
+            if (tokenName) {
+                try {
+                    return resolveCssColor(getComputedStyle(document.documentElement).getPropertyValue(tokenName));
+                } catch (e) {
+                    return '';
+                }
+            }
+            return rgbToHexColor(value);
         }
 
         function normalizePriceLevelColor(color, fallback) {
-            const value = String(color || '').trim();
-            return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+            return resolveCssColor(color) || resolveCssColor(fallback) || '#9CA3AF';
         }
 
         function normalizePriceLevelLineWidth(width, fallback = 1) {
@@ -12683,16 +12747,31 @@ def index():
             return ['solid', 'dashed', 'dotted', 'large-dashed'].includes(value) ? value : fallback;
         }
 
-        function normalizePriceLevelPrefMap(prefs) {
-            const defaults = getDefaultPriceLevelPrefs();
+        function normalizePriceLevelPrefMap(prefs, options = {}) {
+            const shouldMigrateLegacyDefaults = options.migrateLegacyDefaults !== false;
+            const defaults = Object.fromEntries(
+                Object.entries(DEFAULT_PRICE_LEVEL_PREFS).map(([key, pref]) => [key, {
+                    ...pref,
+                    color: normalizePriceLevelColor(pref.color, '#9CA3AF'),
+                }])
+            );
             const source = prefs && typeof prefs === 'object' ? prefs : {};
             Object.keys(defaults).forEach(key => {
                 const base = defaults[key];
                 const next = source[key] && typeof source[key] === 'object' ? source[key] : {};
+                let nextColor = next.color;
+                const legacyColor = LEGACY_SESSION_LEVEL_COLORS[key];
+                if (shouldMigrateLegacyDefaults && nextColor !== undefined && legacyColor) {
+                    const currentColor = normalizePriceLevelColor(nextColor, '');
+                    const oldDefaultColor = normalizePriceLevelColor(legacyColor, '');
+                    if (currentColor && oldDefaultColor && currentColor.toLowerCase() === oldDefaultColor.toLowerCase()) {
+                        nextColor = base.color;
+                    }
+                }
                 defaults[key] = {
                     label: base.label,
                     visible: next.visible === undefined ? base.visible : !!next.visible,
-                    color: normalizePriceLevelColor(next.color, base.color),
+                    color: normalizePriceLevelColor(nextColor, base.color),
                     lineWidth: normalizePriceLevelLineWidth(next.lineWidth, base.lineWidth),
                     lineStyle: normalizePriceLevelLineStyle(next.lineStyle, base.lineStyle),
                 };
@@ -12859,7 +12938,7 @@ def index():
                 priceLevelPrefs = getDefaultPriceLevelPrefs();
             }
             if (!priceLevelPrefs[key] && DEFAULT_PRICE_LEVEL_PREFS[key]) {
-                priceLevelPrefs[key] = { ...DEFAULT_PRICE_LEVEL_PREFS[key] };
+                priceLevelPrefs[key] = normalizePriceLevelPrefMap({ [key]: DEFAULT_PRICE_LEVEL_PREFS[key] }, { migrateLegacyDefaults: false })[key];
             }
             return priceLevelPrefs[key] || null;
         }
@@ -17501,6 +17580,8 @@ def index():
                 { key: 'yesterday_low',      enabled: settings.yesterday },
                 { key: 'yesterday_open',     enabled: settings.yesterday },
                 { key: 'yesterday_close',    enabled: settings.yesterday },
+                { key: 'near_open_high',     enabled: settings.near_open },
+                { key: 'near_open_low',      enabled: settings.near_open },
                 { key: 'premarket_high',     enabled: settings.premarket },
                 { key: 'premarket_low',      enabled: settings.premarket },
                 { key: 'after_hours_high',   enabled: settings.after_hours },
