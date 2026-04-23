@@ -9192,6 +9192,13 @@ def index():
             opacity: 0.55;
             cursor: not-allowed;
         }
+        .tv-drawing-editor-row input[type="checkbox"] {
+            width: 14px;
+            height: 14px;
+            margin: 0;
+            accent-color: var(--accent);
+            cursor: pointer;
+        }
         .tv-drawing-editor-actions {
             display: flex;
             justify-content: flex-end;
@@ -9359,6 +9366,61 @@ def index():
         }
         .tv-toolbar-group[data-group="actions"] {
             background: rgba(59, 130, 246, 0.06);
+        }
+        .tv-draw-dropdown {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+        }
+        .tv-draw-dropdown-menu {
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 128;
+            min-width: 154px;
+            padding: 4px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: linear-gradient(180deg, rgba(18, 22, 30, 0.98), rgba(10, 12, 17, 0.98));
+            box-shadow: 0 14px 32px rgba(0, 0, 0, 0.38);
+            display: none;
+        }
+        .tv-draw-dropdown.open .tv-draw-dropdown-menu {
+            display: grid;
+            gap: 2px;
+        }
+        .tv-draw-menu-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--fg-1);
+            border-radius: 7px;
+            padding: 6px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            text-align: left;
+        }
+        .tv-draw-menu-item:hover,
+        .tv-draw-menu-item.active {
+            color: var(--fg-0);
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(255, 255, 255, 0.08);
+        }
+        .tv-draw-pill-text {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .tv-draw-pill-swatch {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+            flex: 0 0 auto;
         }
         .tv-toolbar-sep {
             width: 1px;
@@ -10876,7 +10938,7 @@ def index():
         // Time-scale sync state
         let tvSyncHandlers = [], tvSyncingTimeScale = false;
         // Drawing state
-        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'rect' | 'text'
+        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'text'
         let tvDrawStart = null;         // {price, time, x, y} of first click
         let tvDrawingDefs = [];         // serializable drawing definitions — survive full re-renders
         let tvDrawingPreviewDef = null; // transient preview while placing a multi-click drawing
@@ -10885,6 +10947,10 @@ def index():
         let tvDrawingOverlayPending = false;
         let tvSessionCloudOverlayPending = false;
         let tvDrawingIdCounter = 0;
+        let tvOpenDrawMenuRoot = null;
+        let tvOpenDrawMenuAnchor = null;
+        let tvOpenDrawMenuPanel = null;
+        let tvToolbarMenuDismissBound = false;
         let tvLastCandles = [];         // current-day display candles (for streaming OHLCV updates)
         let tvIndicatorCandles = [];    // multi-day candles for indicator warmup (SMA200, EMA, etc.)
         let tvIndicatorDataCache = {};  // rendered indicator datapoints for click-hit testing
@@ -10964,8 +11030,15 @@ def index():
         const GEX_COL_WIDTH_KEY = 'gex.sidePanelWidthPx';
         const TIMEFRAME_STORAGE_KEY = 'gex.selectedTimeframe';
         const TV_DRAWING_STORE_KEY = 'gex.tvDrawingStore.v2';
+        const TV_DRAWING_TOOL_PREFS_KEY = 'gex.tvDrawingToolPrefs.v1';
         const TV_INDICATOR_STATE_KEY = 'gex.tvIndicatorState.v1';
         const PRICE_LEVEL_PREFS_KEY = 'gex.priceLevelPrefs.v1';
+        const TV_HLINE_PRESETS = {
+            support: { label: 'Support', shortLabel: 'Sup', color: '#10B981' },
+            resistance: { label: 'Resistance', shortLabel: 'Res', color: '#EF4444' },
+            neutral: { label: 'Neutral', shortLabel: 'Neutral', color: '#94A3B8' },
+            custom: { label: 'Custom', shortLabel: 'Custom', color: null },
+        };
         const STRIKE_RAIL_CHART_IDS = ['gamma', 'delta', 'vanna', 'charm', 'open_interest', 'options_volume', 'premium'];
         const STRIKE_RAIL_LABELS = {
             gex: 'GEX',
@@ -13576,9 +13649,99 @@ def index():
             return `tvd-${Date.now().toString(36)}-${tvDrawingIdCounter.toString(36)}`;
         }
 
-        function getTVDrawingColorFallback() {
+        function loadTVDrawingToolPrefs() {
+            try {
+                const parsed = JSON.parse(localStorage.getItem(TV_DRAWING_TOOL_PREFS_KEY) || '{}');
+                return parsed && typeof parsed === 'object' ? parsed : {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function saveTVDrawingToolPrefs(prefs) {
+            try {
+                localStorage.setItem(TV_DRAWING_TOOL_PREFS_KEY, JSON.stringify(prefs || {}));
+            } catch (e) {}
+        }
+
+        function normalizeTVHLinePresetKey(value) {
+            const key = String(value || '').trim().toLowerCase();
+            return Object.prototype.hasOwnProperty.call(TV_HLINE_PRESETS, key) ? key : 'custom';
+        }
+
+        function getTVHLinePreset(key) {
+            return TV_HLINE_PRESETS[normalizeTVHLinePresetKey(key)] || TV_HLINE_PRESETS.custom;
+        }
+
+        function getActiveTVHLinePresetKey() {
+            const prefs = loadTVDrawingToolPrefs();
+            return normalizeTVHLinePresetKey(prefs.hlinePreset);
+        }
+
+        function setActiveTVHLinePresetKey(nextKey, options = {}) {
+            const presetKey = normalizeTVHLinePresetKey(nextKey);
+            const prefs = loadTVDrawingToolPrefs();
+            prefs.hlinePreset = presetKey;
+            saveTVDrawingToolPrefs(prefs);
+            if (options.syncToolbar !== false) {
+                syncTVHLineToolbarPreset();
+            }
+            return presetKey;
+        }
+
+        function getTVHLinePresetColor(presetKey, fallback = '#FFD700') {
+            const preset = getTVHLinePreset(presetKey);
+            return preset.color || fallback;
+        }
+
+        function normalizeTVDrawingMidlineVisible(value) {
+            return value !== false;
+        }
+
+        function getTVDrawingColorFallback(mode = tvDrawMode) {
             const colorInput = document.getElementById('tv-draw-color');
-            return colorInput ? colorInput.value : '#FFD700';
+            const fallback = colorInput ? colorInput.value : '#FFD700';
+            if (mode === 'hline') {
+                return getTVHLinePresetColor(getActiveTVHLinePresetKey(), fallback);
+            }
+            return fallback;
+        }
+
+        function getTVHLinePresetToggleMarkup(presetKey) {
+            const preset = getTVHLinePreset(presetKey);
+            const swatchColor = preset.color || getTVDrawingColorFallback('custom');
+            return '<span class="tv-draw-pill-swatch" style="background:' + swatchColor + '"></span><span>▾</span>';
+        }
+
+        function syncTVHLineToolbarPreset() {
+            const button = document.getElementById('tv-hline-draw-button');
+            const toggle = document.getElementById('tv-hline-preset-toggle');
+            const presetKey = getActiveTVHLinePresetKey();
+            const preset = getTVHLinePreset(presetKey);
+            if (button) {
+                button.dataset.hlinePreset = presetKey;
+                button.title = `Draw ${preset.label} H-Line`;
+            }
+            if (toggle) {
+                toggle.innerHTML = getTVHLinePresetToggleMarkup(presetKey);
+                toggle.title = `Choose H-Line preset (current: ${preset.label})`;
+            }
+            document.querySelectorAll('.tv-draw-menu-item[data-hline-preset]').forEach(node => {
+                const nodePreset = getTVHLinePreset(node.dataset.hlinePreset);
+                node.innerHTML =
+                    '<span class="tv-draw-pill-swatch" style="background:' + (nodePreset.color || getTVDrawingColorFallback('custom')) + '"></span>' +
+                    nodePreset.label;
+                node.classList.toggle('active', node.dataset.hlinePreset === presetKey);
+            });
+        }
+
+        function applyTVHLinePresetToDef(def, presetKey, options = {}) {
+            if (!def || def.type !== 'hline') return def;
+            const fallback = options.fallbackColor || def.color || getTVDrawingColorFallback('custom');
+            const normalizedPreset = normalizeTVHLinePresetKey(presetKey);
+            def.preset = normalizedPreset;
+            def.color = getTVHLinePresetColor(normalizedPreset, fallback);
+            return def;
         }
 
         function clampTVDrawingLineWidth(width) {
@@ -13598,7 +13761,7 @@ def index():
 
         function normalizeTVDrawingLabelPosition(type, position) {
             const value = String(position || '').trim().toLowerCase();
-            if (type === 'trendline') {
+            if (type === 'trendline' || type === 'channel') {
                 return ['auto', 'start', 'middle', 'end'].includes(value) ? value : 'auto';
             }
             if (type === 'rect') {
@@ -13617,11 +13780,22 @@ def index():
             normalized.logical = normalizeTVDrawingLogical(normalized.logical);
             normalized.l1 = normalizeTVDrawingLogical(normalized.l1);
             normalized.l2 = normalizeTVDrawingLogical(normalized.l2);
+            normalized.l3 = normalizeTVDrawingLogical(normalized.l3);
             normalized.labelPosition = normalizeTVDrawingLabelPosition(normalized.type, normalized.labelPosition);
             if (normalized.type === 'text') {
                 normalized.text = String(normalized.text || 'Label').slice(0, 40);
             } else {
                 normalized.label = String(normalized.label || '').slice(0, 40);
+            }
+            if (normalized.type === 'hline') {
+                applyTVHLinePresetToDef(normalized, normalized.preset, { fallbackColor: normalized.color });
+            } else {
+                delete normalized.preset;
+            }
+            if (normalized.type === 'channel') {
+                normalized.showMidline = normalizeTVDrawingMidlineVisible(normalized.showMidline);
+            } else {
+                delete normalized.showMidline;
             }
             if (normalized.id !== '__preview__') {
                 if (Number.isFinite(Number(normalized.time))) {
@@ -13632,6 +13806,9 @@ def index():
                 }
                 if (Number.isFinite(Number(normalized.t2))) {
                     normalized.l2 = null;
+                }
+                if (Number.isFinite(Number(normalized.t3))) {
+                    normalized.l3 = null;
                 }
             }
             return normalized;
@@ -13773,6 +13950,53 @@ def index():
                 return Number.isFinite(timeX) ? timeX : null;
             }
             return Number.isFinite(logicalValue) ? tvLogicalToCoordinate(logicalValue) : null;
+        }
+
+        function tvResolveDrawingAnchorLogicalValue(timeValue, logicalValue) {
+            if (Number.isFinite(logicalValue)) return logicalValue;
+            if (Number.isFinite(timeValue)) return tvTimeToLogical(Number(timeValue));
+            return null;
+        }
+
+        function tvComputeChannelData(def) {
+            if (!def || def.type !== 'channel') return null;
+            const l1 = tvResolveDrawingAnchorLogicalValue(def.t1, def.l1);
+            const l2 = tvResolveDrawingAnchorLogicalValue(def.t2, def.l2);
+            const l3 = tvResolveDrawingAnchorLogicalValue(def.t3, def.l3);
+            const p1 = Number(def.p1);
+            const p2 = Number(def.p2);
+            const p3 = Number(def.p3);
+            if (![l1, l2, l3, p1, p2, p3].every(Number.isFinite)) return null;
+            const dx = l2 - l1;
+            if (Math.abs(dx) < 1e-6) {
+                return {
+                    vertical: true,
+                    l1,
+                    l2,
+                    l3,
+                    p1,
+                    p2,
+                    p3,
+                    mid1: p1,
+                    mid2: p2,
+                };
+            }
+            const slope = (p2 - p1) / dx;
+            const q1 = p3 + (slope * (l1 - l3));
+            const q2 = p3 + (slope * (l2 - l3));
+            return {
+                vertical: false,
+                l1,
+                l2,
+                l3,
+                p1,
+                p2,
+                p3,
+                q1,
+                q2,
+                mid1: (p1 + q1) / 2,
+                mid2: (p2 + q2) / 2,
+            };
         }
 
         function measureTVDrawingBadgeWidth(text, minWidth, maxWidth, leadingPad = 8) {
@@ -13923,7 +14147,7 @@ def index():
         }
 
         function getTVDrawingLabelPositionOptions(type) {
-            if (type === 'trendline') {
+            if (type === 'trendline' || type === 'channel') {
                 return [
                     { value: 'auto', label: 'Auto' },
                     { value: 'start', label: 'Start' },
@@ -14140,6 +14364,15 @@ def index():
                         '<label for="tv-selected-draw-color">Color</label>' +
                         '<input type="color" id="tv-selected-draw-color" />' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-preset-row">' +
+                        '<label for="tv-selected-draw-preset">Preset</label>' +
+                        '<select id="tv-selected-draw-preset">' +
+                            '<option value="support">Support</option>' +
+                            '<option value="resistance">Resistance</option>' +
+                            '<option value="neutral">Neutral</option>' +
+                            '<option value="custom">Custom</option>' +
+                        '</select>' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-row">' +
                         '<label for="tv-selected-draw-width">Thickness</label>' +
                         '<select id="tv-selected-draw-width">' +
@@ -14166,6 +14399,10 @@ def index():
                         '<label for="tv-selected-draw-label-position">Label Position</label>' +
                         '<select id="tv-selected-draw-label-position"></select>' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-midline-row">' +
+                        '<label for="tv-selected-draw-midline">Midline</label>' +
+                        '<input type="checkbox" id="tv-selected-draw-midline" />' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-actions">' +
                         '<button type="button" class="tv-tb-btn danger" data-action="delete">Delete</button>' +
                     '</div>';
@@ -14184,16 +14421,31 @@ def index():
                     tvDrawingDefs = tvDrawingDefs.filter(def => def.id !== tvSelectedDrawingId);
                     tvSelectedDrawingId = null;
                     persistTVDrawings();
-                    tvRefreshDrawingLevels();
+                    tvRestoreDrawings();
                     updateTVDrawingEditor();
-                    scheduleTVDrawingOverlayDraw();
                 });
                 editor.querySelector('#tv-selected-draw-color').addEventListener('input', event => {
                     const def = tvFindDrawingById();
                     if (!def) return;
-                    def.color = event.target.value || def.color;
+                    const nextColor = event.target.value || def.color;
+                    if (def.type === 'hline') {
+                        applyTVHLinePresetToDef(def, 'custom', { fallbackColor: nextColor });
+                    }
+                    def.color = nextColor;
                     persistTVDrawings();
-                    if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    if (def.type === 'hline') {
+                        syncTVUserHLinePriceLines();
+                        updateTVDrawingEditor();
+                    }
+                    scheduleTVDrawingOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-preset').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || def.type !== 'hline') return;
+                    applyTVHLinePresetToDef(def, event.target.value, { fallbackColor: def.color });
+                    persistTVDrawings();
+                    syncTVUserHLinePriceLines();
+                    updateTVDrawingEditor();
                     scheduleTVDrawingOverlayDraw();
                 });
                 editor.querySelector('#tv-selected-draw-width').addEventListener('change', event => {
@@ -14232,6 +14484,13 @@ def index():
                     persistTVDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
+                editor.querySelector('#tv-selected-draw-midline').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || def.type !== 'channel') return;
+                    def.showMidline = !!event.target.checked;
+                    persistTVDrawings();
+                    scheduleTVDrawingOverlayDraw();
+                });
             }
             return editor;
         }
@@ -14246,19 +14505,30 @@ def index():
             }
             const titleEl = editor.querySelector('#tv-drawing-editor-title');
             const colorInput = editor.querySelector('#tv-selected-draw-color');
+            const presetRow = editor.querySelector('#tv-drawing-preset-row');
+            const presetSelect = editor.querySelector('#tv-selected-draw-preset');
             const widthSelect = editor.querySelector('#tv-selected-draw-width');
             const styleSelect = editor.querySelector('#tv-selected-draw-style');
             const textInput = editor.querySelector('#tv-selected-draw-text');
             const labelPositionRow = editor.querySelector('#tv-drawing-label-position-row');
             const labelPositionSelect = editor.querySelector('#tv-selected-draw-label-position');
+            const midlineRow = editor.querySelector('#tv-drawing-midline-row');
+            const midlineInput = editor.querySelector('#tv-selected-draw-midline');
             if (titleEl) {
                 const typeLabel = def.type === 'hline' ? 'H-Line'
                     : def.type === 'trendline' ? 'Trend Line'
+                    : def.type === 'channel' ? 'Channel'
                     : def.type === 'rect' ? 'Box'
                     : 'Text Label';
                 titleEl.textContent = typeLabel;
             }
             if (colorInput) colorInput.value = def.color || '#FFD700';
+            if (presetRow && presetSelect) {
+                const isHLine = def.type === 'hline';
+                presetRow.style.display = isHLine ? 'flex' : 'none';
+                presetSelect.value = normalizeTVHLinePresetKey(def.preset);
+                presetSelect.disabled = !isHLine;
+            }
             if (widthSelect) {
                 widthSelect.value = String(clampTVDrawingLineWidth(def.lineWidth));
                 widthSelect.disabled = def.type === 'text';
@@ -14285,6 +14555,12 @@ def index():
                     labelPositionSelect.innerHTML = '';
                     labelPositionSelect.disabled = true;
                 }
+            }
+            if (midlineRow && midlineInput) {
+                const isChannel = def.type === 'channel';
+                midlineRow.style.display = isChannel ? 'flex' : 'none';
+                midlineInput.checked = isChannel ? normalizeTVDrawingMidlineVisible(def.showMidline) : true;
+                midlineInput.disabled = !isChannel;
             }
             editor.classList.add('visible');
         }
@@ -14349,6 +14625,59 @@ def index():
                 const y2 = def.previewY2 != null ? def.previewY2 : tvCandleSeries.priceToCoordinate(def.p2);
                 if ([x1, x2, y1, y2].some(v => v == null || Number.isNaN(v))) return null;
                 return { type: 'trendline', x1, y1, x2, y2 };
+            }
+            if (def.type === 'channel') {
+                const channel = tvComputeChannelData(def);
+                if (!channel) return null;
+                const x1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                const x2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
+                if ([x1, x2].some(v => v == null || Number.isNaN(v))) return null;
+                const y1 = tvCandleSeries.priceToCoordinate(channel.p1);
+                const y2 = tvCandleSeries.priceToCoordinate(channel.p2);
+                if ([y1, y2].some(v => v == null || Number.isNaN(v))) return null;
+                if (channel.vertical) {
+                    const x3 = tvResolveDrawingAnchorX(def.t3, def.l3, def.previewX3);
+                    if (x3 == null || Number.isNaN(x3)) return null;
+                    const parallelX1 = x1 + (x3 - x1);
+                    const parallelX2 = x2 + (x3 - x2);
+                    return {
+                        type: 'channel',
+                        vertical: true,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        px1: parallelX1,
+                        py1: y1,
+                        px2: parallelX2,
+                        py2: y2,
+                        mx1: x1 + ((parallelX1 - x1) / 2),
+                        my1: y1,
+                        mx2: x2 + ((parallelX2 - x2) / 2),
+                        my2: y2,
+                    };
+                }
+                const py1 = tvCandleSeries.priceToCoordinate(channel.q1);
+                const py2 = tvCandleSeries.priceToCoordinate(channel.q2);
+                const my1 = tvCandleSeries.priceToCoordinate(channel.mid1);
+                const my2 = tvCandleSeries.priceToCoordinate(channel.mid2);
+                if ([py1, py2, my1, my2].some(v => v == null || Number.isNaN(v))) return null;
+                return {
+                    type: 'channel',
+                    vertical: false,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    px1: x1,
+                    py1,
+                    px2: x2,
+                    py2,
+                    mx1: x1,
+                    my1,
+                    mx2: x2,
+                    my2,
+                };
             }
             if (def.type === 'rect') {
                 const startY = tvCandleSeries.priceToCoordinate(def.startPrice != null ? def.startPrice : def.top);
@@ -14499,6 +14828,90 @@ def index():
                     bindSelect(hit);
                     group.appendChild(hit);
                 }
+            } else if (screen.type === 'channel') {
+                group.appendChild(createSvgEl('polygon', {
+                    class: 'tv-drawing-shape',
+                    points: `${screen.x1},${screen.y1} ${screen.x2},${screen.y2} ${screen.px2},${screen.py2} ${screen.px1},${screen.py1}`,
+                    fill: def.color,
+                    'fill-opacity': isPreview ? 0.07 : 0.1,
+                    stroke: 'none',
+                }));
+                if (!isPreview && def.id === tvSelectedDrawingId) {
+                    [
+                        { x1: screen.x1, y1: screen.y1, x2: screen.x2, y2: screen.y2 },
+                        { x1: screen.px1, y1: screen.py1, x2: screen.px2, y2: screen.py2 },
+                    ].forEach(line => {
+                        group.appendChild(createSvgEl('line', {
+                            class: 'tv-drawing-shape',
+                            x1: line.x1,
+                            y1: line.y1,
+                            x2: line.x2,
+                            y2: line.y2,
+                            stroke: 'rgba(255,255,255,0.42)',
+                            'stroke-width': Math.max(strokeWidth + 1, 3),
+                            'stroke-linecap': 'round',
+                        }));
+                    });
+                }
+                [
+                    { x1: screen.x1, y1: screen.y1, x2: screen.x2, y2: screen.y2 },
+                    { x1: screen.px1, y1: screen.py1, x2: screen.px2, y2: screen.py2 },
+                ].forEach(line => {
+                    group.appendChild(createSvgEl('line', {
+                        class: 'tv-drawing-shape',
+                        x1: line.x1,
+                        y1: line.y1,
+                        x2: line.x2,
+                        y2: line.y2,
+                        stroke: def.color,
+                        'stroke-width': strokeWidth,
+                        'stroke-dasharray': dashArray || null,
+                        'stroke-linecap': 'round',
+                        opacity: isPreview ? 0.8 : 1,
+                    }));
+                });
+                if (def.showMidline !== false) {
+                    group.appendChild(createSvgEl('line', {
+                        class: 'tv-drawing-shape',
+                        x1: screen.mx1,
+                        y1: screen.my1,
+                        x2: screen.mx2,
+                        y2: screen.my2,
+                        stroke: def.color,
+                        'stroke-width': Math.max(1, strokeWidth - 1),
+                        'stroke-dasharray': '7 6',
+                        'stroke-linecap': 'round',
+                        opacity: 0.72,
+                    }));
+                }
+                if (labelText) {
+                    appendTVDrawingBadge(group, Object.assign({
+                        label: labelText,
+                        color: def.color,
+                    }, getTVTrendlineLabelPlacement({
+                        x1: screen.mx1,
+                        y1: screen.my1,
+                        x2: screen.mx2,
+                        y2: screen.my2,
+                    }, def.labelPosition, width, height)));
+                }
+                if (interactive) {
+                    [
+                        { x1: screen.x1, y1: screen.y1, x2: screen.x2, y2: screen.y2 },
+                        { x1: screen.px1, y1: screen.py1, x2: screen.px2, y2: screen.py2 },
+                    ].forEach(line => {
+                        const hit = createSvgEl('line', {
+                            class: 'tv-drawing-hitbox',
+                            x1: line.x1,
+                            y1: line.y1,
+                            x2: line.x2,
+                            y2: line.y2,
+                            'stroke-width': Math.max(12, strokeWidth + 8),
+                        });
+                        bindSelect(hit);
+                        group.appendChild(hit);
+                    });
+                }
             } else if (screen.type === 'rect') {
                 group.appendChild(createSvgEl('rect', {
                     class: 'tv-drawing-shape',
@@ -14586,17 +14999,21 @@ def index():
             if (tvDrawingPreviewDef) {
                 appendTVDrawingShape(svg, tvDrawingPreviewDef, true, width, height);
             }
-            if (tvDrawStart && (tvDrawMode === 'trendline' || tvDrawMode === 'rect')) {
-                const x = tvResolveDrawingAnchorX(tvDrawStart.time, tvDrawStart.logical, null);
-                const y = tvCandleSeries.priceToCoordinate(tvDrawStart.price);
-                if (x != null && y != null && !Number.isNaN(x) && !Number.isNaN(y)) {
+            const pendingPoints = Array.isArray(tvDrawStart && tvDrawStart.points)
+                ? tvDrawStart.points
+                : (tvDrawStart ? [tvDrawStart] : []);
+            if (pendingPoints.length && (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel')) {
+                pendingPoints.forEach(point => {
+                    const x = tvResolveDrawingAnchorX(point.time, point.logical, null);
+                    const y = tvCandleSeries.priceToCoordinate(point.price);
+                    if (x == null || y == null || Number.isNaN(x) || Number.isNaN(y)) return;
                     svg.appendChild(createSvgEl('circle', {
                         class: 'tv-drawing-anchor',
                         cx: x,
                         cy: y,
                         r: 4.5,
                     }));
-                }
+                });
             }
             updateTVDrawingEditor();
         }
@@ -14676,15 +15093,17 @@ def index():
                     text: 'Label',
                     color: drawColor,
                 });
-            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect') && tvDrawStart) {
-                if (tvDrawMode === 'trendline') {
+            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel') && tvDrawStart) {
+                const drawPoints = Array.isArray(tvDrawStart.points) ? tvDrawStart.points : [tvDrawStart];
+                if (tvDrawMode === 'trendline' && drawPoints.length === 1) {
+                    const startPoint = drawPoints[0];
                     nextPreview = normalizeTVDrawingDef({
                         id: '__preview__',
                         type: 'trendline',
-                        t1: tvDrawStart.time,
-                        l1: tvDrawStart.logical,
-                        p1: tvDrawStart.price,
-                        t2: point.time || tvDrawStart.time,
+                        t1: startPoint.time,
+                        l1: startPoint.logical,
+                        p1: startPoint.price,
+                        t2: point.time || startPoint.time,
                         l2: point.logical,
                         p2: previewPoint.price,
                         previewX2: previewPoint.x,
@@ -14693,23 +15112,65 @@ def index():
                         lineWidth: 2,
                         lineStyle: 'dashed',
                     });
-                } else {
+                } else if (tvDrawMode === 'rect' && drawPoints.length === 1) {
+                    const startPoint = drawPoints[0];
                     nextPreview = normalizeTVDrawingDef({
                         id: '__preview__',
                         type: 'rect',
-                        t1: tvDrawStart.time,
-                        l1: tvDrawStart.logical,
-                        t2: point.time || tvDrawStart.time,
+                        t1: startPoint.time,
+                        l1: startPoint.logical,
+                        t2: point.time || startPoint.time,
                         l2: point.logical,
-                        top: Math.max(tvDrawStart.price, previewPoint.price),
-                        bot: Math.min(tvDrawStart.price, previewPoint.price),
-                        startPrice: tvDrawStart.price,
+                        top: Math.max(startPoint.price, previewPoint.price),
+                        bot: Math.min(startPoint.price, previewPoint.price),
+                        startPrice: startPoint.price,
                         previewX2: previewPoint.x,
                         previewY2: previewPoint.y,
                         color: drawColor,
                         lineWidth: 2,
                         lineStyle: 'dashed',
                     });
+                } else if (tvDrawMode === 'channel') {
+                    if (drawPoints.length === 1) {
+                        const startPoint = drawPoints[0];
+                        nextPreview = normalizeTVDrawingDef({
+                            id: '__preview__',
+                            type: 'trendline',
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
+                            p1: startPoint.price,
+                            t2: point.time || startPoint.time,
+                            l2: point.logical,
+                            p2: previewPoint.price,
+                            previewX2: previewPoint.x,
+                            previewY2: previewPoint.y,
+                            color: drawColor,
+                            lineWidth: 2,
+                            lineStyle: 'dashed',
+                        });
+                    } else if (drawPoints.length >= 2) {
+                        const first = drawPoints[0];
+                        const second = drawPoints[1];
+                        nextPreview = normalizeTVDrawingDef({
+                            id: '__preview__',
+                            type: 'channel',
+                            t1: first.time,
+                            l1: first.logical,
+                            p1: first.price,
+                            t2: second.time,
+                            l2: second.logical,
+                            p2: second.price,
+                            t3: point.time || second.time,
+                            l3: point.logical,
+                            p3: previewPoint.price,
+                            previewX3: previewPoint.x,
+                            previewY3: previewPoint.y,
+                            color: drawColor,
+                            lineWidth: 2,
+                            lineStyle: 'dashed',
+                            showMidline: true,
+                        });
+                    }
                 }
             }
             const previous = JSON.stringify(tvDrawingPreviewDef || null);
@@ -14720,13 +15181,77 @@ def index():
             }
         }
 
+        function closeTVToolbarMenus() {
+            if (tvOpenDrawMenuRoot) {
+                tvOpenDrawMenuRoot.classList.remove('open');
+            }
+            if (tvOpenDrawMenuPanel) {
+                tvOpenDrawMenuPanel.style.left = '0px';
+                tvOpenDrawMenuPanel.style.top = '0px';
+            }
+            tvOpenDrawMenuRoot = null;
+            tvOpenDrawMenuAnchor = null;
+            tvOpenDrawMenuPanel = null;
+        }
+
+        function positionTVOpenDrawMenu() {
+            if (!tvOpenDrawMenuAnchor || !tvOpenDrawMenuPanel || !tvOpenDrawMenuRoot) return;
+            const anchorRect = tvOpenDrawMenuAnchor.getBoundingClientRect();
+            const panel = tvOpenDrawMenuPanel;
+            const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+            const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+            const panelRect = panel.getBoundingClientRect();
+            const panelWidth = panelRect.width || 154;
+            const panelHeight = panelRect.height || 0;
+            const left = Math.max(8, Math.min(viewportWidth - panelWidth - 8, anchorRect.left));
+            const preferredTop = anchorRect.bottom + 6;
+            const top = (preferredTop + panelHeight + 8 <= viewportHeight)
+                ? preferredTop
+                : Math.max(8, anchorRect.top - panelHeight - 6);
+            panel.style.left = `${Math.round(left)}px`;
+            panel.style.top = `${Math.round(top)}px`;
+        }
+
+        function openTVToolbarMenu(root, anchor, panel) {
+            if (!root || !anchor || !panel) return;
+            closeTVToolbarMenus();
+            root.classList.add('open');
+            tvOpenDrawMenuRoot = root;
+            tvOpenDrawMenuAnchor = anchor;
+            tvOpenDrawMenuPanel = panel;
+            positionTVOpenDrawMenu();
+        }
+
+        function bindTVToolbarMenuDismiss() {
+            if (tvToolbarMenuDismissBound) return;
+            tvToolbarMenuDismissBound = true;
+            document.addEventListener('pointerdown', event => {
+                if (!tvOpenDrawMenuRoot) return;
+                if (tvOpenDrawMenuRoot.contains(event.target)) return;
+                closeTVToolbarMenus();
+            });
+            document.addEventListener('keydown', event => {
+                if (event.key === 'Escape') closeTVToolbarMenus();
+            });
+            window.addEventListener('resize', () => {
+                if (!tvOpenDrawMenuRoot) return;
+                positionTVOpenDrawMenu();
+            });
+            document.addEventListener('scroll', () => {
+                if (!tvOpenDrawMenuRoot) return;
+                positionTVOpenDrawMenu();
+            }, true);
+        }
+
         function setDrawMode(mode) {
             tvDrawMode = (tvDrawMode === mode) ? null : mode;  // toggle
             tvDrawStart = null;
             clearTVDrawingPreview();
+            closeTVToolbarMenus();
             const container = document.getElementById('price-chart');
             if (!container) return;
             container.classList.toggle('draw-mode', !!tvDrawMode);
+            container.title = '';
             // Sync button states
             document.querySelectorAll('.tv-tb-btn[data-draw]').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.draw === tvDrawMode);
@@ -14779,7 +15304,7 @@ def index():
             const point = tvResolveChartPoint(param);
             if (!point) return;
             const { price, time: clickTime, logical } = point;
-            const drawColor = getTVDrawingColorFallback();
+            const drawColor = getTVDrawingColorFallback(tvDrawMode);
 
             if (tvDrawMode === 'hline') {
                 finishTVDrawingCreation({
@@ -14788,25 +15313,28 @@ def index():
                     color: drawColor,
                     lineWidth: 2,
                     lineStyle: 'solid',
+                    preset: getActiveTVHLinePresetKey(),
                 });
                 return;
             }
 
             if (tvDrawMode === 'trendline' || tvDrawMode === 'rect') {
                 if (!clickTime) return; // still no time — bail
-                if (!tvDrawStart) {
-                    tvDrawStart = { price, time: clickTime, logical };
+                const drawPoints = Array.isArray(tvDrawStart && tvDrawStart.points) ? tvDrawStart.points : [];
+                if (!drawPoints.length) {
+                    tvDrawStart = { points: [{ price, time: clickTime, logical }] };
                     // Show visual hint that first point is set
                     const container = document.getElementById('price-chart');
                     if (container) { container.title = 'Click second point to complete drawing'; }
                     scheduleTVDrawingOverlayDraw();
                 } else {
+                    const startPoint = drawPoints[0];
                     if (tvDrawMode === 'trendline') {
                         finishTVDrawingCreation({
                             type: 'trendline',
-                            t1: tvDrawStart.time,
-                            l1: tvDrawStart.logical,
-                            p1: tvDrawStart.price,
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
+                            p1: startPoint.price,
                             t2: clickTime,
                             l2: logical,
                             p2: price,
@@ -14817,12 +15345,12 @@ def index():
                     } else if (tvDrawMode === 'rect') {
                         finishTVDrawingCreation({
                             type: 'rect',
-                            t1: tvDrawStart.time,
-                            l1: tvDrawStart.logical,
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
                             t2: clickTime,
                             l2: logical,
-                            top: Math.max(tvDrawStart.price, price),
-                            bot: Math.min(tvDrawStart.price, price),
+                            top: Math.max(startPoint.price, price),
+                            bot: Math.min(startPoint.price, price),
                             color: drawColor,
                             lineWidth: 2,
                             lineStyle: 'solid',
@@ -14832,6 +15360,46 @@ def index():
                     const container = document.getElementById('price-chart');
                     if (container) container.title = '';
                 }
+                return;
+            }
+
+            if (tvDrawMode === 'channel') {
+                if (!clickTime) return;
+                const drawPoints = Array.isArray(tvDrawStart && tvDrawStart.points) ? tvDrawStart.points.slice() : [];
+                drawPoints.push({ price, time: clickTime, logical });
+                if (drawPoints.length === 1) {
+                    tvDrawStart = { points: drawPoints };
+                    const container = document.getElementById('price-chart');
+                    if (container) container.title = 'Click second point to set the channel trend';
+                    scheduleTVDrawingOverlayDraw();
+                    return;
+                }
+                if (drawPoints.length === 2) {
+                    tvDrawStart = { points: drawPoints };
+                    const container = document.getElementById('price-chart');
+                    if (container) container.title = 'Click third point to set the channel width';
+                    scheduleTVDrawingOverlayDraw();
+                    return;
+                }
+                finishTVDrawingCreation({
+                    type: 'channel',
+                    t1: drawPoints[0].time,
+                    l1: drawPoints[0].logical,
+                    p1: drawPoints[0].price,
+                    t2: drawPoints[1].time,
+                    l2: drawPoints[1].logical,
+                    p2: drawPoints[1].price,
+                    t3: drawPoints[2].time,
+                    l3: drawPoints[2].logical,
+                    p3: drawPoints[2].price,
+                    color: drawColor,
+                    lineWidth: 2,
+                    lineStyle: 'solid',
+                    showMidline: true,
+                });
+                tvDrawStart = null;
+                const container = document.getElementById('price-chart');
+                if (container) container.title = '';
                 return;
             }
 
@@ -14886,6 +15454,7 @@ def index():
         function buildTVToolbar(container, candles, upColor, downColor) {
             const toolbarContainer = document.getElementById('tv-toolbar-container');
             if (!toolbarContainer) return;
+            closeTVToolbarMenus();
             toolbarContainer.innerHTML = '';
             const toolbar = toolbarContainer;
             toolbar.className = 'tv-toolbar-container';
@@ -14929,6 +15498,7 @@ def index():
             const indicatorsGroup = makeGroup('indicators');
             const drawGroup = makeGroup('draw');
             const actionsGroup = makeGroup('actions');
+            bindTVToolbarMenuDismiss();
 
             function addToGroup(group, node) {
                 group.appendChild(node);
@@ -14960,9 +15530,71 @@ def index():
 
             // --- Separator ---
             // Drawing tools
+            const hLineWrap = document.createElement('div');
+            hLineWrap.className = 'tv-draw-dropdown';
+            const hLineButton = btn('— H-Line', 'Draw horizontal price line (single click)', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (tvDrawMode === 'hline') {
+                    if (hLineWrap.classList.contains('open')) {
+                        closeTVToolbarMenus();
+                    } else {
+                        openTVToolbarMenu(hLineWrap, hLineButton, hLineMenu);
+                    }
+                    return;
+                }
+                setDrawMode('hline');
+            });
+            hLineButton.id = 'tv-hline-draw-button';
+            hLineButton.dataset.draw = 'hline';
+            if (tvDrawMode === 'hline') hLineButton.classList.add('active');
+            const hLineMenuToggle = btn('', 'Choose H-Line preset', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const isOpen = hLineWrap.classList.contains('open');
+                closeTVToolbarMenus();
+                if (!isOpen) {
+                    openTVToolbarMenu(hLineWrap, hLineMenuToggle, hLineMenu);
+                }
+            }, 'icon');
+            hLineMenuToggle.id = 'tv-hline-preset-toggle';
+            const hLineMenu = document.createElement('div');
+            hLineMenu.className = 'tv-draw-dropdown-menu';
+            [
+                { key: 'support', title: 'Draw support H-Lines in green' },
+                { key: 'resistance', title: 'Draw resistance H-Lines in red' },
+                { key: 'neutral', title: 'Draw neutral H-Lines in gray' },
+                { key: 'custom', title: 'Use the toolbar color picker for new H-Lines' },
+            ].forEach(presetDef => {
+                const preset = getTVHLinePreset(presetDef.key);
+                const option = document.createElement('button');
+                option.type = 'button';
+                option.className = 'tv-draw-menu-item';
+                option.dataset.hlinePreset = presetDef.key;
+                option.title = presetDef.title;
+                option.innerHTML =
+                    '<span class="tv-draw-pill-swatch" style="background:' + (preset.color || getTVDrawingColorFallback('custom')) + '"></span>' +
+                    preset.label;
+                option.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setActiveTVHLinePresetKey(presetDef.key);
+                    setDrawMode('hline');
+                });
+                hLineMenu.appendChild(option);
+            });
+            hLineWrap.appendChild(hLineButton);
+            hLineWrap.appendChild(hLineMenuToggle);
+            hLineWrap.appendChild(hLineMenu);
+            addToGroup(drawGroup, hLineWrap);
+            syncTVHLineToolbarPreset();
+            hLineMenu.querySelectorAll('.tv-draw-menu-item').forEach(node => {
+                node.classList.toggle('active', node.dataset.hlinePreset === getActiveTVHLinePresetKey());
+            });
+
             const drawDefs = [
-                { key:'hline',     label:'— H-Line', title:'Draw horizontal price line (single click)' },
                 { key:'trendline', label:'↗ Trend',  title:'Draw trend line (click start, click end)' },
+                { key:'channel',   label:'∥ Channel', title:'Draw parallel channel (click two trend points, then width)' },
                 { key:'rect',      label:'▭ Box',    title:'Draw rectangle between two prices (click two points)' },
                 { key:'text',      label:'T Label',  title:'Add price label (click to place)' },
             ];
@@ -14985,6 +15617,9 @@ def index():
             colorPicker.value = '#FFD700';
             colorPicker.style.cssText = 'width:24px;height:22px;border:none;background:none;cursor:pointer;padding:0;';
             colorPicker.title = 'Drawing color';
+            colorPicker.addEventListener('input', () => {
+                if (getActiveTVHLinePresetKey() === 'custom') syncTVHLineToolbarPreset();
+            });
             colorWrap.appendChild(colorLabel);
             colorWrap.appendChild(colorPicker);
             addToGroup(drawGroup, colorWrap);
@@ -17641,6 +18276,14 @@ def index():
                     tvAllLevelPrices.push(def.price);
                 } else if (def.type === 'trendline') {
                     tvAllLevelPrices.push(def.p1, def.p2);
+                } else if (def.type === 'channel') {
+                    const channel = tvComputeChannelData(def);
+                    if (channel) {
+                        tvAllLevelPrices.push(channel.p1, channel.p2);
+                        if (!channel.vertical) {
+                            tvAllLevelPrices.push(channel.q1, channel.q2, channel.mid1, channel.mid2);
+                        }
+                    }
                 } else if (def.type === 'rect') {
                     tvAllLevelPrices.push(def.top, def.bot);
                 }
