@@ -1,9 +1,9 @@
 # GEX Dashboard — TradingView Session Levels + IB Port Plan
 
-**Status:** Implementation and polish are landed locally on `main` working tree; browser/live Schwab validation still needed
+**Status:** Implementation and polish are landed locally on `codex/session-level-colors`; browser/live Schwab validation still needed
 **Owner:** Codex
 **Created:** 2026-04-22
-**Suggested branch:** `feat/session-levels-port`
+**Suggested branch:** `codex/session-level-colors`
 **Base:** `main`
 
 **Read these first:**
@@ -82,6 +82,30 @@ This document scopes a port of the user's TradingView "Key Levels + IB" indicato
   - `IBH` and `IBL`
 - Clouds use the current editable high/low colors and redraw on chart zoom / pan / resize paths.
 
+### What landed in the token color pass
+
+- Switched default price-level colors to resolve from CSS design tokens before rendering.
+- Added distinct default tones for session-level families:
+  - Today remains directional call / put with warn for open.
+  - Yesterday uses muted foreground gray.
+  - Premarket uses info / accent blue.
+  - After Hours uses warn orange.
+  - Opening Range uses accent blue with muted midpoint.
+  - Initial Balance remains call / put with warn midpoint.
+- Added a narrow migration so persisted session-level colors that still match the previous defaults move to the new family defaults, while edited custom colors are preserved.
+
+### What landed in the Near Open pass
+
+- Added `Near Open` session-level support to the backend calculator and `/update_price` payload:
+  - `NOH`
+  - `NOL`
+- Added drawer controls for:
+  - `Near Open (NOH / NOL)`
+  - `Near Open Minutes`
+- Added per-level style controls for `NOH` / `NOL` in the `Levels` modal.
+- Persisted near-open visibility and minute-window settings through the existing save/load path.
+- Kept overnight out of scope; this pass only ports the pre-open window immediately preceding the 09:30 ET cash open.
+
 ### What is implemented right now
 
 - Today:
@@ -93,6 +117,9 @@ This document scopes a port of the user's TradingView "Key Levels + IB" indicato
   - `YDL`
   - `YDO`
   - `YDC`
+- Near Open:
+  - `NOH`
+  - `NOL`
 - Premarket:
   - `PMH`
   - `PML`
@@ -127,12 +154,15 @@ This document scopes a port of the user's TradingView "Key Levels + IB" indicato
 - Lightweight Charts `createPriceLine()` cannot draw range fills, so OR / IB clouds use a separate non-interactive SVG overlay.
 - Cloud overlay redraws must remain wired to price-scale / time-scale changes. Current implementation schedules redraws from the same zoom/pan paths used by the historical and drawing overlays.
 - Session-level dedupe now compares against rendered dealer-flow prices, not every raw dealer-flow level, so hiding a dealer-flow line can reveal a same-price session line.
+- `Near Open` is defined here as the last configurable pre-open window before `09:30 ET`, clipped to the available `04:00-09:30 ET` Schwab extended-hours feed. It is not a broader overnight proxy.
+- Persisted session-level color defaults now migrate only when a stored color still matches the old default. Custom edits are intentionally preserved, so future default-color changes need the same narrow migration pattern.
 
 ### What is left to do
 
 - Run the Flask app and verify runtime behavior against live Schwab data.
 - Verify save/load round-trip from the real UI.
 - Verify ticker switches, Heikin-Ashi toggles, and timeframe changes in-browser.
+- Verify `Near Open` visibility and value changes across different `Near Open Minutes` settings.
 - Verify OR / IB cloud positioning on:
   - 1m
   - 5m
@@ -143,7 +173,6 @@ This document scopes a port of the user's TradingView "Key Levels + IB" indicato
 - Decide whether `Today` / `Yesterday` should remain hard-labeled RTH-only or expose user-facing RTH toggles.
 - Optional later:
   - IB intermediate levels
-  - Near Open
   - synthetic overnight
   - per-group style presets
   - cloud opacity controls
@@ -206,6 +235,7 @@ These decisions are locked for the first implementation:
 ### 2.1 In scope for v1
 
 - Today high / low
+- Near Open high / low
 - Opening range high / low
 - Premarket high / low
 - After-hours high / low
@@ -235,10 +265,9 @@ These decisions are locked for the first implementation:
 
 ### 2.3 Recommended defer
 
-- Near Open high / low
 - Overnight high / low
 
-Both are implementable only after the team agrees on definitions that make sense for the Schwab candle feed.
+This still needs an explicit product definition that makes sense for the Schwab candle feed.
 
 ---
 
@@ -492,7 +521,17 @@ Use `anchor_date`:
 - `PMH`: highest high
 - `PML`: lowest low
 
-### 6.5 After Hours
+### 6.5 Near Open
+
+Use `anchor_date`:
+
+- session: last `N` minutes before `09:30 ET`
+- default `N = 60`
+- clamp the start to `04:00 ET` so the window stays inside the available Schwab extended-hours feed
+- `NOH`: highest high in that window
+- `NOL`: lowest low in that window
+
+### 6.6 After Hours
 
 Use the most recent completed after-hours block.
 
@@ -508,7 +547,7 @@ Return:
 
 This prevents the level from disappearing during RTH just because the current day's AH session has not happened yet.
 
-### 6.6 Opening Range
+### 6.7 Opening Range
 
 Default:
 
@@ -520,7 +559,7 @@ Compute from dedicated 1-minute bars:
 - `ORH`: max high in `09:30 <= t < 09:45`
 - `ORL`: min low in `09:30 <= t < 09:45`
 
-### 6.7 Initial Balance
+### 6.8 Initial Balance
 
 Default:
 
@@ -542,7 +581,7 @@ Optional later:
 
 - `IBM+` and `IBM-` intermediate levels
 
-### 6.8 Overnight
+### 6.9 Overnight
 
 Not in v1.
 
@@ -576,6 +615,8 @@ Recommended controls:
 - `Show Session Levels` master checkbox
 - `Today`
 - `Yesterday`
+- `Near Open`
+- `Near Open Minutes` default `60`
 - `Premarket`
 - `After Hours`
 - `Opening Range`
@@ -593,10 +634,6 @@ Optional but not required in first pass:
 
 - per-group color pickers
 - per-group line-style selectors
-
-Still missing in the current build:
-
-- distinct default colors per session-level family so the line and axis label color do more of the visual separation work
 
 ### 7.3 Why drawer instead of modal
 
@@ -650,7 +687,7 @@ Recommended defaults:
 Current implementation note:
 
 - IBH / IBL / IB extensions already split into call/put-family colors.
-- Most other session levels still share the same orange `--warn` treatment for both line and axis label, so color differentiation remains unfinished.
+- Other session-level families now use token-backed defaults with separate tones for Today, Yesterday, Near Open, Premarket, After Hours, and Opening Range.
 
 ### 8.3 Collision rules
 
@@ -680,12 +717,14 @@ Extend `gatherSettings()` and `applySettings()` with a new `session_levels` bloc
     "enabled": true,
     "today": true,
     "yesterday": true,
+    "near_open": false,
     "premarket": true,
     "after_hours": true,
     "opening_range": false,
     "initial_balance": true,
     "show_ib_mid": true,
     "show_ib_extensions": true,
+    "near_open_minutes": 60,
     "opening_range_minutes": 15,
     "ib_start": "09:30",
     "ib_end": "10:30",
@@ -734,19 +773,19 @@ Status: completed in first pass
 
 ### Stage 4 — Collision handling + style polish
 
-Status: partially completed
+Status: completed pending browser/live validation
 
 - dedupe against dealer-flow levels
 - clear overlay caches on ticker change
 - fix redraw ordering so session-level dedupe sees the current dealer-flow cache
 - refine colors, labels, widths, and default visibility
-- remaining: distinct colors for each session-level family and final visual tuning
+- distinct token-backed defaults for each session-level family
 
 ### Stage 5 — Optional follow-up
 
-Status: not started
+Status: partially completed
 
-- add Near Open if still desired
+- Near Open implemented
 - revisit synthetic overnight only if explicitly approved
 
 ---
@@ -764,9 +803,10 @@ Status: not started
    - 30m
    - 60m
 4. Switching Heikin-Ashi on does not change session-level prices.
-5. Premarket levels appear before 09:30 ET.
-6. Yesterday and prior after-hours levels remain visible during the next RTH session.
-7. Save / load settings round-trip restores all session-level options.
+5. `Near Open` levels reflect only the configured final pre-open window before `09:30 ET`.
+6. Premarket levels appear before 09:30 ET.
+7. Yesterday and prior after-hours levels remain visible during the next RTH session.
+8. Save / load settings round-trip restores all session-level options.
 
 ### Visual
 
@@ -793,8 +833,8 @@ These are the only decisions that should still be revisited when work starts:
 2. Should `After Hours` be shown by default?
    Recommendation: yes, if the master family is enabled, because it is part of the requested TradingView parity.
 
-3. Should `Near Open` be added in v1?
-   Recommendation: no. Defer until after the main family is stable.
+3. Should `Near Open` stay default-off in v1?
+   Recommendation: yes. It is implemented now, but keeping it opt-in avoids adding more pre-open clutter by default.
 
 4. Should per-group colors be configurable in v1?
    Recommendation: no. Use sensible defaults first.
