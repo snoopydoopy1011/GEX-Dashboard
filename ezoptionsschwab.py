@@ -7211,7 +7211,8 @@ def index():
             display: flex;
             align-items: center;
             gap: 8px;
-            margin-top: 4px;
+            margin-top: 0;
+            flex-wrap: wrap;
         }
         .tm-dot {
             width: 8px;
@@ -7258,39 +7259,6 @@ def index():
             padding: 12px;
             box-sizing: border-box;
         }
-        /* Slim sticky top bar (replaces .header / .header-top / .header-bottom) */
-        .top-bar {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 12px;
-            background: var(--bg-1);
-            border-bottom: 1px solid var(--border);
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            min-height: 44px;
-            box-sizing: border-box;
-            margin-bottom: 10px;
-        }
-        .top-bar .top-spacer { flex: 1; }
-        .top-bar input[type="text"],
-        .top-bar select {
-            padding: 4px 8px;
-            min-width: 0;
-            min-height: 28px;
-            font-size: 13px;
-        }
-        .top-bar #ticker { width: 90px; min-width: 90px; }
-        .top-bar #timeframe { width: 108px; min-width: 108px; }
-        .top-bar .expiry-dropdown { min-width: 150px; }
-        .top-bar .expiry-display { padding: 4px 8px; min-height: 28px; font-size: 13px; }
-        .top-bar #token-monitor {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 11px;
-        }
         /* Drawer/modal-friendly control wrappers (still used by existing event handlers) */
         .controls {
             display: flex;
@@ -7319,6 +7287,24 @@ def index():
         .drawer-content select { width: 100%; min-width: 0; }
         .drawer-content .expiry-dropdown,
         .drawer-content .levels-dropdown { width: 100%; min-width: 0; }
+        .drawer-brand {
+            font-size: 16px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            color: var(--accent);
+        }
+        .drawer-inline-actions {
+            justify-content: space-between;
+        }
+        .drawer-token-wrap {
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-0);
+        }
+        .drawer-token-wrap #token-monitor {
+            gap: 6px;
+        }
         .expiry-dropdown {
             position: relative;
             min-width: 150px;
@@ -7509,7 +7495,9 @@ def index():
         .chart-grid {
             --gex-col-w: 352px;
             --rail-col-w: 272px;
-            --workspace-pane-h: clamp(700px, 74vh, 840px);
+            --workspace-top-reclaim: 48px;
+            --workspace-flow-reclaim: 56px;
+            --workspace-pane-h: clamp(804px, calc(74vh + var(--workspace-top-reclaim) + var(--workspace-flow-reclaim)), 944px);
             display: grid;
             grid-template-columns: minmax(0, 1fr) var(--gex-col-w) var(--rail-col-w);
             grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto auto;
@@ -7519,8 +7507,8 @@ def index():
             align-items: stretch;
         }
         .chart-grid.gex-collapsed { --gex-col-w: 28px; }
-        /* Row 1: toolbar (col 1) + GEX column header (col 2) + rail tabs (col 3). */
-        .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
+        /* Row 1: workspace toolbar shell (col 1) + GEX column header (col 2) + rail tabs (col 3). */
+        .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
         .chart-grid > .gex-col-header       { grid-column: 2; grid-row: 1; }
         .chart-grid > .right-rail-tabs      { grid-column: 3; grid-row: 1; }
         /* Row 2: price chart (col 1) + GEX column (col 2) + rail panels (col 3). */
@@ -7577,6 +7565,24 @@ def index():
             cursor: ew-resize !important;
             user-select: none !important;
         }
+        .workspace-toolbar-shell {
+            display: flex;
+            align-items: stretch;
+            gap: 6px;
+            min-width: 0;
+        }
+        .workspace-drawer-toggle {
+            flex: 0 0 38px;
+            min-width: 38px;
+            min-height: 38px;
+            height: auto;
+            border-radius: 10px;
+            background: linear-gradient(180deg, rgba(21, 26, 33, 0.96), rgba(16, 20, 27, 0.98));
+            border-color: var(--border);
+        }
+        .workspace-toolbar-shell .tv-toolbar-container {
+            flex: 1 1 auto;
+        }
 
         .chart-container {
             padding: 5px;
@@ -7608,9 +7614,10 @@ def index():
 
         .flow-event-lane {
             display: grid;
-            grid-template-columns: minmax(0, 1fr);
+            grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
             gap: 6px;
             min-width: 0;
+            align-items: stretch;
         }
         .flow-event-strip {
             background: var(--bg-1);
@@ -7618,19 +7625,29 @@ def index():
             border-radius: var(--radius-lg);
             padding: 10px 12px;
             min-width: 0;
+            display: flex;
+            flex-direction: column;
         }
         .flow-event-strip-head {
             display: flex;
-            align-items: baseline;
-            justify-content: space-between;
+            align-items: center;
             gap: 10px;
             margin-bottom: 8px;
+            min-width: 0;
+        }
+        .flow-event-strip-title-row {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            min-width: 0;
+            flex-wrap: wrap;
         }
         .flow-event-strip-title {
             font-size: 10px;
             text-transform: uppercase;
             letter-spacing: 0.08em;
             color: var(--fg-2);
+            white-space: nowrap;
         }
         .flow-event-strip-note {
             color: var(--fg-2);
@@ -7638,6 +7655,8 @@ def index():
             letter-spacing: 0.04em;
             text-transform: uppercase;
             white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .flow-event-list {
             display: flex;
@@ -7704,6 +7723,19 @@ def index():
             padding: 9px 10px;
             background: var(--bg-0);
             box-shadow: none;
+        }
+        #flow-event-strip-pulse .rail-pulse-item,
+        #flow-event-strip-pulse .rail-pulse-empty {
+            flex: 0 0 clamp(144px, 9vw, 184px);
+            width: clamp(144px, 9vw, 184px);
+            min-width: clamp(144px, 9vw, 184px);
+            max-width: clamp(144px, 9vw, 184px);
+        }
+        #flow-event-strip-pulse .rail-pulse-empty {
+            width: 100%;
+            min-width: 100%;
+            max-width: none;
+            flex-basis: 100%;
         }
 
         /* ── Right rail (GEX / Alerts / Levels) ──────────────────────── */
@@ -9851,10 +9883,12 @@ def index():
         /* Drop the strike rail below price on laptop widths before going single-column. */
         @media screen and (max-width: 1400px) {
             .chart-grid {
+                --workspace-top-reclaim: 28px;
+                --workspace-flow-reclaim: 28px;
                 grid-template-columns: minmax(0, 1fr) var(--rail-col-w);
                 grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px auto auto;
             }
-            .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
+            .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
             .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
             .chart-grid > .right-rail-panels     { grid-column: 2; grid-row: 2; }
@@ -9873,10 +9907,12 @@ def index():
         /* Collapse right rail below the main chart on narrow widths */
         @media screen and (max-width: 1024px) {
             .chart-grid {
+                --workspace-top-reclaim: 0px;
+                --workspace-flow-reclaim: 0px;
                 grid-template-columns: 1fr;
                 grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
             }
-            .chart-grid > .tv-toolbar-container { grid-column: 1; grid-row: 1; }
+            .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
             .chart-grid > .flow-event-lane { grid-column: 1; grid-row: 3; }
             .chart-grid > .gex-col-header { grid-column: 1; grid-row: 4; }
@@ -9889,6 +9925,24 @@ def index():
             .gex-column { height: 420px; }
             .right-rail-panels { height: 420px; }
         }
+        @media screen and (max-width: 1280px) {
+            .flow-event-lane {
+                grid-template-columns: minmax(0, 1fr);
+            }
+            #flow-event-strip-pulse .rail-pulse-item,
+            #flow-event-strip-pulse .rail-pulse-empty {
+                flex-basis: clamp(160px, 20vw, 220px);
+                width: clamp(160px, 20vw, 220px);
+                min-width: clamp(160px, 20vw, 220px);
+                max-width: clamp(160px, 20vw, 220px);
+            }
+            #flow-event-strip-pulse .rail-pulse-empty {
+                width: 100%;
+                min-width: 100%;
+                max-width: none;
+                flex-basis: 100%;
+            }
+        }
 
         /* Mobile responsive styles */
         @media screen and (max-width: 768px) {
@@ -9896,14 +9950,13 @@ def index():
                 width: 100%;
                 padding: 10px;
             }
-            .top-bar {
+            .workspace-toolbar-shell {
                 gap: 6px;
-                padding: 6px 10px;
-                flex-wrap: wrap;
-                min-height: auto;
             }
-            .top-bar #token-monitor { display: none; }
-            .top-bar .title { font-size: 1em; }
+            .workspace-drawer-toggle {
+                flex-basis: 36px;
+                min-width: 36px;
+            }
             .drawer { width: 86vw; }
             .controls {
                 flex-direction: column;
@@ -10052,56 +10105,6 @@ def index():
         <div id="error-message"></div>
     </div>
     <div class="container">
-        <nav class="top-bar">
-            <button id="drawerToggle" class="btn-icon" title="Open settings drawer" aria-label="Open settings">&#9776;</button>
-            <div class="title">EzDuz1t Options</div>
-            <input type="text" id="ticker" placeholder="Ticker" value="SPY" title="Enter a ticker symbol (e.g., SPY, AAPL) or special aggregate tickers: 'MARKET' (SPX base) or 'MARKET2' (SPY base)">
-            <select id="timeframe" title="Candle timeframe">
-                <option value="1">1 min</option>
-                <option value="2">2 min</option>
-                <option value="3">3 min</option>
-                <option value="5">5 min</option>
-                <option value="10">10 min</option>
-                <option value="15">15 min</option>
-                <option value="30">30 min</option>
-                <option value="60">1 hour</option>
-                <option value="240">4 hour</option>
-                <option value="1440">Daily</option>
-            </select>
-            <div class="expiry-dropdown">
-                <div class="expiry-display" id="expiry-display">
-                    <span id="expiry-text">Select expiry dates...</span>
-                </div>
-                <div class="expiry-options" id="expiry-options">
-                    <div class="expiry-buttons">
-                        <div class="expiry-range-btns">
-                            <button type="button" id="expiryToday">Today</button>
-                            <button type="button" id="expiryThisWk">This Wk</button>
-                            <button type="button" id="expiry2Wks">+1 Wk</button>
-                            <button type="button" id="expiry4Wks">+2 Wks</button>
-                            <button type="button" id="expiry1Mo">+1 Mo</button>
-                        </div>
-                        <button type="button" id="selectAllExpiry">All</button>
-                        <button type="button" id="clearAllExpiry">Clear</button>
-                    </div>
-                </div>
-            </div>
-            <button id="streamToggle" class="stream-pill">Auto-Update</button>
-            <button id="settingsToggle" class="btn-icon" title="Color &amp; coloring settings" aria-label="Color settings">&#9881;</button>
-            <div class="top-spacer"></div>
-            <div id="token-monitor">
-                <span class="tm-dot tm-neutral" id="tm-dot"></span>
-                <span class="tm-stats" style="color:var(--fg-2);font-size:10px;">SCHWAB API</span>
-                <span class="tm-stats" id="tm-access-stat" title="">…</span>
-                <span class="tm-stats" style="color:var(--fg-2);">·</span>
-                <span class="tm-stats" id="tm-refresh-stat" title="">…</span>
-                <div class="tm-btn-group">
-                    <button class="tm-btn" onclick="fetchTokenHealth()" title="Refresh token status">&#8635;</button>
-                    <button class="tm-btn tm-btn-del" onclick="forceDeleteToken()" title="Clear stored tokens">&#128465; reset</button>
-                </div>
-            </div>
-        </nav>
-
         <div class="drawer-backdrop" id="drawer-backdrop"></div>
         <aside class="drawer" id="settings-drawer" aria-hidden="true">
             <div class="drawer-header">
@@ -10109,6 +10112,69 @@ def index():
                 <button id="drawerClose" class="btn-icon" title="Close" aria-label="Close drawer">&times;</button>
             </div>
             <div class="drawer-body">
+                <details class="drawer-section" open>
+                    <summary>Workspace</summary>
+                    <div class="drawer-content">
+                        <div class="drawer-brand">EzDuz1t Options</div>
+                        <div class="control-group">
+                            <label for="ticker">Ticker</label>
+                            <input type="text" id="ticker" placeholder="Ticker" value="SPY" title="Enter a ticker symbol (e.g., SPY, AAPL) or special aggregate tickers: 'MARKET' (SPX base) or 'MARKET2' (SPY base)">
+                        </div>
+                        <div class="control-group">
+                            <label for="timeframe">Timeframe</label>
+                            <select id="timeframe" title="Candle timeframe">
+                                <option value="1">1 min</option>
+                                <option value="2">2 min</option>
+                                <option value="3">3 min</option>
+                                <option value="5">5 min</option>
+                                <option value="10">10 min</option>
+                                <option value="15">15 min</option>
+                                <option value="30">30 min</option>
+                                <option value="60">1 hour</option>
+                                <option value="240">4 hour</option>
+                                <option value="1440">Daily</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label>Expiries</label>
+                            <div class="expiry-dropdown">
+                                <div class="expiry-display" id="expiry-display">
+                                    <span id="expiry-text">Select expiry dates...</span>
+                                </div>
+                                <div class="expiry-options" id="expiry-options">
+                                    <div class="expiry-buttons">
+                                        <div class="expiry-range-btns">
+                                            <button type="button" id="expiryToday">Today</button>
+                                            <button type="button" id="expiryThisWk">This Wk</button>
+                                            <button type="button" id="expiry2Wks">+1 Wk</button>
+                                            <button type="button" id="expiry4Wks">+2 Wks</button>
+                                            <button type="button" id="expiry1Mo">+1 Mo</button>
+                                        </div>
+                                        <button type="button" id="selectAllExpiry">All</button>
+                                        <button type="button" id="clearAllExpiry">Clear</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="control-group drawer-inline-actions">
+                            <button id="streamToggle" class="stream-pill">Auto-Update</button>
+                            <button id="settingsToggle" class="btn-icon" title="Color &amp; coloring settings" aria-label="Color settings">&#9881;</button>
+                        </div>
+                        <div class="drawer-token-wrap">
+                            <div id="token-monitor">
+                                <span class="tm-dot tm-neutral" id="tm-dot"></span>
+                                <span class="tm-stats" style="color:var(--fg-2);font-size:10px;">SCHWAB API</span>
+                                <span class="tm-stats" id="tm-access-stat" title="">…</span>
+                                <span class="tm-stats" style="color:var(--fg-2);">·</span>
+                                <span class="tm-stats" id="tm-refresh-stat" title="">…</span>
+                                <div class="tm-btn-group">
+                                    <button class="tm-btn" onclick="fetchTokenHealth()" title="Refresh token status">&#8635;</button>
+                                    <button class="tm-btn tm-btn-del" onclick="forceDeleteToken()" title="Clear stored tokens">&#128465; reset</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </details>
                 <details class="drawer-section" open>
                     <summary>Sections</summary>
                     <div class="drawer-content">
@@ -10417,7 +10483,10 @@ def index():
         </dialog>
         
         <div class="chart-grid" id="chart-grid">
-            <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
+            <div class="workspace-toolbar-shell" id="workspace-toolbar-shell">
+                <button id="drawerToggle" class="btn-icon workspace-drawer-toggle" title="Open settings drawer" aria-label="Open settings">&#9776;</button>
+                <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
+            </div>
             <div class="gex-col-header" id="gex-col-header">
                 <div class="strike-rail-header-main">
                     <div class="gex-col-title">Strike Rail</div>
@@ -10657,8 +10726,10 @@ def index():
             <div class="flow-event-lane" id="flow-event-lane">
                 <div class="flow-event-strip" id="flow-event-strip-alerts">
                     <div class="flow-event-strip-head">
-                        <div class="flow-event-strip-title">Live Alerts</div>
-                        <div class="flow-event-strip-note">Pinned + buffered feed</div>
+                        <div class="flow-event-strip-title-row">
+                            <div class="flow-event-strip-title">Live Alerts</div>
+                            <div class="flow-event-strip-note" id="rail-alerts-title-note">Mixed Lean</div>
+                        </div>
                     </div>
                     <div class="rail-alerts-list flow-event-list" id="right-rail-alerts">
                         <div class="rail-alerts-empty">No active alerts.</div>
@@ -10666,8 +10737,10 @@ def index():
                 </div>
                 <div class="flow-event-strip" id="flow-event-strip-pulse">
                     <div class="flow-event-strip-head">
-                        <div class="flow-event-strip-title">Flow Pulse</div>
-                        <div class="flow-event-strip-note" id="rail-flow-pulse-note">1m vs 5m pace</div>
+                        <div class="flow-event-strip-title-row">
+                            <div class="flow-event-strip-title">Flow Pulse</div>
+                            <div class="flow-event-strip-note" id="rail-flow-pulse-note">Mixed Lean</div>
+                        </div>
                     </div>
                     <div class="rail-pulse-list flow-event-list" id="rail-flow-pulse">
                         <div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>
@@ -15501,8 +15574,10 @@ def index():
                 '<div class="flow-event-lane" id="flow-event-lane">' +
                     '<div class="flow-event-strip" id="flow-event-strip-alerts">' +
                         '<div class="flow-event-strip-head">' +
-                            '<div class="flow-event-strip-title">Live Alerts</div>' +
-                            '<div class="flow-event-strip-note">Pinned + buffered feed</div>' +
+                            '<div class="flow-event-strip-title-row">' +
+                                '<div class="flow-event-strip-title">Live Alerts</div>' +
+                                '<div class="flow-event-strip-note" id="rail-alerts-title-note">Mixed Lean</div>' +
+                            '</div>' +
                         '</div>' +
                         '<div class="rail-alerts-list flow-event-list" id="right-rail-alerts">' +
                             '<div class="rail-alerts-empty">No active alerts.</div>' +
@@ -15510,8 +15585,10 @@ def index():
                     '</div>' +
                     '<div class="flow-event-strip" id="flow-event-strip-pulse">' +
                         '<div class="flow-event-strip-head">' +
-                            '<div class="flow-event-strip-title">Flow Pulse</div>' +
-                            '<div class="flow-event-strip-note" id="rail-flow-pulse-note">1m vs 5m pace</div>' +
+                            '<div class="flow-event-strip-title-row">' +
+                                '<div class="flow-event-strip-title">Flow Pulse</div>' +
+                                '<div class="flow-event-strip-note" id="rail-flow-pulse-note">Mixed Lean</div>' +
+                            '</div>' +
                         '</div>' +
                         '<div class="rail-pulse-list flow-event-list" id="rail-flow-pulse">' +
                             '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>' +
@@ -15760,12 +15837,30 @@ def index():
                 return priceContainer;
             }
 
-            let toolbar = grid.querySelector('.tv-toolbar-container');
+            let toolbarShell = grid.querySelector('.workspace-toolbar-shell');
+            if (!toolbarShell) {
+                toolbarShell = document.createElement('div');
+                toolbarShell.className = 'workspace-toolbar-shell';
+                toolbarShell.id = 'workspace-toolbar-shell';
+                grid.appendChild(toolbarShell);
+            }
+            let drawerToggle = toolbarShell.querySelector('#drawerToggle');
+            if (!drawerToggle) {
+                drawerToggle = document.createElement('button');
+                drawerToggle.className = 'btn-icon workspace-drawer-toggle';
+                drawerToggle.id = 'drawerToggle';
+                drawerToggle.title = 'Open settings drawer';
+                drawerToggle.setAttribute('aria-label', 'Open settings');
+                drawerToggle.innerHTML = '&#9776;';
+                toolbarShell.appendChild(drawerToggle);
+                wireDrawerToggle(drawerToggle);
+            }
+            let toolbar = toolbarShell.querySelector('.tv-toolbar-container');
             if (!toolbar) {
                 toolbar = document.createElement('div');
                 toolbar.className = 'tv-toolbar-container';
                 toolbar.id = 'tv-toolbar-container';
-                grid.appendChild(toolbar);
+                toolbarShell.appendChild(toolbar);
             }
             let gexHeader = grid.querySelector('.gex-col-header');
             if (!gexHeader) {
@@ -15859,7 +15954,7 @@ def index():
         }
 
         function showPriceChartUI() {
-            const ids = ['tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels', 'flow-event-lane'];
+            const ids = ['workspace-toolbar-shell', 'tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels', 'flow-event-lane'];
             ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
             const pc = document.querySelector('.price-chart-container');
             if (pc) pc.style.display = 'block';
@@ -16773,18 +16868,40 @@ def index():
         function _flowPulseSummaryText(summary) {
             const s = summary && typeof summary === 'object' ? summary : {};
             const label = String(s.label || 'mixed').toLowerCase();
-            const weighted = (s.weighted_premium != null && isFinite(s.weighted_premium)) ? s.weighted_premium : 0;
-            const absWeighted = Math.abs(weighted);
             if (label === 'bullish') {
-                return 'Bullish lean · ' + fmtMoneyCompact(absWeighted || 0) + ' weighted';
+                return 'Bullish Lean';
             }
             if (label === 'bearish') {
-                return 'Bearish lean · ' + fmtMoneyCompact(absWeighted || 0) + ' weighted';
+                return 'Bearish Lean';
             }
             if (label === 'hedge') {
-                return 'Hedge-heavy flow';
+                return 'Hedge Lean';
             }
-            return 'Mixed 1m pulse';
+            return 'Mixed Lean';
+        }
+
+        function _liveAlertsSummaryText(items) {
+            const rows = Array.isArray(items) ? items : [];
+            if (!rows.length) return 'Mixed Lean';
+            let biasScore = 0;
+            let hedgeWeight = 0;
+            rows.forEach((row, index) => {
+                const direction = String((row && row.direction_label) || '').toLowerCase();
+                const tier = String((row && row.tier) || '').toLowerCase();
+                const cluster = Math.max(1, Math.min(4, parseInt(row && row.clusterCount, 10) || 1));
+                const tierWeight = tier === 'critical' ? 3 : (tier === 'active' ? 2 : 1);
+                const weight = tierWeight * cluster * (index === 0 ? 1.3 : 1);
+                if (direction === 'bullish') biasScore += weight;
+                else if (direction === 'bearish') biasScore -= weight;
+                else if (direction === 'hedge') hedgeWeight += weight;
+            });
+            if (Math.abs(biasScore) >= Math.max(1.5, hedgeWeight * 0.9)) {
+                return biasScore > 0 ? 'Bullish Lean' : 'Bearish Lean';
+            }
+            if (hedgeWeight > 0 && Math.abs(biasScore) < hedgeWeight) {
+                return 'Hedge Lean';
+            }
+            return 'Mixed Lean';
         }
 
         function _railAlertDirectionMeta(label) {
@@ -17094,10 +17211,12 @@ def index():
         function renderRailAlerts(list, options = {}) {
             const reset = !!(options && options.reset);
             const target = document.getElementById('right-rail-alerts');
+            const titleNote = document.getElementById('rail-alerts-title-note');
             _ensureRailAlertScope(reset);
             if (reset) {
                 _lastRailAlerts = [];
                 if (target) target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
+                if (titleNote) titleNote.textContent = 'Mixed Lean';
                 _updateAlertsBadge();
                 return;
             }
@@ -17105,6 +17224,7 @@ def index():
             _pruneRailAlertBuffer();
             const buffered = _clusterRailAlerts(_getBufferedRailAlerts());
             _lastRailAlerts = buffered;
+            if (titleNote) titleNote.textContent = _liveAlertsSummaryText(buffered);
             if (target) {
                 if (!buffered.length) {
                     target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
@@ -17795,6 +17915,8 @@ def index():
             } else if (!selectedCharts.price) {
                 const priceContainer = document.querySelector('.price-chart-container');
                 if (priceContainer) priceContainer.style.display = 'none';
+                const toolbarShell = document.getElementById('workspace-toolbar-shell');
+                if (toolbarShell) toolbarShell.style.display = 'none';
                 const toolbar = document.getElementById('tv-toolbar-container');
                 if (toolbar) toolbar.style.display = 'none';
                 const gexHeader = document.getElementById('gex-col-header');
@@ -18224,7 +18346,7 @@ def index():
             const rows = Array.isArray(stats && stats.flow_pulse) ? stats.flow_pulse : [];
             const summary = (stats && typeof stats.flow_pulse_summary === 'object') ? stats.flow_pulse_summary : null;
             if (!rows.length) {
-                if (note) note.textContent = '1m vs 5m pace';
+                if (note) note.textContent = 'Mixed Lean';
                 target.innerHTML = '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>';
                 return;
             }
@@ -18984,7 +19106,12 @@ def index():
             document.getElementById('settings-drawer').setAttribute('aria-hidden', 'true');
             document.getElementById('drawer-backdrop').classList.remove('open');
         }
-        document.getElementById('drawerToggle').addEventListener('click', openDrawer);
+        function wireDrawerToggle(button = document.getElementById('drawerToggle')) {
+            if (!button || button.__drawerWired) return;
+            button.__drawerWired = true;
+            button.addEventListener('click', openDrawer);
+        }
+        wireDrawerToggle();
         document.getElementById('drawerClose').addEventListener('click', closeDrawer);
         document.getElementById('drawer-backdrop').addEventListener('click', closeDrawer);
 
