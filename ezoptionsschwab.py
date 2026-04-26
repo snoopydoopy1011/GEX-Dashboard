@@ -9390,6 +9390,28 @@ def index():
             display: grid;
             gap: 2px;
         }
+        .tv-toolbar-menu-panel {
+            min-width: 228px;
+            max-width: min(320px, calc(100vw - 24px));
+            padding: 6px;
+            gap: 8px !important;
+        }
+        .tv-toolbar-menu-grid {
+            display: grid;
+            gap: 8px;
+        }
+        .tv-toolbar-menu-section {
+            display: grid;
+            gap: 4px;
+        }
+        .tv-toolbar-menu-title {
+            padding: 0 4px;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
         .tv-draw-menu-item {
             display: flex;
             align-items: center;
@@ -9470,12 +9492,30 @@ def index():
             min-width: 30px;
             text-align: center;
         }
+        .tv-tb-btn.menu-trigger {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
         .tv-tb-btn.pill {
             padding: 3px 7px;
             min-width: 0;
             border-radius: 999px;
             font-size: 10px;
             letter-spacing: 0.02em;
+        }
+        .tv-toolbar-menu-count {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 16px;
+            height: 16px;
+            padding: 0 5px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--fg-0);
+            font-size: 10px;
+            line-height: 1;
         }
         .tv-draw-inline {
             display: inline-flex;
@@ -11292,6 +11332,7 @@ def index():
             document.querySelectorAll('[data-session-toggle]').forEach(btn => {
                 btn.classList.toggle('active', settings.enabled);
             });
+            syncTVIndicatorMenuSummaryButtons();
         }
 
         function wireSessionLevelControls() {
@@ -13139,6 +13180,41 @@ def index():
         function syncTVIndicatorToggleButtons() {
             document.querySelectorAll('.tv-tb-btn[data-indicator-key]').forEach(btn => {
                 btn.classList.toggle('active', tvActiveInds.has(btn.dataset.indicatorKey));
+            });
+            syncTVIndicatorMenuSummaryButtons();
+        }
+
+        function getTVToolbarIndicatorTokenLabel(token) {
+            if (token === 'session_levels') return 'Sess Lvls';
+            const def = TV_INDICATOR_DEFS.find(item => item.key === token);
+            return def ? def.label : token;
+        }
+
+        function isTVToolbarIndicatorTokenActive(token) {
+            if (token === 'session_levels') {
+                return !!getSessionLevelSettingsFromDom().enabled;
+            }
+            return tvActiveInds.has(token);
+        }
+
+        function syncTVIndicatorMenuSummaryButtons() {
+            document.querySelectorAll('[data-indicator-menu-summary]').forEach(button => {
+                const label = button.dataset.menuLabel || 'Indicators';
+                const baseTitle = button.dataset.menuTitle || label;
+                const tokens = String(button.dataset.indicatorMenuSummary || '')
+                    .split(',')
+                    .map(value => value.trim())
+                    .filter(Boolean);
+                const activeTokens = tokens.filter(isTVToolbarIndicatorTokenActive);
+                const activeLabels = activeTokens.map(getTVToolbarIndicatorTokenLabel);
+                button.innerHTML = '<span>' + label + '</span>'
+                    + (activeTokens.length
+                        ? '<span class="tv-toolbar-menu-count">' + activeTokens.length + '</span>'
+                        : '');
+                button.title = activeLabels.length
+                    ? baseTitle + ' Active: ' + activeLabels.join(', ')
+                    : baseTitle + ' No active items';
+                button.classList.toggle('active', activeTokens.length > 0);
             });
         }
 
@@ -15679,28 +15755,109 @@ def index():
                 return node;
             }
 
-            // Indicator toggles
-            const sessionBtn = btn('Sess Lvls', 'Session levels and Initial Balance', () => {
-                const next = !getSessionLevelSettingsFromDom().enabled;
-                applySessionLevelSettingsToDom(Object.assign({}, getSessionLevelSettingsFromDom(), { enabled: next }));
-                renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
-                if (next) {
-                    _priceHistoryLastKey = '';
-                    fetchPriceHistory(true);
+            function createToolbarMenu(label, title, options = {}) {
+                const wrap = document.createElement('div');
+                wrap.className = 'tv-draw-dropdown';
+                const menuButton = btn(label, title, event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const isOpen = wrap.classList.contains('open');
+                    closeTVToolbarMenus();
+                    if (!isOpen) {
+                        openTVToolbarMenu(wrap, menuButton, menuPanel);
+                    }
+                }, 'menu-trigger');
+                if (Array.isArray(options.summaryTokens) && options.summaryTokens.length) {
+                    menuButton.dataset.indicatorMenuSummary = options.summaryTokens.join(',');
+                    menuButton.dataset.menuLabel = label;
+                    menuButton.dataset.menuTitle = title;
                 }
-            });
-            sessionBtn.dataset.sessionToggle = 'session_levels';
-            if (getSessionLevelSettingsFromDom().enabled) sessionBtn.classList.add('active');
-            addToGroup(indicatorsGroup, sessionBtn);
+                const toggleButton = btn('▾', options.toggleTitle || title, event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const isOpen = wrap.classList.contains('open');
+                    closeTVToolbarMenus();
+                    if (!isOpen) {
+                        openTVToolbarMenu(wrap, toggleButton, menuPanel);
+                    }
+                }, 'icon');
+                const menuPanel = document.createElement('div');
+                menuPanel.className = 'tv-draw-dropdown-menu tv-toolbar-menu-panel';
+                wrap.appendChild(menuButton);
+                wrap.appendChild(toggleButton);
+                wrap.appendChild(menuPanel);
+                return { wrap, menuButton, toggleButton, menuPanel };
+            }
 
-            TV_INDICATOR_DEFS.forEach(def => {
-                const b = btn(def.label, def.title, () => {
-                    setTVIndicatorEnabled(def.key, !tvActiveInds.has(def.key));
-                });
-                b.dataset.indicatorKey = def.key;
-                if (tvActiveInds.has(def.key)) b.classList.add('active');
-                addToGroup(indicatorsGroup, b);
+            function appendToolbarMenuSection(panel, title, buildRows) {
+                const section = document.createElement('div');
+                section.className = 'tv-toolbar-menu-section';
+                if (title) {
+                    const heading = document.createElement('div');
+                    heading.className = 'tv-toolbar-menu-title';
+                    heading.textContent = title;
+                    section.appendChild(heading);
+                }
+                buildRows(section);
+                panel.appendChild(section);
+                return section;
+            }
+
+            const indicatorTokens = ['session_levels'].concat(TV_INDICATOR_DEFS.map(def => def.key));
+            const indicatorsMenu = createToolbarMenu('Indicators', 'Toggle chart overlays, studies, and session levels.', {
+                summaryTokens: indicatorTokens,
+                toggleTitle: 'Open indicators menu',
             });
+            const indicatorsMenuGrid = document.createElement('div');
+            indicatorsMenuGrid.className = 'tv-toolbar-menu-grid';
+
+            appendToolbarMenuSection(indicatorsMenuGrid, 'Session', section => {
+                const sessionBtn = btn('Sess Lvls', 'Session levels and Initial Balance', () => {
+                    const next = !getSessionLevelSettingsFromDom().enabled;
+                    applySessionLevelSettingsToDom(Object.assign({}, getSessionLevelSettingsFromDom(), { enabled: next }));
+                    renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+                    if (next) {
+                        _priceHistoryLastKey = '';
+                        fetchPriceHistory(true);
+                    }
+                });
+                sessionBtn.classList.add('tv-draw-menu-item');
+                sessionBtn.dataset.sessionToggle = 'session_levels';
+                if (getSessionLevelSettingsFromDom().enabled) sessionBtn.classList.add('active');
+                section.appendChild(sessionBtn);
+            });
+
+            appendToolbarMenuSection(indicatorsMenuGrid, 'Trend', section => {
+                ['sma20', 'sma50', 'sma200', 'ema9', 'ema21', 'vwap'].forEach(key => {
+                    const def = TV_INDICATOR_DEFS.find(item => item.key === key);
+                    if (!def) return;
+                    const button = btn(def.label, def.title, () => {
+                        setTVIndicatorEnabled(def.key, !tvActiveInds.has(def.key));
+                    });
+                    button.classList.add('tv-draw-menu-item');
+                    button.dataset.indicatorKey = def.key;
+                    if (tvActiveInds.has(def.key)) button.classList.add('active');
+                    section.appendChild(button);
+                });
+            });
+
+            appendToolbarMenuSection(indicatorsMenuGrid, 'Studies', section => {
+                ['bb', 'rsi', 'macd', 'atr', 'oi'].forEach(key => {
+                    const def = TV_INDICATOR_DEFS.find(item => item.key === key);
+                    if (!def) return;
+                    const button = btn(def.label, def.title, () => {
+                        setTVIndicatorEnabled(def.key, !tvActiveInds.has(def.key));
+                    });
+                    button.classList.add('tv-draw-menu-item');
+                    button.dataset.indicatorKey = def.key;
+                    if (tvActiveInds.has(def.key)) button.classList.add('active');
+                    section.appendChild(button);
+                });
+            });
+
+            indicatorsMenu.menuPanel.appendChild(indicatorsMenuGrid);
+            addToGroup(indicatorsGroup, indicatorsMenu.wrap);
+            syncTVIndicatorMenuSummaryButtons();
 
             // --- Separator ---
             // Drawing tools
@@ -15803,11 +15960,32 @@ def index():
             colorWrap.appendChild(colorPicker);
             addToGroup(drawGroup, colorWrap);
 
-            // Undo / Clear
+            // Undo / Clear / chart settings
             addToGroup(actionsGroup, btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
             addToGroup(actionsGroup, btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
-            addToGroup(actionsGroup, btn('Indicators', 'Edit built-in indicator styles', openTVIndicatorEditor));
-            addToGroup(actionsGroup, btn('Levels', 'Edit key/session level visibility and styles', openPriceLevelEditor));
+
+            const chartMenu = createToolbarMenu('Chart', 'Open chart style and level settings.', {
+                toggleTitle: 'Open chart settings menu',
+            });
+            const chartMenuGrid = document.createElement('div');
+            chartMenuGrid.className = 'tv-toolbar-menu-grid';
+            appendToolbarMenuSection(chartMenuGrid, 'Settings', section => {
+                const indicatorStylesBtn = btn('Indicator Styles', 'Edit built-in indicator styles', () => {
+                    closeTVToolbarMenus();
+                    openTVIndicatorEditor();
+                });
+                indicatorStylesBtn.classList.add('tv-draw-menu-item');
+                section.appendChild(indicatorStylesBtn);
+
+                const levelStylesBtn = btn('Level Styles', 'Edit key/session level visibility and styles', () => {
+                    closeTVToolbarMenus();
+                    openPriceLevelEditor();
+                });
+                levelStylesBtn.classList.add('tv-draw-menu-item');
+                section.appendChild(levelStylesBtn);
+            });
+            chartMenu.menuPanel.appendChild(chartMenuGrid);
+            addToGroup(actionsGroup, chartMenu.wrap);
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
