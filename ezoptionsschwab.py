@@ -9390,6 +9390,28 @@ def index():
             display: grid;
             gap: 2px;
         }
+        .tv-toolbar-menu-panel {
+            min-width: 228px;
+            max-width: min(320px, calc(100vw - 24px));
+            padding: 6px;
+            gap: 8px !important;
+        }
+        .tv-toolbar-menu-grid {
+            display: grid;
+            gap: 8px;
+        }
+        .tv-toolbar-menu-section {
+            display: grid;
+            gap: 4px;
+        }
+        .tv-toolbar-menu-title {
+            padding: 0 4px;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
         .tv-draw-menu-item {
             display: flex;
             align-items: center;
@@ -9469,6 +9491,36 @@ def index():
             padding: 3px 6px;
             min-width: 30px;
             text-align: center;
+        }
+        .tv-tb-btn.menu-trigger {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .tv-tb-btn.pill {
+            padding: 3px 7px;
+            min-width: 0;
+            border-radius: 999px;
+            font-size: 10px;
+            letter-spacing: 0.02em;
+        }
+        .tv-toolbar-menu-count {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 16px;
+            height: 16px;
+            padding: 0 5px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--fg-0);
+            font-size: 10px;
+            line-height: 1;
+        }
+        .tv-draw-inline {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
         .tv-toolbar-status {
             font-size: 10px;
@@ -11280,6 +11332,7 @@ def index():
             document.querySelectorAll('[data-session-toggle]').forEach(btn => {
                 btn.classList.toggle('active', settings.enabled);
             });
+            syncTVIndicatorMenuSummaryButtons();
         }
 
         function wireSessionLevelControls() {
@@ -13128,6 +13181,41 @@ def index():
             document.querySelectorAll('.tv-tb-btn[data-indicator-key]').forEach(btn => {
                 btn.classList.toggle('active', tvActiveInds.has(btn.dataset.indicatorKey));
             });
+            syncTVIndicatorMenuSummaryButtons();
+        }
+
+        function getTVToolbarIndicatorTokenLabel(token) {
+            if (token === 'session_levels') return 'Sess Lvls';
+            const def = TV_INDICATOR_DEFS.find(item => item.key === token);
+            return def ? def.label : token;
+        }
+
+        function isTVToolbarIndicatorTokenActive(token) {
+            if (token === 'session_levels') {
+                return !!getSessionLevelSettingsFromDom().enabled;
+            }
+            return tvActiveInds.has(token);
+        }
+
+        function syncTVIndicatorMenuSummaryButtons() {
+            document.querySelectorAll('[data-indicator-menu-summary]').forEach(button => {
+                const label = button.dataset.menuLabel || 'Indicators';
+                const baseTitle = button.dataset.menuTitle || label;
+                const tokens = String(button.dataset.indicatorMenuSummary || '')
+                    .split(',')
+                    .map(value => value.trim())
+                    .filter(Boolean);
+                const activeTokens = tokens.filter(isTVToolbarIndicatorTokenActive);
+                const activeLabels = activeTokens.map(getTVToolbarIndicatorTokenLabel);
+                button.innerHTML = '<span>' + label + '</span>'
+                    + (activeTokens.length
+                        ? '<span class="tv-toolbar-menu-count">' + activeTokens.length + '</span>'
+                        : '');
+                button.title = activeLabels.length
+                    ? baseTitle + ' Active: ' + activeLabels.join(', ')
+                    : baseTitle + ' No active items';
+                button.classList.toggle('active', activeTokens.length > 0);
+            });
         }
 
         function reapplyTVIndicators() {
@@ -13678,6 +13766,11 @@ def index():
             return normalizeTVHLinePresetKey(prefs.hlinePreset);
         }
 
+        function getTVChannelAxisSnapEnabled() {
+            const prefs = loadTVDrawingToolPrefs();
+            return prefs.channelAxisSnap === true;
+        }
+
         function setActiveTVHLinePresetKey(nextKey, options = {}) {
             const presetKey = normalizeTVHLinePresetKey(nextKey);
             const prefs = loadTVDrawingToolPrefs();
@@ -13689,6 +13782,16 @@ def index():
             return presetKey;
         }
 
+        function setTVChannelAxisSnapEnabled(enabled, options = {}) {
+            const prefs = loadTVDrawingToolPrefs();
+            prefs.channelAxisSnap = !!enabled;
+            saveTVDrawingToolPrefs(prefs);
+            if (options.syncToolbar !== false) {
+                syncTVChannelSnapToolbarButton();
+            }
+            return prefs.channelAxisSnap;
+        }
+
         function getTVHLinePresetColor(presetKey, fallback = '#FFD700') {
             const preset = getTVHLinePreset(presetKey);
             return preset.color || fallback;
@@ -13696,6 +13799,10 @@ def index():
 
         function normalizeTVDrawingMidlineVisible(value) {
             return value !== false;
+        }
+
+        function normalizeTVDrawingExtendRight(value) {
+            return value === true;
         }
 
         function getTVDrawingColorFallback(mode = tvDrawMode) {
@@ -13733,6 +13840,17 @@ def index():
                     nodePreset.label;
                 node.classList.toggle('active', node.dataset.hlinePreset === presetKey);
             });
+        }
+
+        function syncTVChannelSnapToolbarButton() {
+            const button = document.getElementById('tv-channel-snap-toggle');
+            if (!button) return;
+            const enabled = getTVChannelAxisSnapEnabled();
+            button.classList.toggle('active', enabled);
+            button.textContent = enabled ? '🔒 HV' : '🔓 HV';
+            button.title = enabled
+                ? 'Channel base line snaps horizontal/vertical while placing the second point'
+                : 'Turn on horizontal/vertical snapping for the first channel segment';
         }
 
         function applyTVHLinePresetToDef(def, presetKey, options = {}) {
@@ -13794,8 +13912,10 @@ def index():
             }
             if (normalized.type === 'channel') {
                 normalized.showMidline = normalizeTVDrawingMidlineVisible(normalized.showMidline);
+                normalized.extendRight = normalizeTVDrawingExtendRight(normalized.extendRight);
             } else {
                 delete normalized.showMidline;
+                delete normalized.extendRight;
             }
             if (normalized.id !== '__preview__') {
                 if (Number.isFinite(Number(normalized.time))) {
@@ -13986,6 +14106,7 @@ def index():
             const q2 = p3 + (slope * (l2 - l3));
             return {
                 vertical: false,
+                slope,
                 l1,
                 l2,
                 l3,
@@ -14403,6 +14524,10 @@ def index():
                         '<label for="tv-selected-draw-midline">Midline</label>' +
                         '<input type="checkbox" id="tv-selected-draw-midline" />' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-extend-right-row">' +
+                        '<label for="tv-selected-draw-extend-right">Extend Right</label>' +
+                        '<input type="checkbox" id="tv-selected-draw-extend-right" />' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-actions">' +
                         '<button type="button" class="tv-tb-btn danger" data-action="delete">Delete</button>' +
                     '</div>';
@@ -14491,6 +14616,13 @@ def index():
                     persistTVDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
+                editor.querySelector('#tv-selected-draw-extend-right').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || def.type !== 'channel') return;
+                    def.extendRight = !!event.target.checked;
+                    persistTVDrawings();
+                    scheduleTVDrawingOverlayDraw();
+                });
             }
             return editor;
         }
@@ -14514,6 +14646,8 @@ def index():
             const labelPositionSelect = editor.querySelector('#tv-selected-draw-label-position');
             const midlineRow = editor.querySelector('#tv-drawing-midline-row');
             const midlineInput = editor.querySelector('#tv-selected-draw-midline');
+            const extendRightRow = editor.querySelector('#tv-drawing-extend-right-row');
+            const extendRightInput = editor.querySelector('#tv-selected-draw-extend-right');
             if (titleEl) {
                 const typeLabel = def.type === 'hline' ? 'H-Line'
                     : def.type === 'trendline' ? 'Trend Line'
@@ -14561,6 +14695,12 @@ def index():
                 midlineRow.style.display = isChannel ? 'flex' : 'none';
                 midlineInput.checked = isChannel ? normalizeTVDrawingMidlineVisible(def.showMidline) : true;
                 midlineInput.disabled = !isChannel;
+            }
+            if (extendRightRow && extendRightInput) {
+                const isChannel = def.type === 'channel';
+                extendRightRow.style.display = isChannel ? 'flex' : 'none';
+                extendRightInput.checked = isChannel ? normalizeTVDrawingExtendRight(def.extendRight) : false;
+                extendRightInput.disabled = !isChannel;
             }
             editor.classList.add('visible');
         }
@@ -14662,7 +14802,7 @@ def index():
                 const my1 = tvCandleSeries.priceToCoordinate(channel.mid1);
                 const my2 = tvCandleSeries.priceToCoordinate(channel.mid2);
                 if ([py1, py2, my1, my2].some(v => v == null || Number.isNaN(v))) return null;
-                return {
+                const screen = {
                     type: 'channel',
                     vertical: false,
                     x1,
@@ -14678,6 +14818,39 @@ def index():
                     mx2: x2,
                     my2,
                 };
+                if (def.extendRight === true) {
+                    const rightLogical = tvCoordinateToLogical(width);
+                    const anchorLogical = channel.l2 >= channel.l1 ? channel.l2 : channel.l1;
+                    const anchorBase = channel.l2 >= channel.l1 ? channel.p2 : channel.p1;
+                    const anchorParallel = channel.l2 >= channel.l1 ? channel.q2 : channel.q1;
+                    const anchorMid = channel.l2 >= channel.l1 ? channel.mid2 : channel.mid1;
+                    if (Number.isFinite(rightLogical) && rightLogical > anchorLogical) {
+                        const delta = rightLogical - anchorLogical;
+                        const baseExtY = tvCandleSeries.priceToCoordinate(anchorBase + (channel.slope * delta));
+                        const parallelExtY = tvCandleSeries.priceToCoordinate(anchorParallel + (channel.slope * delta));
+                        const midExtY = tvCandleSeries.priceToCoordinate(anchorMid + (channel.slope * delta));
+                        if ([baseExtY, parallelExtY, midExtY].every(v => v != null && !Number.isNaN(v))) {
+                            const rightIsSecond = channel.l2 >= channel.l1;
+                            screen.extendRight = {
+                                leftBaseX: rightIsSecond ? x1 : x2,
+                                leftBaseY: rightIsSecond ? y1 : y2,
+                                leftParallelX: rightIsSecond ? x1 : x2,
+                                leftParallelY: rightIsSecond ? py1 : py2,
+                                baseFromX: channel.l2 >= channel.l1 ? x2 : x1,
+                                baseFromY: channel.l2 >= channel.l1 ? y2 : y1,
+                                parallelFromX: channel.l2 >= channel.l1 ? x2 : x1,
+                                parallelFromY: channel.l2 >= channel.l1 ? py2 : py1,
+                                midFromX: channel.l2 >= channel.l1 ? x2 : x1,
+                                midFromY: channel.l2 >= channel.l1 ? my2 : my1,
+                                toX: width,
+                                baseToY: baseExtY,
+                                parallelToY: parallelExtY,
+                                midToY: midExtY,
+                            };
+                        }
+                    }
+                }
+                return screen;
             }
             if (def.type === 'rect') {
                 const startY = tvCandleSeries.priceToCoordinate(def.startPrice != null ? def.startPrice : def.top);
@@ -14831,7 +15004,9 @@ def index():
             } else if (screen.type === 'channel') {
                 group.appendChild(createSvgEl('polygon', {
                     class: 'tv-drawing-shape',
-                    points: `${screen.x1},${screen.y1} ${screen.x2},${screen.y2} ${screen.px2},${screen.py2} ${screen.px1},${screen.py1}`,
+                    points: screen.extendRight
+                        ? `${screen.extendRight.leftBaseX},${screen.extendRight.leftBaseY} ${screen.extendRight.toX},${screen.extendRight.baseToY} ${screen.extendRight.toX},${screen.extendRight.parallelToY} ${screen.extendRight.leftParallelX},${screen.extendRight.leftParallelY}`
+                        : `${screen.x1},${screen.y1} ${screen.x2},${screen.y2} ${screen.px2},${screen.py2} ${screen.px1},${screen.py1}`,
                     fill: def.color,
                     'fill-opacity': isPreview ? 0.07 : 0.1,
                     stroke: 'none',
@@ -14870,6 +15045,25 @@ def index():
                         opacity: isPreview ? 0.8 : 1,
                     }));
                 });
+                if (screen.extendRight) {
+                    [
+                        { x1: screen.extendRight.baseFromX, y1: screen.extendRight.baseFromY, x2: screen.extendRight.toX, y2: screen.extendRight.baseToY },
+                        { x1: screen.extendRight.parallelFromX, y1: screen.extendRight.parallelFromY, x2: screen.extendRight.toX, y2: screen.extendRight.parallelToY },
+                    ].forEach(line => {
+                        group.appendChild(createSvgEl('line', {
+                            class: 'tv-drawing-shape',
+                            x1: line.x1,
+                            y1: line.y1,
+                            x2: line.x2,
+                            y2: line.y2,
+                            stroke: def.color,
+                            'stroke-width': strokeWidth,
+                            'stroke-dasharray': dashArray || null,
+                            'stroke-linecap': 'round',
+                            opacity: isPreview ? 0.7 : 0.94,
+                        }));
+                    });
+                }
                 if (def.showMidline !== false) {
                     group.appendChild(createSvgEl('line', {
                         class: 'tv-drawing-shape',
@@ -14883,6 +15077,20 @@ def index():
                         'stroke-linecap': 'round',
                         opacity: 0.72,
                     }));
+                    if (screen.extendRight) {
+                        group.appendChild(createSvgEl('line', {
+                            class: 'tv-drawing-shape',
+                            x1: screen.extendRight.midFromX,
+                            y1: screen.extendRight.midFromY,
+                            x2: screen.extendRight.toX,
+                            y2: screen.extendRight.midToY,
+                            stroke: def.color,
+                            'stroke-width': Math.max(1, strokeWidth - 1),
+                            'stroke-dasharray': '7 6',
+                            'stroke-linecap': 'round',
+                            opacity: 0.68,
+                        }));
+                    }
                 }
                 if (labelText) {
                     appendTVDrawingBadge(group, Object.assign({
@@ -15066,6 +15274,39 @@ def index():
             return { price, time, logical };
         }
 
+        function getTVChannelSnappedPoint(startPoint, point, previewPoint = null) {
+            if (!getTVChannelAxisSnapEnabled() || !startPoint || !point) return point;
+            const startPrice = Number(startPoint.price);
+            const nextPrice = Number(point.price);
+            const startLogical = Number(startPoint.logical);
+            const nextLogical = Number(point.logical);
+            if (![startPrice, nextPrice, startLogical, nextLogical].every(Number.isFinite)) {
+                return point;
+            }
+            const snapHorizontal = Math.abs(nextLogical - startLogical) >= Math.abs(nextPrice - startPrice);
+            if (snapHorizontal) {
+                const snappedY = tvCandleSeries ? tvCandleSeries.priceToCoordinate(startPrice) : null;
+                return {
+                    ...point,
+                    price: startPrice,
+                    previewX: previewPoint && Number.isFinite(previewPoint.x) ? previewPoint.x : null,
+                    previewY: Number.isFinite(snappedY)
+                        ? snappedY
+                        : (previewPoint && Number.isFinite(previewPoint.y) ? previewPoint.y : null),
+                };
+            }
+            const snappedX = tvResolveDrawingAnchorX(startPoint.time, startPoint.logical, null);
+            return {
+                ...point,
+                time: startPoint.time,
+                logical: startPoint.logical,
+                previewX: Number.isFinite(snappedX)
+                    ? snappedX
+                    : (previewPoint && Number.isFinite(previewPoint.x) ? previewPoint.x : null),
+                previewY: previewPoint && Number.isFinite(previewPoint.y) ? previewPoint.y : null,
+            };
+        }
+
         function updateTVDrawingPreview(param) {
             if (!tvDrawMode || !tvPriceChart || !tvCandleSeries || !param || !param.point) return;
             const previewPoint = tvResolvePreviewPoint(param);
@@ -15133,17 +15374,18 @@ def index():
                 } else if (tvDrawMode === 'channel') {
                     if (drawPoints.length === 1) {
                         const startPoint = drawPoints[0];
+                        const snappedPoint = getTVChannelSnappedPoint(startPoint, point, previewPoint);
                         nextPreview = normalizeTVDrawingDef({
                             id: '__preview__',
                             type: 'trendline',
                             t1: startPoint.time,
                             l1: startPoint.logical,
                             p1: startPoint.price,
-                            t2: point.time || startPoint.time,
-                            l2: point.logical,
-                            p2: previewPoint.price,
-                            previewX2: previewPoint.x,
-                            previewY2: previewPoint.y,
+                            t2: snappedPoint.time || startPoint.time,
+                            l2: snappedPoint.logical,
+                            p2: snappedPoint.price,
+                            previewX2: Number.isFinite(snappedPoint.previewX) ? snappedPoint.previewX : previewPoint.x,
+                            previewY2: Number.isFinite(snappedPoint.previewY) ? snappedPoint.previewY : previewPoint.y,
                             color: drawColor,
                             lineWidth: 2,
                             lineStyle: 'dashed',
@@ -15243,8 +15485,9 @@ def index():
             }, true);
         }
 
-        function setDrawMode(mode) {
-            tvDrawMode = (tvDrawMode === mode) ? null : mode;  // toggle
+        function setDrawMode(mode, options = {}) {
+            const shouldToggle = options.force !== true;
+            tvDrawMode = shouldToggle && tvDrawMode === mode ? null : mode;
             tvDrawStart = null;
             clearTVDrawingPreview();
             closeTVToolbarMenus();
@@ -15366,11 +15609,18 @@ def index():
             if (tvDrawMode === 'channel') {
                 if (!clickTime) return;
                 const drawPoints = Array.isArray(tvDrawStart && tvDrawStart.points) ? tvDrawStart.points.slice() : [];
-                drawPoints.push({ price, time: clickTime, logical });
+                const nextPoint = drawPoints.length === 1
+                    ? getTVChannelSnappedPoint(drawPoints[0], { price, time: clickTime, logical })
+                    : { price, time: clickTime, logical };
+                drawPoints.push(nextPoint);
                 if (drawPoints.length === 1) {
                     tvDrawStart = { points: drawPoints };
                     const container = document.getElementById('price-chart');
-                    if (container) container.title = 'Click second point to set the channel trend';
+                    if (container) {
+                        container.title = getTVChannelAxisSnapEnabled()
+                            ? 'Click second point to set the channel trend (Snap HV ON)'
+                            : 'Click second point to set the channel trend';
+                    }
                     scheduleTVDrawingOverlayDraw();
                     return;
                 }
@@ -15505,50 +15755,123 @@ def index():
                 return node;
             }
 
-            // Indicator toggles
-            const sessionBtn = btn('Sess Lvls', 'Session levels and Initial Balance', () => {
-                const next = !getSessionLevelSettingsFromDom().enabled;
-                applySessionLevelSettingsToDom(Object.assign({}, getSessionLevelSettingsFromDom(), { enabled: next }));
-                renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
-                if (next) {
-                    _priceHistoryLastKey = '';
-                    fetchPriceHistory(true);
+            function createToolbarMenu(label, title, options = {}) {
+                const wrap = document.createElement('div');
+                wrap.className = 'tv-draw-dropdown';
+                const menuButton = btn(label, title, event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const isOpen = wrap.classList.contains('open');
+                    closeTVToolbarMenus();
+                    if (!isOpen) {
+                        openTVToolbarMenu(wrap, menuButton, menuPanel);
+                    }
+                }, 'menu-trigger');
+                if (Array.isArray(options.summaryTokens) && options.summaryTokens.length) {
+                    menuButton.dataset.indicatorMenuSummary = options.summaryTokens.join(',');
+                    menuButton.dataset.menuLabel = label;
+                    menuButton.dataset.menuTitle = title;
                 }
-            });
-            sessionBtn.dataset.sessionToggle = 'session_levels';
-            if (getSessionLevelSettingsFromDom().enabled) sessionBtn.classList.add('active');
-            addToGroup(indicatorsGroup, sessionBtn);
+                const toggleButton = btn('▾', options.toggleTitle || title, event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const isOpen = wrap.classList.contains('open');
+                    closeTVToolbarMenus();
+                    if (!isOpen) {
+                        openTVToolbarMenu(wrap, toggleButton, menuPanel);
+                    }
+                }, 'icon');
+                const menuPanel = document.createElement('div');
+                menuPanel.className = 'tv-draw-dropdown-menu tv-toolbar-menu-panel';
+                wrap.appendChild(menuButton);
+                wrap.appendChild(toggleButton);
+                wrap.appendChild(menuPanel);
+                return { wrap, menuButton, toggleButton, menuPanel };
+            }
 
-            TV_INDICATOR_DEFS.forEach(def => {
-                const b = btn(def.label, def.title, () => {
-                    setTVIndicatorEnabled(def.key, !tvActiveInds.has(def.key));
-                });
-                b.dataset.indicatorKey = def.key;
-                if (tvActiveInds.has(def.key)) b.classList.add('active');
-                addToGroup(indicatorsGroup, b);
+            function appendToolbarMenuSection(panel, title, buildRows) {
+                const section = document.createElement('div');
+                section.className = 'tv-toolbar-menu-section';
+                if (title) {
+                    const heading = document.createElement('div');
+                    heading.className = 'tv-toolbar-menu-title';
+                    heading.textContent = title;
+                    section.appendChild(heading);
+                }
+                buildRows(section);
+                panel.appendChild(section);
+                return section;
+            }
+
+            const indicatorTokens = ['session_levels'].concat(TV_INDICATOR_DEFS.map(def => def.key));
+            const indicatorsMenu = createToolbarMenu('Indicators', 'Toggle chart overlays, studies, and session levels.', {
+                summaryTokens: indicatorTokens,
+                toggleTitle: 'Open indicators menu',
             });
+            const indicatorsMenuGrid = document.createElement('div');
+            indicatorsMenuGrid.className = 'tv-toolbar-menu-grid';
+
+            appendToolbarMenuSection(indicatorsMenuGrid, 'Session', section => {
+                const sessionBtn = btn('Sess Lvls', 'Session levels and Initial Balance', () => {
+                    const next = !getSessionLevelSettingsFromDom().enabled;
+                    applySessionLevelSettingsToDom(Object.assign({}, getSessionLevelSettingsFromDom(), { enabled: next }));
+                    renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+                    if (next) {
+                        _priceHistoryLastKey = '';
+                        fetchPriceHistory(true);
+                    }
+                });
+                sessionBtn.classList.add('tv-draw-menu-item');
+                sessionBtn.dataset.sessionToggle = 'session_levels';
+                if (getSessionLevelSettingsFromDom().enabled) sessionBtn.classList.add('active');
+                section.appendChild(sessionBtn);
+            });
+
+            appendToolbarMenuSection(indicatorsMenuGrid, 'Trend', section => {
+                ['sma20', 'sma50', 'sma200', 'ema9', 'ema21', 'vwap'].forEach(key => {
+                    const def = TV_INDICATOR_DEFS.find(item => item.key === key);
+                    if (!def) return;
+                    const button = btn(def.label, def.title, () => {
+                        setTVIndicatorEnabled(def.key, !tvActiveInds.has(def.key));
+                    });
+                    button.classList.add('tv-draw-menu-item');
+                    button.dataset.indicatorKey = def.key;
+                    if (tvActiveInds.has(def.key)) button.classList.add('active');
+                    section.appendChild(button);
+                });
+            });
+
+            appendToolbarMenuSection(indicatorsMenuGrid, 'Studies', section => {
+                ['bb', 'rsi', 'macd', 'atr', 'oi'].forEach(key => {
+                    const def = TV_INDICATOR_DEFS.find(item => item.key === key);
+                    if (!def) return;
+                    const button = btn(def.label, def.title, () => {
+                        setTVIndicatorEnabled(def.key, !tvActiveInds.has(def.key));
+                    });
+                    button.classList.add('tv-draw-menu-item');
+                    button.dataset.indicatorKey = def.key;
+                    if (tvActiveInds.has(def.key)) button.classList.add('active');
+                    section.appendChild(button);
+                });
+            });
+
+            indicatorsMenu.menuPanel.appendChild(indicatorsMenuGrid);
+            addToGroup(indicatorsGroup, indicatorsMenu.wrap);
+            syncTVIndicatorMenuSummaryButtons();
 
             // --- Separator ---
             // Drawing tools
             const hLineWrap = document.createElement('div');
             hLineWrap.className = 'tv-draw-dropdown';
-            const hLineButton = btn('— H-Line', 'Draw horizontal price line (single click)', event => {
+            const hLineButton = btn('— H-Line', 'Toggle horizontal price line drawing', event => {
                 event.preventDefault();
                 event.stopPropagation();
-                if (tvDrawMode === 'hline') {
-                    if (hLineWrap.classList.contains('open')) {
-                        closeTVToolbarMenus();
-                    } else {
-                        openTVToolbarMenu(hLineWrap, hLineButton, hLineMenu);
-                    }
-                    return;
-                }
                 setDrawMode('hline');
             });
             hLineButton.id = 'tv-hline-draw-button';
             hLineButton.dataset.draw = 'hline';
             if (tvDrawMode === 'hline') hLineButton.classList.add('active');
-            const hLineMenuToggle = btn('', 'Choose H-Line preset', event => {
+            const hLineMenuToggle = btn('', 'Choose H-Line type/color', event => {
                 event.preventDefault();
                 event.stopPropagation();
                 const isOpen = hLineWrap.classList.contains('open');
@@ -15579,7 +15902,7 @@ def index():
                     event.preventDefault();
                     event.stopPropagation();
                     setActiveTVHLinePresetKey(presetDef.key);
-                    setDrawMode('hline');
+                    setDrawMode('hline', { force: true });
                 });
                 hLineMenu.appendChild(option);
             });
@@ -15602,7 +15925,20 @@ def index():
                 const b = btn(def.label, def.title, () => setDrawMode(def.key));
                 b.dataset.draw = def.key;
                 if (tvDrawMode === def.key) b.classList.add('active');
-                addToGroup(drawGroup, b);
+                if (def.key === 'channel') {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'tv-draw-inline';
+                    wrap.appendChild(b);
+                    const channelSnapBtn = btn('', '', () => {
+                        setTVChannelAxisSnapEnabled(!getTVChannelAxisSnapEnabled());
+                    }, 'pill');
+                    channelSnapBtn.id = 'tv-channel-snap-toggle';
+                    wrap.appendChild(channelSnapBtn);
+                    addToGroup(drawGroup, wrap);
+                    syncTVChannelSnapToolbarButton();
+                } else {
+                    addToGroup(drawGroup, b);
+                }
             });
 
             // Draw color picker
@@ -15624,11 +15960,32 @@ def index():
             colorWrap.appendChild(colorPicker);
             addToGroup(drawGroup, colorWrap);
 
-            // Undo / Clear
+            // Undo / Clear / chart settings
             addToGroup(actionsGroup, btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
             addToGroup(actionsGroup, btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
-            addToGroup(actionsGroup, btn('Indicators', 'Edit built-in indicator styles', openTVIndicatorEditor));
-            addToGroup(actionsGroup, btn('Levels', 'Edit key/session level visibility and styles', openPriceLevelEditor));
+
+            const chartMenu = createToolbarMenu('Chart', 'Open chart style and level settings.', {
+                toggleTitle: 'Open chart settings menu',
+            });
+            const chartMenuGrid = document.createElement('div');
+            chartMenuGrid.className = 'tv-toolbar-menu-grid';
+            appendToolbarMenuSection(chartMenuGrid, 'Settings', section => {
+                const indicatorStylesBtn = btn('Indicator Styles', 'Edit built-in indicator styles', () => {
+                    closeTVToolbarMenus();
+                    openTVIndicatorEditor();
+                });
+                indicatorStylesBtn.classList.add('tv-draw-menu-item');
+                section.appendChild(indicatorStylesBtn);
+
+                const levelStylesBtn = btn('Level Styles', 'Edit key/session level visibility and styles', () => {
+                    closeTVToolbarMenus();
+                    openPriceLevelEditor();
+                });
+                levelStylesBtn.classList.add('tv-draw-menu-item');
+                section.appendChild(levelStylesBtn);
+            });
+            chartMenu.menuPanel.appendChild(chartMenuGrid);
+            addToGroup(actionsGroup, chartMenu.wrap);
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
