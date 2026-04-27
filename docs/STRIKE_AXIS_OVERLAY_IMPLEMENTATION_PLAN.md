@@ -1,6 +1,6 @@
 # Strike Axis Overlay Prototype Plan
 
-**Status:** Prototype implementation complete
+**Status:** Prototype implementation complete; snapback follow-up fixed and verified
 **Created:** 2026-04-26  
 **Implemented:** 2026-04-26 on `codex/strike-axis-overlay-prototype`
 **Target branch:** `codex/strike-axis-overlay-plan` for this doc; implementation used `codex/strike-axis-overlay-prototype`.
@@ -56,6 +56,7 @@ Completed:
 - Drew bars left from a fixed right-side anchor in the blank price-chart area, using `--call` and `--put` color tokens with magnitude-based opacity.
 - Reserved room near the price axis so chart price labels and level labels remain readable.
 - Redraw the overlay on chart render, pan/zoom, resize, reset/focus, live candle updates, toggle changes, and metric changes.
+- Preserved user-created right-side chart spacing through background data refreshes.
 
 Issues encountered and fixes:
 
@@ -64,6 +65,11 @@ Issues encountered and fixes:
 - The overlay element could report `0x0` dimensions even after insertion, causing the draw routine to exit. CSS now gives the overlay explicit dimensions, and the draw path falls back to the parent chart dimensions.
 - Price coordinate mapping was timing-sensitive in some chart states. The overlay now uses `priceToCoordinate()` when available and falls back to a visible-range mapping derived from `coordinateToPrice(0)` and `coordinateToPrice(plotBottom)`.
 - Safari and the in-app browser can cache inline JavaScript during rapid local testing. Use a hard refresh or cache-busted URL after code changes.
+- Manual right-scrolls could snap back after a few seconds. Two causes were found:
+  - The overlay helper reapplied `timeScale.rightOffset` on every price chart render, overwriting a larger manual gap.
+  - Lightweight Charts could also shift the visible logical range during candle/volume `setData()` refreshes.
+- The snapback fix now forces the offset only on chart creation and overlay toggle changes, guards refresh-time offset application, and captures/restores the visible logical range around data replacement.
+- Local verification required restarting the `127.0.0.1:5002` Flask prototype process; otherwise the browser kept testing an older in-memory copy of the inline JavaScript.
 
 Verification completed:
 
@@ -72,15 +78,27 @@ Verification completed:
 - `git diff --check`
 - Local `/update` response returned 29 GEX profile rows for SPY in the test state
 - Browser verification on `127.0.0.1:5002` showed 11 visible overlay bars in the current price viewport
+- In-app browser verification on `127.0.0.1:5002`: dragged the chart left to create right-side space, waited through live refresh, and confirmed the view did not snap back.
 
 Remaining follow-up work:
 
 - Decide whether the on-chart overlay should eventually replace, collapse, or coexist with the standalone strike rail.
 - Add richer hover/tooltip details if users want per-strike values on the overlay itself.
 - Consider split call/put rendering for Open Interest and Options Volume after the simple net view is validated.
-- Add user-facing controls for right offset, anchor width, or max bar width if the fixed defaults need tuning.
+- Add user-facing controls for right offset, anchor width, or max bar width if the fixed defaults need tuning; the current implementation keeps the stored `STRIKE_OVERLAY_RIGHT_OFFSET_KEY` plumbing but exposes no UI for it.
 - Refine mobile behavior later; the prototype remains targeted at the large-monitor desktop layout.
 - Add Premium only after confirming the desired signed net convention.
+- Decide whether manually shifted chart spacing should be persisted per ticker/session or remain an in-memory chart interaction only.
+
+### Follow-up Fix - 2026-04-27
+
+Fixed a refresh-time snapback in the on-chart overlay prototype:
+
+- The overlay previously reapplied `timeScale.rightOffset` on every price chart render.
+- Manual right-scrolls increase the logical gap between the latest candle and the price axis, but the next `/update` render overwrote that user-created gap back to the saved/default offset.
+- Offset application is now split into explicit forced calls for chart creation/toggle changes and a guarded refresh path.
+- The candle/volume `setData()` refresh path now captures and restores the visible logical range, preserving manual right-side space through background refreshes.
+- Background refreshes now preserve any larger manual right-side gap and only top the gap back up when the view is still at the latest bars.
 
 ---
 

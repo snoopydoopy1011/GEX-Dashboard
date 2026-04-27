@@ -14554,15 +14554,41 @@ def index():
             });
         }
 
-        function applyStrikeOverlayRightOffset() {
-            if (!tvPriceChart || !tvPriceChart.timeScale) return;
+        function getStrikeOverlayRightOffset() {
             let offset = 18;
             try {
                 const raw = parseFloat(localStorage.getItem(STRIKE_OVERLAY_RIGHT_OFFSET_KEY));
                 if (Number.isFinite(raw)) offset = Math.max(4, Math.min(48, raw));
             } catch (e) {}
+            return offset;
+        }
+
+        function shouldApplyStrikeOverlayRightOffset(offset) {
+            if (!tvPriceChart || !tvPriceChart.timeScale || !tvLastCandles.length) return true;
             try {
-                tvPriceChart.timeScale().applyOptions({ rightOffset: strikeOverlayEnabled ? offset : 0 });
+                const range = tvPriceChart.timeScale().getVisibleLogicalRange();
+                if (!range || !Number.isFinite(range.to)) return true;
+                const lastLogical = tvLastCandles.length - 1;
+                const currentGap = range.to - lastLogical;
+                if (currentGap >= offset - 0.25) return false;
+                return range.to >= lastLogical - 0.5;
+            } catch (e) {
+                return true;
+            }
+        }
+
+        function applyStrikeOverlayRightOffset(options = {}) {
+            if (!tvPriceChart || !tvPriceChart.timeScale) return;
+            const force = !!options.force;
+            const offset = getStrikeOverlayRightOffset();
+            try {
+                if (!strikeOverlayEnabled) {
+                    if (force) tvPriceChart.timeScale().applyOptions({ rightOffset: 0 });
+                    return;
+                }
+                if (force || shouldApplyStrikeOverlayRightOffset(offset)) {
+                    tvPriceChart.timeScale().applyOptions({ rightOffset: offset });
+                }
             } catch (e) {}
         }
 
@@ -14741,7 +14767,7 @@ def index():
                 if (strikeOverlayEnabled && lastData && lastData.strike_profiles) {
                     tvStrikeOverlayProfiles = lastData.strike_profiles || {};
                 }
-                applyStrikeOverlayRightOffset();
+                applyStrikeOverlayRightOffset({ force: true });
                 syncStrikeOverlayControls();
                 scheduleTVStrikeOverlayDraw();
             });
@@ -16834,7 +16860,7 @@ def index():
                 ensureTVStrikeOverlay();
                 ensureTVDrawingEditor();
                 ensureTVHistoricalOverlay();
-                applyStrikeOverlayRightOffset();
+                applyStrikeOverlayRightOffset({ force: true });
                 tvPriceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
                     scheduleSessionLevelCloudDraw();
                     scheduleTVStrikeOverlayDraw();
@@ -16909,14 +16935,39 @@ def index():
                 upColor, downColor,
                 wickUpColor: upColor, wickDownColor: downColor,
             });
-            applyStrikeOverlayRightOffset();
             syncStrikeOverlayControls();
 
             const isFirstRender = !tvLastCandles.length;
+            const shouldFitAll = tvAutoRange || tvForceFit;
+            const shouldFocusSession = !shouldFitAll && (isFirstRender || tvForceSessionFocus);
+            let rangeToRestoreAfterData = null;
+            if (!shouldFitAll && !shouldFocusSession && tvLastCandles.length && tvPriceChart && tvPriceChart.timeScale) {
+                try {
+                    const range = tvPriceChart.timeScale().getVisibleLogicalRange();
+                    if (range && Number.isFinite(range.from) && Number.isFinite(range.to)) {
+                        const oldLastLogical = tvLastCandles.length - 1;
+                        const newLastLogical = candles.length - 1;
+                        const span = range.to - range.from;
+                        const gapToLiveEdge = range.to - oldLastLogical;
+                        if (Number.isFinite(span) && span > 0 && Number.isFinite(newLastLogical)) {
+                            if (range.to >= oldLastLogical - 0.5) {
+                                const nextTo = newLastLogical + Math.max(gapToLiveEdge, getStrikeOverlayRightOffset());
+                                rangeToRestoreAfterData = { from: nextTo - span, to: nextTo };
+                            } else {
+                                rangeToRestoreAfterData = { from: range.from, to: range.to };
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
 
             tvCandleSeries.setData(candles);
             tvLastCandles = candles;
             tvVolumeSeries.setData(priceData.volume || []);
+            if (rangeToRestoreAfterData && tvPriceChart && tvPriceChart.timeScale) {
+                try { tvPriceChart.timeScale().setVisibleLogicalRange(rangeToRestoreAfterData); } catch (e) {}
+            }
+            applyStrikeOverlayRightOffset();
             // Use multi-day candles for indicator warmup so SMA200, EMA200, etc. start from day open
             tvIndicatorCandles = (priceData.indicator_candles && priceData.indicator_candles.length > 0)
                 ? priceData.indicator_candles : candles;
@@ -16947,8 +16998,6 @@ def index():
             // Re-sync GEX side panel after candles + autoscale settle
             scheduleGexPanelSync();
 
-            const shouldFitAll = tvAutoRange || tvForceFit;
-            const shouldFocusSession = !shouldFitAll && (isFirstRender || tvForceSessionFocus);
             if (shouldFitAll) {
                 tvYAxisMode = 'fit-all';
                 const _chart = tvPriceChart;
