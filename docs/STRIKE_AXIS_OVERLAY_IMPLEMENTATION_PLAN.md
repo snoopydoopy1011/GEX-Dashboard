@@ -1,8 +1,9 @@
 # Strike Axis Overlay Prototype Plan
 
-**Status:** Draft implementation plan  
+**Status:** Prototype implementation complete
 **Created:** 2026-04-26  
-**Target branch:** `codex/strike-axis-overlay-plan` for this doc; implementation should use a new `codex/strike-axis-overlay-prototype` branch or equivalent.  
+**Implemented:** 2026-04-26 on `codex/strike-axis-overlay-prototype`
+**Target branch:** `codex/strike-axis-overlay-plan` for this doc; implementation used `codex/strike-axis-overlay-prototype`.
 **Scope:** Prototype an on-chart, right-side strike profile overlay while keeping the existing strike rail available.
 
 ---
@@ -39,6 +40,47 @@ Inherited ground rules:
 - Keep `ezoptionsschwab.py` as a single-file app.
 - Use CSS tokens for colors, especially `--call`, `--put`, `--warn`, `--info`, `--accent`, `--border`, `--bg-*`, `--fg-*`.
 - Any new DOM under rebuilt chart-grid regions must be mirrored in `ensurePriceChartDom()` if the rebuild path can drop it.
+
+---
+
+## Implementation Update - 2026-04-26
+
+Prototype work is implemented in `ezoptionsschwab.py` on `codex/strike-axis-overlay-prototype`.
+
+Completed:
+
+- Added `/update` `strike_profiles` data via `create_strike_profile_payload()`.
+- Added a disabled-by-default on-chart strike overlay with toolbar toggle and metric dropdown.
+- Supported overlay metrics: GEX, Gamma, Delta, Vanna, Charm, Open Interest, and Options Volume. Premium remains deferred.
+- Kept the existing Plotly strike rail intact for side-by-side comparison.
+- Drew bars left from a fixed right-side anchor in the blank price-chart area, using `--call` and `--put` color tokens with magnitude-based opacity.
+- Reserved room near the price axis so chart price labels and level labels remain readable.
+- Redraw the overlay on chart render, pan/zoom, resize, reset/focus, live candle updates, toggle changes, and metric changes.
+
+Issues encountered and fixes:
+
+- Backend profile rows were present, but the first SVG overlay renderer produced no visible output in the browser. The renderer was changed to absolutely positioned DOM bars for better Safari/in-app-browser reliability and easier inspection.
+- Toggling the overlay on after data had already arrived could leave the overlay with empty local state. The toggle path now recovers profiles from `lastData.strike_profiles`.
+- The overlay element could report `0x0` dimensions even after insertion, causing the draw routine to exit. CSS now gives the overlay explicit dimensions, and the draw path falls back to the parent chart dimensions.
+- Price coordinate mapping was timing-sensitive in some chart states. The overlay now uses `priceToCoordinate()` when available and falls back to a visible-range mapping derived from `coordinateToPrice(0)` and `coordinateToPrice(plotBottom)`.
+- Safari and the in-app browser can cache inline JavaScript during rapid local testing. Use a hard refresh or cache-busted URL after code changes.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py`
+- Node syntax check of all inline `<script>` blocks
+- `git diff --check`
+- Local `/update` response returned 29 GEX profile rows for SPY in the test state
+- Browser verification on `127.0.0.1:5002` showed 11 visible overlay bars in the current price viewport
+
+Remaining follow-up work:
+
+- Decide whether the on-chart overlay should eventually replace, collapse, or coexist with the standalone strike rail.
+- Add richer hover/tooltip details if users want per-strike values on the overlay itself.
+- Consider split call/put rendering for Open Interest and Options Volume after the simple net view is validated.
+- Add user-facing controls for right offset, anchor width, or max bar width if the fixed defaults need tuning.
+- Refine mobile behavior later; the prototype remains targeted at the large-monitor desktop layout.
+- Add Premium only after confirming the desired signed net convention.
 
 ---
 
@@ -688,4 +730,3 @@ Do not spend first-pass time on:
 - New analytics or formula changes.
 
 The first milestone is simple: signed strike bars on the price chart, correctly aligned, safely layered, refreshable, and toggleable.
-

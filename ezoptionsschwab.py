@@ -3969,6 +3969,90 @@ def create_gex_side_panel(calls, puts, S, strike_range=0.02,
     return fig.to_json()
 
 
+def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_expiries=None):
+    """Build compact per-strike profiles for the TradingView strike overlay.
+
+    This only aggregates columns that already exist on the option chain rows; it
+    does not alter any exposure math. The output is intentionally JSON-simple so
+    the frontend does not need to parse Plotly payloads.
+    """
+    profiles = {
+        'gex': ('GEX', 'call_minus_put'),
+        'gamma': ('GEX', 'call_minus_put'),
+        'delta': ('DEX', 'call_plus_put'),
+        'vanna': ('VEX', 'call_plus_put'),
+        'charm': ('Charm', 'call_plus_put'),
+        'open_interest': ('openInterest', 'call_minus_put'),
+        'options_volume': ('volume', 'call_minus_put'),
+    }
+    empty_payload = {key: [] for key in profiles}
+    if S is None:
+        return empty_payload
+    try:
+        spot = float(S)
+        range_pct = float(strike_range)
+    except Exception:
+        return empty_payload
+    if not math.isfinite(spot) or spot <= 0 or not math.isfinite(range_pct):
+        return empty_payload
+
+    min_strike = spot * (1 - range_pct)
+    max_strike = spot * (1 + range_pct)
+
+    def _filter_profile_df(df):
+        if df is None or getattr(df, 'empty', True) or 'strike' not in df.columns:
+            return pd.DataFrame()
+        working = df
+        if selected_expiries and 'expiration_date' in working.columns:
+            working = working[working['expiration_date'].isin(selected_expiries)]
+        if working.empty:
+            return pd.DataFrame()
+        strikes = pd.to_numeric(working['strike'], errors='coerce')
+        working = working.loc[(strikes >= min_strike) & (strikes <= max_strike)].copy()
+        if working.empty:
+            return pd.DataFrame()
+        working['strike'] = pd.to_numeric(working['strike'], errors='coerce')
+        working = working.dropna(subset=['strike'])
+        return working
+
+    calls_df = _filter_profile_df(calls)
+    puts_df = _filter_profile_df(puts)
+
+    def _sum_by_strike(df, col):
+        if df.empty or col not in df.columns:
+            return {}
+        working = df[['strike', col]].copy()
+        working[col] = pd.to_numeric(working[col], errors='coerce').fillna(0.0)
+        grouped = working.groupby('strike')[col].sum()
+        return {float(strike): float(value) for strike, value in grouped.items()}
+
+    def _rows_from_maps(call_map, put_map, mode):
+        rows = []
+        for strike in sorted(set(call_map) | set(put_map)):
+            call_value = float(call_map.get(strike, 0.0) or 0.0)
+            put_value = float(put_map.get(strike, 0.0) or 0.0)
+            value = call_value - put_value if mode == 'call_minus_put' else call_value + put_value
+            if not all(math.isfinite(v) for v in (strike, call_value, put_value, value)):
+                continue
+            if value == 0 and call_value == 0 and put_value == 0:
+                continue
+            rows.append({
+                'strike': float(strike),
+                'value': float(value),
+                'call': call_value,
+                'put': put_value,
+                'abs_value': abs(float(value)),
+            })
+        return rows
+
+    payload = {}
+    for key, (column, mode) in profiles.items():
+        call_map = _sum_by_strike(calls_df, column)
+        put_map = _sum_by_strike(puts_df, column)
+        payload[key] = _rows_from_maps(call_map, put_map, mode) if (call_map or put_map) else []
+    return payload
+
+
 def _expiration_series_iso(df):
     """Return an ISO-date Series for whichever expiration column the chain carries."""
     if df is None or df.empty:
@@ -9072,6 +9156,24 @@ def index():
             height: 100%;
             overflow: visible;
         }
+        .tv-strike-overlay {
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 5;
+            pointer-events: none;
+            overflow: hidden;
+        }
+        .tv-strike-overlay-bar {
+            position: absolute;
+            border-radius: 4px;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+            transform: translateZ(0);
+        }
         .tv-drawing-overlay {
             position: absolute;
             inset: 0;
@@ -9366,6 +9468,32 @@ def index():
         }
         .tv-toolbar-group[data-group="actions"] {
             background: rgba(59, 130, 246, 0.06);
+        }
+        .tv-toolbar-group[data-group="strike-overlay"] {
+            background: rgba(16, 185, 129, 0.06);
+        }
+        .strike-overlay-toggle {
+            min-width: 66px;
+        }
+        .strike-overlay-select {
+            height: 24px;
+            max-width: 118px;
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            background: var(--bg-1);
+            color: var(--fg-1);
+            font-size: 11px;
+            line-height: 1.35;
+            padding: 2px 22px 2px 7px;
+            cursor: pointer;
+        }
+        .strike-overlay-select:disabled {
+            opacity: 0.72;
+            cursor: pointer;
+        }
+        .strike-overlay-select:focus {
+            outline: none;
+            border-color: var(--accent);
         }
         .tv-draw-dropdown {
             position: relative;
@@ -11102,6 +11230,9 @@ def index():
             options_volume: 'Options Vol',
             premium: 'Premium',
         };
+        const STRIKE_OVERLAY_ENABLED_KEY = 'gex.strikeOverlayEnabled';
+        const STRIKE_OVERLAY_METRIC_KEY = 'gex.strikeOverlayMetric';
+        const STRIKE_OVERLAY_RIGHT_OFFSET_KEY = 'gex.strikeOverlayRightOffset';
         const STRIKE_RAIL_PREF_VERSION_KEY = 'gex.strikeRailTabPrefVersion';
         let activeStrikeRailTab = (() => {
             try {
@@ -11115,6 +11246,19 @@ def index():
                 if (!prefVersion) {
                     localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
                 }
+                return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'gex';
+            } catch (e) {
+                return 'gex';
+            }
+        })();
+        let tvStrikeOverlayProfiles = {};
+        let tvStrikeOverlayPending = false;
+        let strikeOverlayEnabled = (() => {
+            try { return localStorage.getItem(STRIKE_OVERLAY_ENABLED_KEY) === '1'; } catch (e) { return false; }
+        })();
+        let activeStrikeOverlayMetric = (() => {
+            try {
+                const saved = localStorage.getItem(STRIKE_OVERLAY_METRIC_KEY);
                 return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'gex';
             } catch (e) {
                 return 'gex';
@@ -11573,6 +11717,7 @@ def index():
                     // Sub-pane charts also need their price axes reset
                     if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
                     if (tvMacdChart) tvMacdChart.priceScale('right').applyOptions({ autoScale: true });
+                    scheduleTVStrikeOverlayDraw();
                 } catch(e) {}
             }, 50);
         }
@@ -11612,6 +11757,7 @@ def index():
                     tvApplyAutoscale();
                     if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
                     if (tvMacdChart) tvMacdChart.priceScale('right').applyOptions({ autoScale: true });
+                    scheduleTVStrikeOverlayDraw();
                     scheduleTVHistoricalOverlayDraw();
                     scheduleGexPanelSync();
                 } catch(e) {}
@@ -11729,6 +11875,7 @@ def index():
                     clearTimeout(tvIndicatorRefreshTimer);
                     tvIndicatorRefreshTimer = setTimeout(() => applyIndicators(tvIndicatorCandles, tvActiveInds), 2000);
                 }
+                scheduleTVStrikeOverlayDraw();
             } else if (bucketStart > lastCandle.time) {
                 // Clock has rolled past the bucket boundary but CHART_EQUITY hasn't
                 // pushed the new bar yet. Seed a provisional bucket from the last
@@ -11749,6 +11896,7 @@ def index():
                 tvLastCandles.push(fresh);
                 const icLast = tvIndicatorCandles[tvIndicatorCandles.length - 1];
                 if (!icLast || icLast.time < bucketStart) tvIndicatorCandles.push(fresh);
+                scheduleTVStrikeOverlayDraw();
             }
         }
 
@@ -11805,6 +11953,7 @@ def index():
                 });
             } catch(e) {}
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
+            scheduleTVStrikeOverlayDraw();
         }
 
         // --- Fullscreen chart support ---
@@ -14367,6 +14516,260 @@ def index():
             return overlay;
         }
 
+        function getStrikeOverlayMetricKeys(selectedCharts = getChartVisibility()) {
+            return getVisibleStrikeRailTabs(selectedCharts).filter(key => key !== 'premium');
+        }
+
+        function normalizeStrikeOverlayMetric(metric) {
+            const available = getStrikeOverlayMetricKeys();
+            if (available.includes(metric)) return metric;
+            if (available.includes('gex')) return 'gex';
+            return available[0] || 'gex';
+        }
+
+        function syncStrikeOverlayControls() {
+            document.querySelectorAll('.strike-overlay-toggle').forEach(btn => {
+                btn.classList.toggle('active', !!strikeOverlayEnabled);
+                btn.textContent = strikeOverlayEnabled ? 'Overlay ON' : 'Overlay';
+                btn.title = strikeOverlayEnabled ? 'Hide strike profile overlay' : 'Show strike profile overlay';
+            });
+            document.querySelectorAll('.strike-overlay-select').forEach(select => {
+                const available = getStrikeOverlayMetricKeys();
+                const optionsKey = available.join('|');
+                if (select.dataset.optionsKey !== optionsKey) {
+                    select.replaceChildren();
+                    available.forEach(metricKey => {
+                        const option = document.createElement('option');
+                        option.value = metricKey;
+                        option.textContent = STRIKE_RAIL_LABELS[metricKey] || metricKey;
+                        select.appendChild(option);
+                    });
+                    select.dataset.optionsKey = optionsKey;
+                }
+                const metric = normalizeStrikeOverlayMetric(activeStrikeOverlayMetric);
+                if (select.value !== metric) select.value = metric;
+                select.title = strikeOverlayEnabled
+                    ? 'Strike overlay metric'
+                    : 'Choose the metric to show when Overlay is enabled';
+            });
+        }
+
+        function applyStrikeOverlayRightOffset() {
+            if (!tvPriceChart || !tvPriceChart.timeScale) return;
+            let offset = 18;
+            try {
+                const raw = parseFloat(localStorage.getItem(STRIKE_OVERLAY_RIGHT_OFFSET_KEY));
+                if (Number.isFinite(raw)) offset = Math.max(4, Math.min(48, raw));
+            } catch (e) {}
+            try {
+                tvPriceChart.timeScale().applyOptions({ rightOffset: strikeOverlayEnabled ? offset : 0 });
+            } catch (e) {}
+        }
+
+        function ensureTVStrikeOverlay() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let overlay = container.querySelector('.tv-strike-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.className = 'tv-strike-overlay';
+                const drawingOverlay = container.querySelector('.tv-drawing-overlay');
+                if (drawingOverlay) container.insertBefore(overlay, drawingOverlay);
+                else container.appendChild(overlay);
+            }
+            return overlay;
+        }
+
+        function clearTVStrikeOverlay() {
+            const overlay = document.querySelector('#price-chart .tv-strike-overlay');
+            if (!overlay) return;
+            overlay.replaceChildren();
+            overlay.style.display = 'none';
+            overlay.dataset.visibleCount = '0';
+        }
+
+        function setStrikeOverlayProfiles(data) {
+            tvStrikeOverlayProfiles = (data && typeof data === 'object') ? data : {};
+            const rows = tvStrikeOverlayProfiles[activeStrikeOverlayMetric];
+            if (!Array.isArray(rows) || !rows.length) {
+                activeStrikeOverlayMetric = normalizeStrikeOverlayMetric(
+                    tvStrikeOverlayProfiles.gex ? 'gex' : Object.keys(tvStrikeOverlayProfiles)[0]
+                );
+            }
+            syncStrikeOverlayControls();
+            scheduleTVStrikeOverlayDraw();
+        }
+
+        function drawTVStrikeOverlay() {
+            const overlay = ensureTVStrikeOverlay();
+            if (!overlay) return;
+            const container = document.getElementById('price-chart');
+            const width = Math.max(0, overlay.clientWidth, container ? container.clientWidth : 0);
+            const height = Math.max(0, overlay.clientHeight, container ? container.clientHeight : 0);
+            overlay.dataset.width = String(Math.round(width));
+            overlay.dataset.height = String(Math.round(height));
+            overlay.replaceChildren();
+
+            const metric = normalizeStrikeOverlayMetric(activeStrikeOverlayMetric);
+            let rows = Array.isArray(tvStrikeOverlayProfiles && tvStrikeOverlayProfiles[metric])
+                ? tvStrikeOverlayProfiles[metric]
+                : [];
+            if ((!rows.length) && lastData && lastData.strike_profiles) {
+                tvStrikeOverlayProfiles = lastData.strike_profiles || {};
+                rows = Array.isArray(tvStrikeOverlayProfiles[metric]) ? tvStrikeOverlayProfiles[metric] : [];
+            }
+            overlay.dataset.metric = metric;
+            overlay.dataset.rowCount = String(rows.length);
+            if (!strikeOverlayEnabled || !tvPriceChart || !tvCandleSeries || !rows.length || !width || !height) {
+                overlay.style.display = 'none';
+                overlay.dataset.visibleCount = '0';
+                return;
+            }
+
+            let priceScaleWidth = 0;
+            try {
+                const scale = tvPriceChart.priceScale && tvPriceChart.priceScale('right');
+                priceScaleWidth = scale && scale.width ? scale.width() : 0;
+            } catch (e) {}
+            let timeScaleHeight = 0;
+            try {
+                timeScaleHeight = tvPriceChart.timeScale && tvPriceChart.timeScale().height
+                    ? tvPriceChart.timeScale().height()
+                    : 0;
+            } catch (e) {}
+            const plotBottom = Math.max(0, height - timeScaleHeight);
+            const labelSafeWidth = 96;
+            const anchorX = Math.max(48, width - priceScaleWidth - labelSafeWidth);
+            const maxBarWidth = Math.min(260, Math.max(80, width * 0.16));
+            let topPrice = null;
+            let bottomPrice = null;
+            try {
+                topPrice = tvCandleSeries.coordinateToPrice(0);
+                bottomPrice = tvCandleSeries.coordinateToPrice(plotBottom);
+            } catch (e) {}
+            const hasLinearPriceMap =
+                Number.isFinite(Number(topPrice)) &&
+                Number.isFinite(Number(bottomPrice)) &&
+                Math.abs(Number(topPrice) - Number(bottomPrice)) > 0.000001;
+            overlay.dataset.topPrice = hasLinearPriceMap ? String(Number(topPrice).toFixed(4)) : '';
+            overlay.dataset.bottomPrice = hasLinearPriceMap ? String(Number(bottomPrice).toFixed(4)) : '';
+
+            const priceToOverlayY = strike => {
+                if (hasLinearPriceMap) {
+                    const top = Number(topPrice);
+                    const bottom = Number(bottomPrice);
+                    const lo = Math.min(top, bottom);
+                    const hi = Math.max(top, bottom);
+                    if (strike < lo || strike > hi) return null;
+                    return ((top - strike) / (top - bottom)) * plotBottom;
+                }
+                const y = tvCandleSeries.priceToCoordinate(strike);
+                return (y == null || Number.isNaN(y)) ? null : y;
+            };
+
+            const screenRows = rows.map(row => {
+                const strike = Number(row && row.strike);
+                const value = Number(row && row.value);
+                if (!Number.isFinite(strike) || !Number.isFinite(value) || value === 0) return null;
+                const y = priceToOverlayY(strike);
+                if (y == null || Number.isNaN(y) || y < 0 || y > plotBottom) return null;
+                return { row, strike, value, y };
+            }).filter(Boolean).sort((a, b) => a.y - b.y);
+
+            if (!screenRows.length) {
+                overlay.style.display = 'none';
+                overlay.dataset.visibleCount = '0';
+                return;
+            }
+            const maxAbs = Math.max(...screenRows.map(item => Math.abs(item.value))) || 1;
+            const gaps = [];
+            for (let i = 1; i < screenRows.length; i += 1) {
+                const gap = Math.abs(screenRows[i].y - screenRows[i - 1].y);
+                if (Number.isFinite(gap) && gap > 0) gaps.push(gap);
+            }
+            const nearestGap = gaps.length ? Math.min(...gaps) : 12;
+            const barHeight = Math.min(12, Math.max(3, nearestGap * 0.65));
+            const callC = getComputedStyle(document.documentElement).getPropertyValue('--call').trim() || '#10B981';
+            const putC = getComputedStyle(document.documentElement).getPropertyValue('--put').trim() || '#EF4444';
+            const fragment = document.createDocumentFragment();
+
+            screenRows.forEach(item => {
+                const magnitude = Math.abs(item.value) / maxAbs;
+                const barWidth = Math.max(2, Math.round(maxBarWidth * magnitude));
+                const x = Math.max(0, anchorX - barWidth);
+                const opacity = Math.min(0.9, 0.28 + 0.62 * magnitude);
+                const label = STRIKE_RAIL_LABELS[metric] || metric;
+                const bar = document.createElement('div');
+                bar.className = 'tv-strike-overlay-bar';
+                bar.style.left = x + 'px';
+                bar.style.top = (item.y - (barHeight / 2)) + 'px';
+                bar.style.width = barWidth + 'px';
+                bar.style.height = barHeight + 'px';
+                bar.style.background = item.value >= 0 ? callC : putC;
+                bar.style.opacity = opacity.toFixed(3);
+                bar.title = label + ' ' + item.strike + ': ' + Math.round(item.value).toLocaleString();
+                fragment.appendChild(bar);
+            });
+            overlay.appendChild(fragment);
+            overlay.style.display = 'block';
+            overlay.dataset.visibleCount = String(screenRows.length);
+        }
+
+        function scheduleTVStrikeOverlayDraw() {
+            if (tvStrikeOverlayPending) return;
+            tvStrikeOverlayPending = true;
+            requestAnimationFrame(() => {
+                tvStrikeOverlayPending = false;
+                drawTVStrikeOverlay();
+            });
+        }
+
+        function renderStrikeOverlayControls(parent) {
+            if (!parent) return null;
+            const existing = parent.querySelector('[data-group="strike-overlay"]');
+            if (existing) existing.remove();
+            const group = document.createElement('div');
+            group.className = 'tv-toolbar-group';
+            group.dataset.group = 'strike-overlay';
+
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'tv-tb-btn strike-overlay-toggle';
+            toggle.addEventListener('click', () => {
+                strikeOverlayEnabled = !strikeOverlayEnabled;
+                try { localStorage.setItem(STRIKE_OVERLAY_ENABLED_KEY, strikeOverlayEnabled ? '1' : '0'); } catch (e) {}
+                if (strikeOverlayEnabled && lastData && lastData.strike_profiles) {
+                    tvStrikeOverlayProfiles = lastData.strike_profiles || {};
+                }
+                applyStrikeOverlayRightOffset();
+                syncStrikeOverlayControls();
+                scheduleTVStrikeOverlayDraw();
+            });
+            group.appendChild(toggle);
+
+            const select = document.createElement('select');
+            select.className = 'strike-overlay-select';
+            select.id = 'strike-overlay-select';
+            select.setAttribute('aria-label', 'Strike overlay metric');
+            getStrikeOverlayMetricKeys().forEach(metric => {
+                const option = document.createElement('option');
+                option.value = metric;
+                option.textContent = STRIKE_RAIL_LABELS[metric] || metric;
+                select.appendChild(option);
+            });
+            select.addEventListener('change', () => {
+                activeStrikeOverlayMetric = normalizeStrikeOverlayMetric(select.value);
+                try { localStorage.setItem(STRIKE_OVERLAY_METRIC_KEY, activeStrikeOverlayMetric); } catch (e) {}
+                syncStrikeOverlayControls();
+                scheduleTVStrikeOverlayDraw();
+            });
+            group.appendChild(select);
+
+            parent.appendChild(group);
+            syncStrikeOverlayControls();
+            return group;
+        }
+
         function appendSessionLevelCloud(svg, options = {}) {
             if (!svg || !tvCandleSeries) return;
             const topPrice = Number(options.topPrice);
@@ -15748,6 +16151,7 @@ def index():
             const indicatorsGroup = makeGroup('indicators');
             const drawGroup = makeGroup('draw');
             const actionsGroup = makeGroup('actions');
+            renderStrikeOverlayControls(toolbarMain);
             bindTVToolbarMenuDismiss();
 
             function addToGroup(group, node) {
@@ -16427,19 +16831,22 @@ def index():
                 buildTVToolbar(container, candles, upColor, downColor);
                 ensureTVDrawingOverlay();
                 ensureSessionLevelCloudOverlay();
+                ensureTVStrikeOverlay();
                 ensureTVDrawingEditor();
                 ensureTVHistoricalOverlay();
+                applyStrikeOverlayRightOffset();
                 tvPriceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
                     scheduleSessionLevelCloudDraw();
+                    scheduleTVStrikeOverlayDraw();
                     scheduleTVDrawingOverlayDraw();
                     scheduleTVHistoricalOverlayDraw();
                     scheduleGexPanelSync();
                 });
                 if (!tvHistoricalOverlayDomEventsBound) {
                     tvHistoricalOverlayDomEventsBound = true;
-                    container.addEventListener('wheel',    () => { scheduleSessionLevelCloudDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
-                    container.addEventListener('mouseup',  () => { scheduleSessionLevelCloudDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); });
-                    container.addEventListener('touchend', () => { scheduleSessionLevelCloudDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
+                    container.addEventListener('wheel',    () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
+                    container.addEventListener('mouseup',  () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); });
+                    container.addEventListener('touchend', () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
                     container.addEventListener('mousemove', (event) => updateTVHistoricalTooltip(event));
                     container.addEventListener('mouseleave', () => {
                         if (tvDrawMode) clearTVDrawingPreview();
@@ -16502,6 +16909,8 @@ def index():
                 upColor, downColor,
                 wickUpColor: upColor, wickDownColor: downColor,
             });
+            applyStrikeOverlayRightOffset();
+            syncStrikeOverlayControls();
 
             const isFirstRender = !tvLastCandles.length;
 
@@ -16529,6 +16938,7 @@ def index():
             tvHistoricalPoints = priceData.historical_exposure_levels || [];
             tvRestoreDrawings();
             scheduleSessionLevelCloudDraw();
+            scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
             renderKeyLevels(getScopedKeyLevels());
@@ -16550,6 +16960,7 @@ def index():
                         if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
                         if (tvMacdChart) tvMacdChart.priceScale('right').applyOptions({ autoScale: true });
                         scheduleSessionLevelCloudDraw();
+                        scheduleTVStrikeOverlayDraw();
                         scheduleTVHistoricalOverlayDraw();
                     } catch(e) {}
                 }, 50);
@@ -16985,6 +17396,7 @@ def index():
                 if (target && target._fullLayout) {
                     try { Plotly.Plots.resize(target); } catch (e) {}
                 }
+                scheduleTVStrikeOverlayDraw();
                 scheduleGexPanelSync();
                 try { window.dispatchEvent(new Event('resize')); } catch (e) {}
             });
@@ -18902,6 +19314,7 @@ def index():
             
             const selectedCharts = getChartVisibility();
             applyStrikeRailTabs(selectedCharts);
+            setStrikeOverlayProfiles(data.strike_profiles || {});
             
             // Handle price chart separately (TradingView Lightweight Charts)
             if (selectedCharts.price && data.price) {
@@ -18945,6 +19358,8 @@ def index():
                     tvIndicatorDataCache = {};
                     tvHistoricalPoints = [];
                     tvHistoricalExpectedMoveSeries = [];
+                    tvStrikeOverlayProfiles = {};
+                    clearTVStrikeOverlay();
                     tvKeyLevelLines = [];
                     tvSessionLevelLines = [];
                     tvTopOILines = [];
@@ -19762,6 +20177,7 @@ def index():
                 }
             });
             scheduleTVDrawingOverlayDraw();
+            scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
             scheduleGexPanelSync();
         });
@@ -20411,6 +20827,15 @@ def update():
         except Exception as e:
             print(f"[top_oi] build failed: {e}")
             response['top_oi'] = {'calls': [], 'puts': [], 'both': []}
+
+        try:
+            response['strike_profiles'] = create_strike_profile_payload(
+                calls, puts, S, strike_range,
+                selected_expiries=expiry_dates,
+            )
+        except Exception as e:
+            print(f"[strike_profiles] build failed: {e}")
+            response['strike_profiles'] = {}
 
         # Create charts based on visibility settings
         # NOTE: price chart is handled by /update_price (separate concurrent request)
