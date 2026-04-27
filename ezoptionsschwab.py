@@ -8,6 +8,7 @@ import math
 import time
 import collections
 import os
+import atexit
 
 # python.org Python on macOS ships without a default CA bundle unless
 # "Install Certificates.command" has been run, so ssl.create_default_context()
@@ -956,6 +957,7 @@ class PriceStreamer:
 
 
 price_streamer = PriceStreamer()
+atexit.register(price_streamer.stop)
 
 # Helper Functions
 def format_ticker(ticker):
@@ -21881,4 +21883,7 @@ def token_delete():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5001, threaded=True)
+    debug_enabled = os.getenv('FLASK_DEBUG', '1').lower() not in ('0', 'false', 'no', 'off')
+    use_reloader = os.getenv('FLASK_USE_RELOADER', '0').lower() in ('1', 'true', 'yes', 'on')
+    port = int(os.getenv('PORT', '5001'))
+    app.run(debug=debug_enabled, port=port, threaded=True, use_reloader=use_reloader)
