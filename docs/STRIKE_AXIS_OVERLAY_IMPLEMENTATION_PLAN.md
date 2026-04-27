@@ -130,10 +130,13 @@ Verification completed:
 
 Remaining follow-up work:
 
-- Refine mobile behavior later only if the target environment changes; current target remains large-monitor desktop.
-- Add Premium only after confirming the desired signed net convention.
-- Decide whether manually shifted chart spacing should be persisted per ticker/session or remain an in-memory chart interaction only.
-- Decide whether the collapsed strike rail should remain as an expandable fallback long term, or be removed after more live use.
+- `Premium` overlay remains deferred until the desired signed-net convention is explicitly defined.
+- Persisting manually shifted right-side chart spacing per ticker/session is desired, but deferred until after the prototype is merged back into the main 5001 path.
+
+Resolved product decisions:
+
+- Mobile refinement is not needed for the current target environment; this feature is desktop-only on the Mac mini + monitor setup.
+- The collapsed strike rail should remain available long term as an expandable fallback while the overlay stays in use.
 
 ---
 
