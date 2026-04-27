@@ -2867,8 +2867,13 @@ def get_price_history(ticker, timeframe=1):
         if not data or 'candles' not in data:
             raise Exception("Malformed price history data from Schwab API")
 
-        # Filter for market hours
-        candles = filter_market_hours(data['candles'])
+        raw_candles = list(data['candles'])
+        raw_candles.sort(key=lambda x: x['datetime'])
+
+        # Filter the visible chart to the app's supported extended-hours window.
+        # VWAP receives the broader raw feed below; the JS layer owns session
+        # filtering (RTH vs ETH) so users can match either thinkorswim setting.
+        candles = filter_market_hours(raw_candles)
         if not candles:
             raise Exception("No market-hour candles returned from Schwab API")
 
@@ -2877,6 +2882,7 @@ def get_price_history(ticker, timeframe=1):
 
         if timeframe not in (1, 5, 10, 15, 30):
             candles = aggregate_candles_to_timeframe(candles, timeframe)
+            raw_candles = aggregate_candles_to_timeframe(raw_candles, timeframe)
 
         # Get previous trading day's close
         prev_day_candles = []
@@ -2892,6 +2898,7 @@ def get_price_history(ticker, timeframe=1):
 
         return {
             'candles': candles,
+            'vwap_candles': raw_candles,
             'prev_day_close': prev_day_close
         }
     except Exception as e:
@@ -4755,6 +4762,47 @@ def compute_scenario_gex(calls, puts, S, spot_shift=0.0, iv_shift=0.0,
 _SESSION_BASELINE = {}
 _SESSION_LEVEL_BASELINE = {}
 _SESSION_IV_BASELINE = {}
+_SESSION_EM_BASELINE = {}
+
+
+def get_pinned_expected_move(calls, puts, spot_price, ticker, selected_expiries=None):
+    """Return an Expected Move snapshot pinned at the 09:30 ET open.
+
+    Pre-open (or pre-cache) returns a fresh dynamic snapshot so the card isn't
+    blank for early-bird users. The first call at or after 09:30 ET caches the
+    snapshot for the (ticker, ET_date) key — every subsequent call that day
+    returns the same pinned values, which makes the EM band behave as a
+    session forecast rather than a live straddle quote.
+    """
+    if not spot_price:
+        return None
+    et = pytz.timezone('US/Eastern')
+    now_et = datetime.now(et)
+    today = now_et.date()
+    rth_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    key = (ticker or '__anon__', today)
+
+    cached = _SESSION_EM_BASELINE.get(key)
+    if cached:
+        return cached
+
+    snapshot = calculate_expected_move_snapshot(
+        calls, puts, spot_price, selected_expiries=selected_expiries
+    )
+    if not snapshot:
+        return None
+
+    snapshot['open_spot'] = float(spot_price)
+    snapshot['pinned'] = now_et >= rth_open
+
+    if snapshot['pinned']:
+        _SESSION_EM_BASELINE[key] = snapshot
+        # Drop entries older than yesterday so the cache doesn't grow forever.
+        stale = [k for k in _SESSION_EM_BASELINE if k[1] < today - timedelta(days=1)]
+        for k in stale:
+            _SESSION_EM_BASELINE.pop(k, None)
+
+    return snapshot
 
 def _compute_session_deltas(ticker, net_gex, net_dex, scope_id=None):
     if ticker is None or net_gex is None:
@@ -5587,6 +5635,12 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
          'low': c['low'], 'close': c['close'], 'volume': c.get('volume', 0)}
         for c in sorted_candles
     ]
+    vwap_source_candles = price_data.get('vwap_candles') or sorted_candles
+    lc_vwap_candles = [
+        {'time': int(c['datetime'] / 1000), 'open': c['open'], 'high': c['high'],
+         'low': c['low'], 'close': c['close'], 'volume': c.get('volume', 0)}
+        for c in sorted(vwap_source_candles, key=lambda x: x.get('datetime', 0))
+    ]
     current_day_start_time = int(current_day_candles[0]['datetime'] / 1000) if current_day_candles else 0
 
     current_price = display_candles[-1]['close'] if display_candles else 0
@@ -5729,6 +5783,7 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         'historical_exposure_levels': historical_exposure_levels,
         'historical_expected_moves': historical_expected_moves,
         'indicator_candles': lc_indicator_candles,
+        'vwap_candles': lc_vwap_candles,
         'current_day_start_time': current_day_start_time,
     })
 
@@ -8182,6 +8237,25 @@ def index():
             font-size: 10px;
             line-height: 1.4;
         }
+        .rail-range-live {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px dashed var(--border);
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-range-live-label {
+            color: var(--fg-2);
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+        .rail-range-live-value {
+            color: var(--fg-1);
+            font-weight: 600;
+        }
         .rail-profile-dot {
             display: inline-block;
             width: 8px;
@@ -10189,6 +10263,44 @@ def index():
             min-width: 0;
             width: 100%;
         }
+        .indicator-modal-subrow {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 0 10px;
+            margin-top: -6px;
+            border-bottom: 1px solid var(--bg-2);
+        }
+        .indicator-modal-subrow-label {
+            font-size: 10px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--fg-2);
+            min-width: 132px;
+            padding-left: 26px;
+        }
+        .indicator-modal-pillgroup {
+            display: inline-flex;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .indicator-modal-pillgroup button {
+            background: transparent;
+            color: var(--fg-1);
+            border: none;
+            padding: 4px 12px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .indicator-modal-pillgroup button + button {
+            border-left: 1px solid var(--border);
+        }
+        .indicator-modal-pillgroup button.active {
+            background: var(--accent);
+            color: var(--bg-0);
+            font-weight: 600;
+        }
 
         /* Add new CSS for the responsive grid layout */
         .charts-grid {
@@ -10876,6 +10988,10 @@ def index():
                     <div class="tv-sub-pane-header">MACD (12,26,9)</div>
                     <div id="macd-chart" style="height:120px"></div>
                 </div>
+                <div class="tv-sub-pane" id="atr-pane" style="display:none">
+                    <div class="tv-sub-pane-header">ATR 14</div>
+                    <div id="atr-chart" style="height:100px"></div>
+                </div>
             </div>
             <div class="gex-column" id="gex-column">
                 <div class="gex-side-panel-wrap">
@@ -10923,7 +11039,11 @@ def index():
                             <span data-met="range_low">—</span>
                             <span data-met="range_high">—</span>
                         </div>
-                        <div class="rail-range-caption" data-met="em_context">Uses the current ATM straddle, not flow alone.</div>
+                        <div class="rail-range-caption" data-met="em_context">Pinned at the 09:30 ET open ATM straddle.</div>
+                        <div class="rail-range-live">
+                            <span class="rail-range-live-label">Live ATM</span>
+                            <span class="rail-range-live-value" data-met="live_straddle">—</span>
+                        </div>
                     </div>
                     <div class="rail-card" id="rail-card-profile">
                         <div class="rail-card-header">Gamma Profile</div>
@@ -11137,9 +11257,10 @@ def index():
         let tvResizeObserver = null;
         // Indicator series references
         let tvIndicatorSeries = {};
-        // Sub-pane charts for RSI and MACD
+        // Sub-pane charts for RSI, MACD, and ATR
         let tvRsiChart = null, tvRsiSeries = null;
         let tvMacdChart = null, tvMacdSeries = {};
+        let tvAtrChart = null, tvAtrSeries = null;
         // Persist active indicators across data refreshes
         let tvActiveInds = new Set();
         const TV_INDICATOR_DEFS = [
@@ -11162,7 +11283,7 @@ def index():
             sma200: { color: '#e040fb', lineWidth: 1, lineStyle: 'solid' },
             ema9:   { color: '#ff9900', lineWidth: 1, lineStyle: 'solid' },
             ema21:  { color: '#00e5ff', lineWidth: 1, lineStyle: 'solid' },
-            vwap:   { color: '#ffffff', lineWidth: 1, lineStyle: 'solid' },
+            vwap:   { color: '#ffffff', lineWidth: 1, lineStyle: 'solid', session: 'rth' },
             bb:     { color: '#64b4ff', lineWidth: 1, lineStyle: 'solid' }
         };
         let tvIndicatorPrefs = {};
@@ -11257,6 +11378,7 @@ def index():
         let tvToolbarMenuDismissBound = false;
         let tvLastCandles = [];         // current-day display candles (for streaming OHLCV updates)
         let tvIndicatorCandles = [];    // multi-day candles for indicator warmup (SMA200, EMA, etc.)
+        let tvVwapCandles = [];         // raw extended-hours candles for TOS-style DAY VWAP
         let tvIndicatorDataCache = {};  // rendered indicator datapoints for click-hit testing
         let tvIndicatorEditorTargetKey = '';
         let tvCurrentDayStartTime = 0;  // unix seconds of current day's first candle (for daily VWAP)
@@ -12020,6 +12142,10 @@ def index():
                 if (icLast && icLast.time === updated.time) {
                     tvIndicatorCandles[tvIndicatorCandles.length - 1] = updated;
                 }
+                const vwLast = tvVwapCandles[tvVwapCandles.length - 1];
+                if (vwLast && vwLast.time === updated.time) {
+                    tvVwapCandles[tvVwapCandles.length - 1] = updated;
+                }
                 // Debounce indicator refresh to at most once every 2 seconds on tick updates
                 if (tvActiveInds.size > 0) {
                     clearTimeout(tvIndicatorRefreshTimer);
@@ -12046,6 +12172,8 @@ def index():
                 tvLastCandles.push(fresh);
                 const icLast = tvIndicatorCandles[tvIndicatorCandles.length - 1];
                 if (!icLast || icLast.time < bucketStart) tvIndicatorCandles.push(fresh);
+                const vwLast = tvVwapCandles[tvVwapCandles.length - 1];
+                if (!vwLast || vwLast.time < bucketStart) tvVwapCandles.push(fresh);
                 scheduleTVStrikeOverlayDraw();
             }
         }
@@ -12094,6 +12222,7 @@ def index():
 
             const displayBar = rollInto(tvLastCandles);
             rollInto(tvIndicatorCandles);
+            rollInto(tvVwapCandles);
             try { tvCandleSeries.update(tvToSeriesBar(displayBar)); } catch(e) {}
             try {
                 tvVolumeSeries.update({
@@ -12265,12 +12394,14 @@ def index():
   <div id="price-chart"></div>
   <div class="tv-sub-pane" id="rsi-pane" style="display:none"><div class="tv-sub-pane-hdr">RSI 14</div><div id="rsi-chart" style="height:110px"></div></div>
   <div class="tv-sub-pane" id="macd-pane" style="display:none"><div class="tv-sub-pane-hdr">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div></div>
+  <div class="tv-sub-pane" id="atr-pane" style="display:none"><div class="tv-sub-pane-hdr">ATR 14</div><div id="atr-chart" style="height:100px"></div></div>
 </div>
 <script>
   // ── State ──────────────────────────────────────────────────────────────────
   var tvChart=null, tvCandle=null, tvVol=null;
   var tvRsiChart=null, tvRsiSeries=null;
   var tvMacdChart=null, tvMacdSeries={};
+  var tvAtrChart=null, tvAtrSeries=null;
   var tvIndSeries={};
   var activeInds=new Set();
   var tvPriceLines=[], tvDrawings=[], tvDrawingDefs=[];
@@ -12315,7 +12446,7 @@ def index():
   function calcEMA(c,p){var k=2/(p+1),r=[],e=null;for(var i=0;i<c.length;i++){if(i<p-1){r.push(null);continue;}if(e===null){e=c.slice(0,p).reduce(function(a,b){return a+b;},0)/p;}else{e=c[i]*k+e*(1-k);}r.push(e);}return r;}
   function calcVWAP(cs){var cp=0,cv=0;return cs.map(function(c){var t=(c.high+c.low+c.close)/3;cp+=t*c.volume;cv+=c.volume;return cv>0?cp/cv:c.close;});}
   function calcBB(c,p,m){p=p||20;m=m||2;var s=calcSMA(c,p);return s.map(function(mid,i){if(mid===null)return{upper:null,mid:null,lower:null};var sl=c.slice(Math.max(0,i-p+1),i+1),v=sl.reduce(function(a,b){return a+(b-mid)*(b-mid);},0)/sl.length,sd=Math.sqrt(v);return{upper:mid+m*sd,mid:mid,lower:mid-m*sd};});}
-  function calcRSI(c,p){p=p||14;var r=[];for(var i=0;i<c.length;i++){if(i<p){r.push(null);continue;}var g=0,l=0;for(var j=i-p+1;j<=i;j++){var d=c[j]-c[j-1];if(d>0)g+=d;else l-=d;}var ag=g/p,al=l/p;r.push(al===0?100:100-100/(1+ag/al));}return r;}
+  function calcRSI(c,p){p=p||14;var r=[],ag=null,al=null;for(var i=0;i<c.length;i++){if(i<p){r.push(null);continue;}var d=c[i]-c[i-1],g=d>0?d:0,l=d<0?-d:0;if(ag===null||al===null){var gs=0,ls=0;for(var j=i-p+1;j<=i;j++){var sd=c[j]-c[j-1];if(sd>0)gs+=sd;else ls-=sd;}ag=gs/p;al=ls/p;}else{ag=(ag*(p-1)+g)/p;al=(al*(p-1)+l)/p;}if(al===0&&ag===0){r.push(50);continue;}var rs=al===0?Number.POSITIVE_INFINITY:ag/al;r.push(100-100/(1+rs));}return r;}
   function calcATR(candles,p){p=p||14;var r=[];for(var i=0;i<candles.length;i++){var tr;if(i===0){tr=candles[i].high-candles[i].low;}else{tr=Math.max(candles[i].high-candles[i].low,Math.abs(candles[i].high-candles[i-1].close),Math.abs(candles[i].low-candles[i-1].close));}if(i<p-1){r.push(null);continue;}if(r.length===0||r[r.length-1]===null){var sum=0;for(var j=i-p+1;j<=i;j++){var t2;if(j===0){t2=candles[j].high-candles[j].low;}else{t2=Math.max(candles[j].high-candles[j].low,Math.abs(candles[j].high-candles[j-1].close),Math.abs(candles[j].low-candles[j-1].close));}sum+=t2;}r.push(sum/p);}else{r.push((r[r.length-1]*(p-1)+tr)/p);}}return r;}
   function calcMACD(c,fast,slow,sig){fast=fast||12;slow=slow||26;sig=sig||9;var ef=calcEMA(c,fast),es=calcEMA(c,slow);var ml=ef.map(function(v,i){return(v!==null&&es[i]!==null)?v-es[i]:null;});var sl=[],es2=null,vi=0,k=2/(sig+1);for(var i=0;i<ml.length;i++){if(ml[i]===null){sl.push(null);continue;}if(vi<sig-1){sl.push(null);vi++;continue;}if(es2===null){var piece=ml.filter(function(v){return v!==null;}).slice(0,sig);es2=piece.reduce(function(a,b){return a+b;},0)/sig;}else{es2=ml[i]*k+es2*(1-k);}sl.push(es2);vi++;}return{macd:ml,signal:sl,histogram:ml.map(function(v,i){return(v!==null&&sl[i]!==null)?v-sl[i]:null;})};}
 
@@ -12323,7 +12454,7 @@ def index():
   function mkSubChart(el,h){return LightweightCharts.createChart(el,{autoSize:true,height:h,layout:{background:{color:'#1E1E1E'},textColor:'#CCCCCC',fontFamily:'Arial,sans-serif'},grid:{vertLines:{color:'#2A2A2A'},horzLines:{color:'#2A2A2A'}},crosshair:{mode:LightweightCharts.CrosshairMode.Normal,vertLine:{color:'#555',labelBackgroundColor:'#2D2D2D'},horzLine:{color:'#555',labelBackgroundColor:'#2D2D2D'}},rightPriceScale:{borderColor:'#333',scaleMargins:{top:0.1,bottom:0.1}},timeScale:{borderColor:'#333',timeVisible:false,secondsVisible:false,fixLeftEdge:true,fixRightEdge:false},handleScale:{mouseWheel:true,pinch:true,axisPressedMouseMove:true},handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:false}});}
 
   // ── Time-scale sync ────────────────────────────────────────────────────────
-  function setupSync(){tvSyncHandlers.forEach(function(h){try{h.chart.timeScale().unsubscribeVisibleLogicalRangeChange(h.handler);}catch(e){}});tvSyncHandlers=[];var all=[tvChart,tvRsiChart,tvMacdChart].filter(Boolean);if(all.length<2)return;all.forEach(function(src){var others=all.filter(function(c){return c!==src;});var h=function(range){if(tvSyncingTS||!range)return;tvSyncingTS=true;others.forEach(function(c){try{c.timeScale().setVisibleLogicalRange(range);}catch(e){}});tvSyncingTS=false;};try{src.timeScale().subscribeVisibleLogicalRangeChange(h);}catch(e){}tvSyncHandlers.push({chart:src,handler:h});});if(tvChart){try{var r=tvChart.timeScale().getVisibleLogicalRange();if(r)[tvRsiChart,tvMacdChart].filter(Boolean).forEach(function(c){try{c.timeScale().setVisibleLogicalRange(r);}catch(e){}});}catch(e){}}}
+  function setupSync(){tvSyncHandlers.forEach(function(h){try{h.chart.timeScale().unsubscribeVisibleLogicalRangeChange(h.handler);}catch(e){}});tvSyncHandlers=[];var all=[tvChart,tvRsiChart,tvMacdChart,tvAtrChart].filter(Boolean);if(all.length<2)return;all.forEach(function(src){var others=all.filter(function(c){return c!==src;});var h=function(range){if(tvSyncingTS||!range)return;tvSyncingTS=true;others.forEach(function(c){try{c.timeScale().setVisibleLogicalRange(range);}catch(e){}});tvSyncingTS=false;};try{src.timeScale().subscribeVisibleLogicalRangeChange(h);}catch(e){}tvSyncHandlers.push({chart:src,handler:h});});if(tvChart){try{var r=tvChart.timeScale().getVisibleLogicalRange();if(r)[tvRsiChart,tvMacdChart,tvAtrChart].filter(Boolean).forEach(function(c){try{c.timeScale().setVisibleLogicalRange(r);}catch(e){}});}catch(e){}}}
 
   // ── Indicators ─────────────────────────────────────────────────────────────
   function applyIndicators(candles){
@@ -12340,9 +12471,9 @@ def index():
     if(activeInds.has('ema21')&&!tvIndSeries['ema21']){var s=mkLine('#00e5ff',1,'EMA21');s.setData(calcEMA(closes,21).map(function(v,i){return v!==null?{time:times[i],value:v}:null;}).filter(Boolean));tvIndSeries['ema21']=s;}
     if(activeInds.has('vwap')&&!tvIndSeries['vwap']){var vv=calcVWAP(candles.map(function(c,i){return{high:candles[i].high,low:candles[i].low,close:candles[i].close,volume:c.volume||0};}));var s=mkLine('#ffffff',1,'VWAP');s.setData(vv.map(function(v,i){return{time:times[i],value:v};}));tvIndSeries['vwap']=s;}
     if(activeInds.has('bb')&&!tvIndSeries['bb']){var bb=calcBB(closes);var u=mkLine('rgba(100,180,255,0.8)',1,'BB U'),m=mkLine('rgba(100,180,255,0.5)',1,'BB M'),l=mkLine('rgba(100,180,255,0.8)',1,'BB L');u.setData(bb.map(function(v,i){return v.upper!==null?{time:times[i],value:v.upper}:null;}).filter(Boolean));m.setData(bb.map(function(v,i){return v.mid!==null?{time:times[i],value:v.mid}:null;}).filter(Boolean));l.setData(bb.map(function(v,i){return v.lower!==null?{time:times[i],value:v.lower}:null;}).filter(Boolean));tvIndSeries['bb']=[u,m,l];}
-    if(activeInds.has('atr')&&!tvIndSeries['atr']){var atrV=calcATR(candles),e20=calcEMA(closes,20),mult=1.5;var au=mkLine('rgba(255,152,0,0.8)',1,'ATR U'),al=mkLine('rgba(255,152,0,0.8)',1,'ATR L');au.setData(e20.map(function(v,i){return(v!==null&&atrV[i]!==null)?{time:times[i],value:v+mult*atrV[i]}:null;}).filter(Boolean));al.setData(e20.map(function(v,i){return(v!==null&&atrV[i]!==null)?{time:times[i],value:v-mult*atrV[i]}:null;}).filter(Boolean));tvIndSeries['atr']=[au,al];}
     if(activeInds.has('rsi'))applyRsiPane(candles,times);else destroyRsiPane();
     if(activeInds.has('macd'))applyMacdPane(candles,times);else destroyMacdPane();
+    if(activeInds.has('atr'))applyAtrPane(candles,times);else destroyAtrPane();
     updateLegend();
   }
   function applyRsiPane(candles,times){
@@ -12366,11 +12497,20 @@ def index():
   }
   function destroyMacdPane(){var pane=document.getElementById('macd-pane');if(pane)pane.style.display='none';if(tvMacdChart){tvSyncHandlers=tvSyncHandlers.filter(function(h){return h.chart!==tvMacdChart;});try{tvMacdChart.remove();}catch(e){}tvMacdChart=null;tvMacdSeries={
 };}}
+  function applyAtrPane(candles,times){
+    var pane=document.getElementById('atr-pane');if(!pane)return;pane.style.display='block';
+    var atrVals=calcATR(candles);
+    var atrData=atrVals.map(function(v,i){return v!==null?{time:times[i],value:v}:null;}).filter(Boolean);
+    if(!tvAtrChart){var el=document.getElementById('atr-chart');if(!el)return;tvAtrChart=mkSubChart(el,100);tvAtrSeries=tvAtrChart.addLineSeries({color:'#ff9800',lineWidth:1.5,lastValueVisible:true,priceLineVisible:false,title:'ATR14'});}
+    if(atrData.length)tvAtrSeries.setData(atrData);
+    setupSync();
+  }
+  function destroyAtrPane(){var pane=document.getElementById('atr-pane');if(pane)pane.style.display='none';if(tvAtrChart){tvSyncHandlers=tvSyncHandlers.filter(function(h){return h.chart!==tvAtrChart;});try{tvAtrChart.remove();}catch(e){}tvAtrChart=null;tvAtrSeries=null;}}
   function updateLegend(){
     var cont=document.getElementById('price-chart');if(!cont)return;
     var leg=cont.querySelector('.ind-legend');if(!leg){leg=document.createElement('div');leg.className='ind-legend';cont.appendChild(leg);}
     var cols={sma20:'#f0c040',sma50:'#40a0f0',sma200:'#e040fb',ema9:'#ff9900',ema21:'#00e5ff',vwap:'#ffffff',bb:'rgba(100,180,255,0.8)',rsi:'#e91e63',macd:'#2196f3',atr:'rgba(255,152,0,0.8)'};
-    var lbls={sma20:'SMA20',sma50:'SMA50',sma200:'SMA200',ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',bb:'BB(20,2)',rsi:'RSI14',macd:'MACD',atr:'ATR Bands'};
+    var lbls={sma20:'SMA20',sma50:'SMA50',sma200:'SMA200',ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',bb:'BB(20,2)',rsi:'RSI14',macd:'MACD',atr:'ATR14'};
     leg.innerHTML=Object.keys(tvIndSeries).map(function(k){return '<div class="ind-item"><div class="ind-swatch" style="background:'+( cols[k]||'#888')+'"></div>'+(lbls[k]||k)+'</div>';}).join('');
   }
 
@@ -12907,8 +13047,9 @@ def index():
                 clearKeyLevels();
                 clearSessionLevels();
                 // Reset zoom on the next render
-                tvLastCandles = [];
-                tvIndicatorCandles = [];
+            tvLastCandles = [];
+            tvIndicatorCandles = [];
+            tvVwapCandles = [];
                 tvCurrentDayStartTime = 0;
                 tvForceSessionFocus = true;
                 // Disconnect the price stream so it reconnects on the new ticker
@@ -13069,14 +13210,65 @@ def index():
             }
             return result;
         }
-        function calcVWAP(candles) {
-            let cumPV = 0, cumVol = 0;
-            return candles.map(c => {
+        function getEtTimeParts(unixSeconds) {
+            try {
+                const parts = new Intl.DateTimeFormat('en-CA', {
+                    timeZone: 'America/New_York',
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hourCycle: 'h23',
+                }).formatToParts(new Date(unixSeconds * 1000));
+                const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+                return {
+                    dayKey: `${map.year}-${map.month}-${map.day}`,
+                    minutesOfDay: parseInt(map.hour, 10) * 60 + parseInt(map.minute, 10),
+                };
+            } catch (e) {
+                const d = new Date(unixSeconds * 1000);
+                return {
+                    dayKey: d.toISOString().slice(0, 10),
+                    minutesOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+                };
+            }
+        }
+
+        // TOS-style DAY VWAP. Resets at the start of each session (RTH = 09:30 ET,
+        // ETH = ET calendar rollover). Per-bar value is HLC3 × volume — matches
+        // thinkScript's built-in `vwap` for non-tick aggregations within rounding.
+        // Returns a sparse {time, value} array — bars outside the chosen session
+        // are skipped entirely so the line doesn't paint a flat segment overnight.
+        function calcVwapTosStyle(candles, options) {
+            const session = options && options.session === 'eth' ? 'eth' : 'rth';
+            const RTH_OPEN = 9 * 60 + 30;
+            const RTH_CLOSE = 16 * 60;
+            let activeDay = '';
+            let cumPV = 0;
+            let cumVol = 0;
+            const out = [];
+            for (let i = 0; i < candles.length; i++) {
+                const c = candles[i];
+                const parts = getEtTimeParts(c.time);
+                if (session === 'rth') {
+                    if (parts.minutesOfDay < RTH_OPEN || parts.minutesOfDay >= RTH_CLOSE) continue;
+                }
+                if (parts.dayKey !== activeDay) {
+                    activeDay = parts.dayKey;
+                    cumPV = 0;
+                    cumVol = 0;
+                }
                 const typical = (c.high + c.low + c.close) / 3;
-                cumPV  += typical * c.volume;
-                cumVol += c.volume;
-                return cumVol > 0 ? cumPV / cumVol : c.close;
-            });
+                const vol = c.volume || 0;
+                cumPV += typical * vol;
+                cumVol += vol;
+                out.push({
+                    time: c.time,
+                    value: cumVol > 0 ? cumPV / cumVol : c.close,
+                });
+            }
+            return out;
         }
         function calcBB(closes, period=20, mult=2) {
             const sma = calcSMA(closes, period);
@@ -13090,17 +13282,28 @@ def index():
         }
         function calcRSI(closes, period=14) {
             const result = [];
+            let avgGain = null;
+            let avgLoss = null;
             for (let i = 0; i < closes.length; i++) {
                 if (i < period) { result.push(null); continue; }
-                let gains = 0, losses = 0;
-                for (let j = i - period + 1; j <= i; j++) {
-                    const diff = closes[j] - closes[j-1];
-                    if (diff > 0) gains  += diff;
-                    else          losses -= diff;
+                const diff = closes[i] - closes[i - 1];
+                const gain = diff > 0 ? diff : 0;
+                const loss = diff < 0 ? -diff : 0;
+                if (avgGain === null || avgLoss === null) {
+                    let gains = 0, losses = 0;
+                    for (let j = i - period + 1; j <= i; j++) {
+                        const seedDiff = closes[j] - closes[j-1];
+                        if (seedDiff > 0) gains += seedDiff;
+                        else              losses -= seedDiff;
+                    }
+                    avgGain = gains / period;
+                    avgLoss = losses / period;
+                } else {
+                    avgGain = (avgGain * (period - 1) + gain) / period;
+                    avgLoss = (avgLoss * (period - 1) + loss) / period;
                 }
-                const avgGain = gains  / period;
-                const avgLoss = losses / period;
-                const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+                if (avgLoss === 0 && avgGain === 0) { result.push(50); continue; }
+                const rs = avgLoss === 0 ? Number.POSITIVE_INFINITY : avgGain / avgLoss;
                 result.push(100 - 100 / (1 + rs));
             }
             return result;
@@ -13183,17 +13386,26 @@ def index():
             return ['solid', 'dashed', 'dotted'].includes(value) ? value : fallback;
         }
 
+        function normalizeVwapSession(session, fallback = 'rth') {
+            const value = String(session || '').trim().toLowerCase();
+            return value === 'eth' || value === 'rth' ? value : fallback;
+        }
+
         function normalizeTVIndicatorPrefMap(prefs) {
             const defaults = getDefaultTVIndicatorPrefs();
             const source = prefs && typeof prefs === 'object' ? prefs : {};
             Object.keys(defaults).forEach(key => {
                 const base = defaults[key];
                 const next = source[key] && typeof source[key] === 'object' ? source[key] : {};
-                defaults[key] = {
+                const normalized = {
                     color: normalizeTVIndicatorColor(next.color, base.color),
                     lineWidth: normalizeTVIndicatorLineWidth(next.lineWidth, base.lineWidth),
                     lineStyle: normalizeTVIndicatorLineStyle(next.lineStyle, base.lineStyle),
                 };
+                if (key === 'vwap') {
+                    normalized.session = normalizeVwapSession(next.session, base.session);
+                }
+                defaults[key] = normalized;
             });
             return defaults;
         }
@@ -13473,6 +13685,11 @@ def index():
             return [];
         }
 
+        function getTVVwapSourceCandles() {
+            if (Array.isArray(tvVwapCandles) && tvVwapCandles.length) return tvVwapCandles;
+            return getTVIndicatorSourceCandles();
+        }
+
         function syncTVIndicatorToggleButtons() {
             document.querySelectorAll('.tv-tb-btn[data-indicator-key]').forEach(btn => {
                 btn.classList.toggle('active', tvActiveInds.has(btn.dataset.indicatorKey));
@@ -13621,12 +13838,14 @@ def index():
                 setTVIndicatorDataCache('ema21', [data]);
             }
             if (activeInds.has('vwap')) {
-                // VWAP resets daily — always compute from today's candles only
-                const todayCandles = dayStart > 0 ? candles.filter(c => c.time >= dayStart) : candles;
-                const vwapVals = calcVWAP(todayCandles.map(c => ({
-                    time: c.time, high: c.high, low: c.low, close: c.close, volume: c.volume || 0
-                })));
-                const data = vwapVals.map((v, i) => ({time: todayCandles[i].time, value: v}));
+                // Match thinkorswim's DAY VWAP. Session boundary is user-controlled
+                // (RTH = 09:30 ET reset, ETH = ET calendar rollover) and bars
+                // outside the session are skipped so the line doesn't paint a
+                // flat segment overnight.
+                const vwapPref = getTVIndicatorPref('vwap');
+                const session = normalizeVwapSession(vwapPref && vwapPref.session, 'rth');
+                const vwapCandles = getTVVwapSourceCandles();
+                const data = calcVwapTosStyle(vwapCandles, { session });
                 upsertLineSeries('vwap', 'VWAP').setData(data);
                 setTVIndicatorDataCache('vwap', [data]);
             }
@@ -13656,27 +13875,14 @@ def index():
                 lowerS.setData(lowerData);
                 setTVIndicatorDataCache('bb', [upperData, midData, lowerData]);
             }
-            if (activeInds.has('atr')) {
-                const atrVals = calcATR(candles);
-                const ema20   = calcEMA(closes, 20);
-                const mult    = 1.5;
-                if (!tvIndicatorSeries['atr']) {
-                    tvIndicatorSeries['atr'] = [
-                        tvPriceChart.addLineSeries(tvIndicatorSeriesOptions('rgba(255,152,0,0.8)', 1, 'solid', 'ATR Upper')),
-                        tvPriceChart.addLineSeries(tvIndicatorSeriesOptions('rgba(255,152,0,0.8)', 1, 'solid', 'ATR Lower')),
-                    ];
-                }
-                const [atrUpper, atrLower] = tvIndicatorSeries['atr'];
-                atrUpper.setData(todayOnly(ema20.map((v,i) => (v!==null && atrVals[i]!==null) ? {time:times[i], value:v + mult*atrVals[i]} : null)));
-                atrLower.setData(todayOnly(ema20.map((v,i) => (v!==null && atrVals[i]!==null) ? {time:times[i], value:v - mult*atrVals[i]} : null)));
-            }
-
-            // RSI and MACD sub-panes: compute with full history but display today only
+            // RSI, MACD, and ATR sub-panes: compute with full history but display today only
             const todayCandles = dayStart > 0 ? candles.filter(c => c.time >= dayStart) : candles;
             if (activeInds.has('rsi')) applyRsiPane(candles, todayCandles);
             else                       destroyRsiPane();
             if (activeInds.has('macd')) applyMacdPane(candles, todayCandles);
             else                        destroyMacdPane();
+            if (activeInds.has('atr')) applyAtrPane(candles, todayCandles);
+            else                       destroyAtrPane();
 
             renderTopOI(_lastTopOI);
 
@@ -13697,7 +13903,7 @@ def index():
             const labels = {
                 sma20:'SMA20', sma50:'SMA50', sma200:'SMA200',
                 ema9:'EMA9', ema21:'EMA21', vwap:'VWAP', bb:'BB(20,2)',
-                rsi:'RSI14', macd:'MACD', atr:'ATR Bands'
+                rsi:'RSI14', macd:'MACD', atr:'ATR14'
             };
             const fallbackColors = {
                 rsi:'#e91e63',
@@ -13726,7 +13932,7 @@ def index():
             grid.innerHTML = EDITABLE_TV_INDICATOR_KEYS.map(key => {
                 const def = TV_INDICATOR_DEFS.find(item => item.key === key);
                 const pref = getTVIndicatorPref(key);
-                return (
+                const mainRow = (
                     `<div class="indicator-modal-row${tvIndicatorEditorTargetKey === key ? ' is-target' : ''}" data-indicator-row="${key}">` +
                         `<div class="indicator-modal-name">` +
                             `<span class="indicator-modal-swatch" style="background:${pref.color}"></span>` +
@@ -13740,6 +13946,20 @@ def index():
                         `<select data-indicator-style="${key}" aria-label="${def ? def.label : key} line style">${styleOptions}</select>` +
                     `</div>`
                 );
+                if (key === 'vwap') {
+                    const session = normalizeVwapSession(pref.session, 'rth');
+                    const subRow = (
+                        `<div class="indicator-modal-subrow" data-indicator-subrow="vwap">` +
+                            `<span class="indicator-modal-subrow-label">Session</span>` +
+                            `<div class="indicator-modal-pillgroup" role="group" aria-label="VWAP session">` +
+                                `<button type="button" data-indicator-session-pill="rth" class="${session === 'rth' ? 'active' : ''}" title="RTH only — VWAP resets at 09:30 ET, no premarket/after-hours">RTH</button>` +
+                                `<button type="button" data-indicator-session-pill="eth" class="${session === 'eth' ? 'active' : ''}" title="Extended hours — VWAP resets at ET calendar rollover, includes pre/post">ETH</button>` +
+                            `</div>` +
+                        `</div>`
+                    );
+                    return mainRow + subRow;
+                }
+                return mainRow;
             }).join('');
             EDITABLE_TV_INDICATOR_KEYS.forEach(key => {
                 const pref = getTVIndicatorPref(key);
@@ -13764,6 +13984,13 @@ def index():
             });
             grid.querySelectorAll('[data-indicator-style]').forEach(select => {
                 select.addEventListener('change', () => updateTVIndicatorPref(select.dataset.indicatorStyle, { lineStyle: select.value }));
+            });
+            grid.querySelectorAll('[data-indicator-session-pill]').forEach(button => {
+                button.addEventListener('click', () => {
+                    const next = normalizeVwapSession(button.dataset.indicatorSessionPill, 'rth');
+                    updateTVIndicatorPref('vwap', { session: next });
+                    renderTVIndicatorEditor();
+                });
             });
             if (tvIndicatorEditorTargetKey) {
                 requestAnimationFrame(() => focusTVIndicatorEditorKey(tvIndicatorEditorTargetKey));
@@ -13900,7 +14127,7 @@ def index():
             if (tvPriceChart) {
                 try {
                     const range = tvPriceChart.timeScale().getVisibleLogicalRange();
-                    if (range) [tvRsiChart, tvMacdChart].filter(Boolean).forEach(c => {
+                    if (range) [tvRsiChart, tvMacdChart, tvAtrChart].filter(Boolean).forEach(c => {
                         try { c.timeScale().setVisibleLogicalRange(range); } catch(e){}
                     });
                 } catch(e){}
@@ -13978,6 +14205,40 @@ def index():
                 tvSyncHandlers = tvSyncHandlers.filter(h => h.chart !== tvMacdChart);
                 try { tvMacdChart.remove(); } catch(e){}
                 tvMacdChart = null; tvMacdSeries = {};
+            }
+        }
+
+        function applyAtrPane(allCandles, todayCandles) {
+            const pane = document.getElementById('atr-pane');
+            if (!pane) return;
+            pane.style.display = 'block';
+            const allTimes = allCandles.map(c => c.time);
+            const dayStart = tvCurrentDayStartTime || 0;
+            const atrVals = calcATR(allCandles);
+            const atrData = atrVals
+                .map((v, i) => v !== null ? { time: allTimes[i], value: v } : null)
+                .filter(p => p !== null && p.time >= dayStart);
+            if (!tvAtrChart) {
+                const chartEl = document.getElementById('atr-chart');
+                if (!chartEl) return;
+                const atrColor = resolveCssColor('var(--warn)') || '#F59E0B';
+                tvAtrChart = createSubPaneChart(chartEl, 100);
+                tvAtrSeries = tvAtrChart.addLineSeries({
+                    color: atrColor, lineWidth: 1.5,
+                    lastValueVisible: true, priceLineVisible: false, title: 'ATR14'
+                });
+            }
+            if (atrData.length) tvAtrSeries.setData(atrData);
+            setupTimeScaleSync();
+        }
+
+        function destroyAtrPane() {
+            const pane = document.getElementById('atr-pane');
+            if (pane) pane.style.display = 'none';
+            if (tvAtrChart) {
+                tvSyncHandlers = tvSyncHandlers.filter(h => h.chart !== tvAtrChart);
+                try { tvAtrChart.remove(); } catch(e){}
+                tvAtrChart = null; tvAtrSeries = null;
             }
         }
 
@@ -14107,6 +14368,9 @@ def index():
             if (mode === 'hline') {
                 return getTVHLinePresetColor(getActiveTVHLinePresetKey(), fallback);
             }
+            if (mode === 'channel') {
+                return getTVHLinePresetColor(getActiveTVChannelPresetKey(), fallback);
+            }
             return fallback;
         }
 
@@ -14151,6 +14415,61 @@ def index():
 
         function applyTVHLinePresetToDef(def, presetKey, options = {}) {
             if (!def || def.type !== 'hline') return def;
+            const fallback = options.fallbackColor || def.color || getTVDrawingColorFallback('custom');
+            const normalizedPreset = normalizeTVHLinePresetKey(presetKey);
+            def.preset = normalizedPreset;
+            def.color = getTVHLinePresetColor(normalizedPreset, fallback);
+            return def;
+        }
+
+        // Channel preset machinery — reuses the H-Line palette (same 4 keys,
+        // same colors) so support/resistance/neutral feel uniform across tools.
+        function getActiveTVChannelPresetKey() {
+            const prefs = loadTVDrawingToolPrefs();
+            return normalizeTVHLinePresetKey(prefs.channelPreset);
+        }
+
+        function setActiveTVChannelPresetKey(nextKey, options = {}) {
+            const presetKey = normalizeTVHLinePresetKey(nextKey);
+            const prefs = loadTVDrawingToolPrefs();
+            prefs.channelPreset = presetKey;
+            saveTVDrawingToolPrefs(prefs);
+            if (options.syncToolbar !== false) {
+                syncTVChannelToolbarPreset();
+            }
+            return presetKey;
+        }
+
+        function getTVChannelPresetToggleMarkup(presetKey) {
+            const preset = getTVHLinePreset(presetKey);
+            const swatchColor = preset.color || getTVDrawingColorFallback('custom');
+            return '<span class="tv-draw-pill-swatch" style="background:' + swatchColor + '"></span><span>▾</span>';
+        }
+
+        function syncTVChannelToolbarPreset() {
+            const button = document.getElementById('tv-channel-draw-button');
+            const toggle = document.getElementById('tv-channel-preset-toggle');
+            const presetKey = getActiveTVChannelPresetKey();
+            const preset = getTVHLinePreset(presetKey);
+            if (button) {
+                button.dataset.channelPreset = presetKey;
+                button.title = 'Draw ' + preset.label + ' channel (click two trend points, then width)';
+            }
+            if (toggle) {
+                toggle.innerHTML = getTVChannelPresetToggleMarkup(presetKey);
+                toggle.title = 'Choose channel preset (current: ' + preset.label + ')';
+            }
+            document.querySelectorAll('.tv-draw-menu-item[data-channel-preset]').forEach(node => {
+                const nodePreset = getTVHLinePreset(node.dataset.channelPreset);
+                node.innerHTML =
+                    '<span class="tv-draw-pill-swatch" style="background:' + (nodePreset.color || getTVDrawingColorFallback('custom')) + '"></span>' +
+                    nodePreset.label;
+                node.classList.toggle('active', node.dataset.channelPreset === presetKey);
+            });
+        }
+
+        function applyTVChannelPresetToDef(def, presetKey, options = {}) {
+            if (!def || def.type !== 'channel') return def;
             const fallback = options.fallbackColor || def.color || getTVDrawingColorFallback('custom');
             const normalizedPreset = normalizeTVHLinePresetKey(presetKey);
             def.preset = normalizedPreset;
@@ -14203,6 +14522,8 @@ def index():
             }
             if (normalized.type === 'hline') {
                 applyTVHLinePresetToDef(normalized, normalized.preset, { fallbackColor: normalized.color });
+            } else if (normalized.type === 'channel') {
+                applyTVChannelPresetToDef(normalized, normalized.preset, { fallbackColor: normalized.color });
             } else {
                 delete normalized.preset;
             }
@@ -15386,21 +15707,31 @@ def index():
                     const nextColor = event.target.value || def.color;
                     if (def.type === 'hline') {
                         applyTVHLinePresetToDef(def, 'custom', { fallbackColor: nextColor });
+                    } else if (def.type === 'channel') {
+                        applyTVChannelPresetToDef(def, 'custom', { fallbackColor: nextColor });
                     }
                     def.color = nextColor;
                     persistTVDrawings();
                     if (def.type === 'hline') {
                         syncTVUserHLinePriceLines();
+                    }
+                    if (def.type === 'hline' || def.type === 'channel') {
                         updateTVDrawingEditor();
                     }
                     scheduleTVDrawingOverlayDraw();
                 });
                 editor.querySelector('#tv-selected-draw-preset').addEventListener('change', event => {
                     const def = tvFindDrawingById();
-                    if (!def || def.type !== 'hline') return;
-                    applyTVHLinePresetToDef(def, event.target.value, { fallbackColor: def.color });
+                    if (!def) return;
+                    if (def.type === 'hline') {
+                        applyTVHLinePresetToDef(def, event.target.value, { fallbackColor: def.color });
+                    } else if (def.type === 'channel') {
+                        applyTVChannelPresetToDef(def, event.target.value, { fallbackColor: def.color });
+                    } else {
+                        return;
+                    }
                     persistTVDrawings();
-                    syncTVUserHLinePriceLines();
+                    if (def.type === 'hline') syncTVUserHLinePriceLines();
                     updateTVDrawingEditor();
                     scheduleTVDrawingOverlayDraw();
                 });
@@ -15489,10 +15820,10 @@ def index():
             }
             if (colorInput) colorInput.value = def.color || '#FFD700';
             if (presetRow && presetSelect) {
-                const isHLine = def.type === 'hline';
-                presetRow.style.display = isHLine ? 'flex' : 'none';
+                const supportsPreset = def.type === 'hline' || def.type === 'channel';
+                presetRow.style.display = supportsPreset ? 'flex' : 'none';
                 presetSelect.value = normalizeTVHLinePresetKey(def.preset);
-                presetSelect.disabled = !isHLine;
+                presetSelect.disabled = !supportsPreset;
             }
             if (widthSelect) {
                 widthSelect.value = String(clampTVDrawingLineWidth(def.lineWidth));
@@ -16242,6 +16573,7 @@ def index():
                             lineWidth: 2,
                             lineStyle: 'dashed',
                             showMidline: true,
+                            preset: getActiveTVChannelPresetKey(),
                         });
                     }
                 }
@@ -16483,6 +16815,7 @@ def index():
                     lineWidth: 2,
                     lineStyle: 'solid',
                     showMidline: true,
+                    preset: getActiveTVChannelPresetKey(),
                 });
                 tvDrawStart = null;
                 const container = document.getElementById('price-chart');
@@ -16764,15 +17097,62 @@ def index():
                 b.dataset.draw = def.key;
                 if (tvDrawMode === def.key) b.classList.add('active');
                 if (def.key === 'channel') {
+                    b.id = 'tv-channel-draw-button';
                     const wrap = document.createElement('div');
                     wrap.className = 'tv-draw-inline';
-                    wrap.appendChild(b);
+
+                    const presetWrap = document.createElement('div');
+                    presetWrap.className = 'tv-draw-dropdown';
+                    presetWrap.appendChild(b);
+
+                    const channelMenuToggle = btn('', 'Choose channel preset/color', event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const isOpen = presetWrap.classList.contains('open');
+                        closeTVToolbarMenus();
+                        if (!isOpen) {
+                            openTVToolbarMenu(presetWrap, channelMenuToggle, channelMenu);
+                        }
+                    }, 'icon');
+                    channelMenuToggle.id = 'tv-channel-preset-toggle';
+
+                    const channelMenu = document.createElement('div');
+                    channelMenu.className = 'tv-draw-dropdown-menu';
+                    [
+                        { key: 'support', title: 'Draw support channels in green' },
+                        { key: 'resistance', title: 'Draw resistance channels in red' },
+                        { key: 'neutral', title: 'Draw neutral channels in gray' },
+                        { key: 'custom', title: 'Use the toolbar color picker for new channels' },
+                    ].forEach(presetDef => {
+                        const preset = getTVHLinePreset(presetDef.key);
+                        const option = document.createElement('button');
+                        option.type = 'button';
+                        option.className = 'tv-draw-menu-item';
+                        option.dataset.channelPreset = presetDef.key;
+                        option.title = presetDef.title;
+                        option.innerHTML =
+                            '<span class="tv-draw-pill-swatch" style="background:' + (preset.color || getTVDrawingColorFallback('custom')) + '"></span>' +
+                            preset.label;
+                        option.addEventListener('click', event => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setActiveTVChannelPresetKey(presetDef.key);
+                            setDrawMode('channel', { force: true });
+                        });
+                        channelMenu.appendChild(option);
+                    });
+                    presetWrap.appendChild(channelMenuToggle);
+                    presetWrap.appendChild(channelMenu);
+                    wrap.appendChild(presetWrap);
+
                     const channelSnapBtn = btn('', '', () => {
                         setTVChannelAxisSnapEnabled(!getTVChannelAxisSnapEnabled());
                     }, 'pill');
                     channelSnapBtn.id = 'tv-channel-snap-toggle';
                     wrap.appendChild(channelSnapBtn);
+
                     addToGroup(drawGroup, wrap);
+                    syncTVChannelToolbarPreset();
                     syncTVChannelSnapToolbarButton();
                 } else {
                     addToGroup(drawGroup, b);
@@ -16793,6 +17173,7 @@ def index():
             colorPicker.title = 'Drawing color';
             colorPicker.addEventListener('input', () => {
                 if (getActiveTVHLinePresetKey() === 'custom') syncTVHLineToolbarPreset();
+                if (getActiveTVChannelPresetKey() === 'custom') syncTVChannelToolbarPreset();
             });
             colorWrap.appendChild(colorLabel);
             colorWrap.appendChild(colorPicker);
@@ -17407,6 +17788,8 @@ def index():
             // Use multi-day candles for indicator warmup so SMA200, EMA200, etc. start from day open
             tvIndicatorCandles = (priceData.indicator_candles && priceData.indicator_candles.length > 0)
                 ? priceData.indicator_candles : candles;
+            tvVwapCandles = (priceData.vwap_candles && priceData.vwap_candles.length > 0)
+                ? priceData.vwap_candles : tvIndicatorCandles;
             tvCurrentDayStartTime = priceData.current_day_start_time || 0;
 
             // Start/maintain real-time streaming for the current ticker
@@ -17558,7 +17941,11 @@ def index():
                             '<span data-met="range_low">—</span>' +
                             '<span data-met="range_high">—</span>' +
                         '</div>' +
-                        '<div class="rail-range-caption" data-met="em_context">Uses the current ATM straddle, not flow alone.</div>' +
+                        '<div class="rail-range-caption" data-met="em_context">Pinned at the 09:30 ET open ATM straddle.</div>' +
+                        '<div class="rail-range-live">' +
+                            '<span class="rail-range-live-label">Live ATM</span>' +
+                            '<span class="rail-range-live-value" data-met="live_straddle">—</span>' +
+                        '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-profile">' +
                         '<div class="rail-card-header">Gamma Profile</div>' +
@@ -17798,9 +18185,13 @@ def index():
             const macdPane = document.createElement('div');
             macdPane.className = 'tv-sub-pane'; macdPane.id = 'macd-pane'; macdPane.style.display = 'none';
             macdPane.innerHTML = '<div class="tv-sub-pane-header">MACD (12,26,9)</div><div id="macd-chart" style="height:120px"></div>';
+            const atrPane = document.createElement('div');
+            atrPane.className = 'tv-sub-pane'; atrPane.id = 'atr-pane'; atrPane.style.display = 'none';
+            atrPane.innerHTML = '<div class="tv-sub-pane-header">ATR 14</div><div id="atr-chart" style="height:100px"></div>';
             priceContainer.appendChild(chartDiv);
             priceContainer.appendChild(rsiPane);
             priceContainer.appendChild(macdPane);
+            priceContainer.appendChild(atrPane);
             grid.appendChild(priceContainer);
 
             let gexCol = grid.querySelector('.gex-column');
@@ -20055,12 +20446,19 @@ def index():
         function renderRangeScale(info) {
             const low = info.low, high = info.high;
             const price = (livePrice !== null) ? livePrice : info.current_price;
+            const live = info.live_straddle || null;
+            const liveText = (live && typeof live.mid === 'number')
+                ? '$' + live.mid.toFixed(2)
+                    + (typeof live.pct_of_spot === 'number' ? ' (±' + live.pct_of_spot.toFixed(2) + '%)' : '')
+                    + (typeof live.atm_strike === 'number' ? '  · ' + live.atm_strike.toFixed(2) + ' strike' : '')
+                : '—';
+            _setMet('live_straddle', liveText);
             if (typeof low !== 'number' || typeof high !== 'number' || high <= low) {
                 _setMet('range_low',  '—');
                 _setMet('range_high', '—');
                 _setMet('em_type', 'ATM straddle');
                 _setMet('em_band_label', '—');
-                _setMet('em_context', 'Uses the current ATM straddle, not flow alone.');
+                _setMet('em_context', 'Pinned at the 09:30 ET open ATM straddle.');
                 return;
             }
             const range = high - low;
@@ -20070,7 +20468,8 @@ def index():
             _setMet('range_low',  'Day low $' + low.toFixed(2));
             _setMet('range_high', 'Day high $' + high.toFixed(2));
             const band = document.querySelector('#rail-card-range [data-met="em_band"]');
-            _setMet('em_type', 'ATM straddle');
+            const pinned = !!(info.expected_move_range && info.expected_move_range.pinned);
+            _setMet('em_type', pinned ? 'Pinned at open' : 'ATM straddle');
             if (info.expected_move_range && typeof info.expected_move_range.lower === 'number'
                                          && typeof info.expected_move_range.upper === 'number') {
                 const emLo = info.expected_move_range.lower;
@@ -20088,12 +20487,15 @@ def index():
                 let context = 'Spot is inside the implied band.';
                 if (typeof price === 'number' && price > emHi) context = 'Spot is above the implied upper band.';
                 else if (typeof price === 'number' && price < emLo) context = 'Spot is below the implied lower band.';
-                _setMet('em_context', context + ' Based on the current ATM straddle, not a flow-only forecast.');
+                const tail = pinned
+                    ? ' Band is pinned at the 09:30 ET open straddle.'
+                    : ' Pre-open — the band will lock once 09:30 ET hits.';
+                _setMet('em_context', context + tail);
             } else {
                 if (band) band.style.display = 'none';
                 _setMet('em_band_label', 'Implied move unavailable');
                 _setMet('em_pct', '');
-                _setMet('em_context', 'Uses the current ATM straddle when bid/ask data is available.');
+                _setMet('em_context', 'Pins to the 09:30 ET open ATM straddle when bid/ask data is available.');
             }
         }
 
@@ -21425,16 +21827,32 @@ def update():
             if not quote_response.ok:
                 raise Exception(f"Failed to fetch quote for display: {quote_response.status_code} {quote_response.reason}")
 
-            # --- Always Calculate Expected Move Range (same as chart logic) ---
+            # --- Expected Move Range pinned at 09:30 ET open ---
             expected_move_range = None
-            expected_move_snapshot = calculate_expected_move_snapshot(
+            live_straddle = None
+            pinned_snapshot = get_pinned_expected_move(
+                calls, puts, S, quote_ticker, selected_expiries=expiry_dates
+            )
+            if pinned_snapshot:
+                expected_move_range = {
+                    'lower': round(pinned_snapshot['lower'], 2),
+                    'upper': round(pinned_snapshot['upper'], 2),
+                    'move': round(pinned_snapshot['move'], 2),
+                    'open_spot': round(pinned_snapshot['open_spot'], 2),
+                    'atm_strike': round(pinned_snapshot['atm_strike'], 2),
+                    'pinned': bool(pinned_snapshot.get('pinned')),
+                }
+
+            # --- Live ATM straddle (recomputed every tick) ---
+            live_snapshot = calculate_expected_move_snapshot(
                 calls, puts, S, selected_expiries=expiry_dates
             )
-            if expected_move_snapshot:
-                expected_move_range = {
-                    'lower': round(expected_move_snapshot['lower'], 2),
-                    'upper': round(expected_move_snapshot['upper'], 2),
-                    'move': round(expected_move_snapshot['move'], 2),
+            if live_snapshot:
+                live_move = float(live_snapshot['move'])
+                live_straddle = {
+                    'atm_strike': round(live_snapshot['atm_strike'], 2),
+                    'mid': round(live_move, 2),
+                    'pct_of_spot': round(live_move / S * 100, 3) if S else None,
                 }
 
             if quote_response.ok:
@@ -21450,10 +21868,13 @@ def update():
                 high_diff_pct = (high_diff / S * 100) if S else 0
                 low_diff_pct  = (low_diff  / S * 100) if S else 0
 
-                # add percentage of expected move boundaries if available (rounded to 2 decimals)
+                # Pct bounds reference the open spot (or current spot pre-pin) so
+                # the headline ±X.XX% stays static once the band is locked.
                 if expected_move_range:
-                    expected_move_range['lower_pct'] = round(((expected_move_range['lower'] - S) / S * 100), 2)
-                    expected_move_range['upper_pct'] = round(((expected_move_range['upper'] - S) / S * 100), 2)
+                    anchor = expected_move_range.get('open_spot') or S
+                    if anchor:
+                        expected_move_range['lower_pct'] = round(((expected_move_range['lower'] - anchor) / anchor * 100), 2)
+                        expected_move_range['upper_pct'] = round(((expected_move_range['upper'] - anchor) / anchor * 100), 2)
 
                 response['price_info'] = {
                     'current_price': S,
@@ -21470,7 +21891,8 @@ def update():
                     'total_volume': total_volume,
                     'call_percentage': call_percentage,
                     'put_percentage': put_percentage,
-                    'expected_move_range': expected_move_range
+                    'expected_move_range': expected_move_range,
+                    'live_straddle': live_straddle,
                 }
         except Exception as e:
             print(f"Error fetching quote data: {e}")
@@ -21489,7 +21911,8 @@ def update():
                 'total_volume': total_volume,
                 'call_percentage': call_percentage,
                 'put_percentage': put_percentage,
-                'expected_move_range': None
+                'expected_move_range': None,
+                'live_straddle': None,
             }
         
         return jsonify(response)
