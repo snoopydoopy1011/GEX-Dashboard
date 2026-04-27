@@ -1,10 +1,10 @@
 # Strike Axis Overlay Prototype Plan
 
-**Status:** Prototype implementation complete; snapback follow-up fixed and verified
+**Status:** Prototype implementation complete; rail-collapse and tooltip refinements fixed and verified
 **Created:** 2026-04-26  
 **Implemented:** 2026-04-26 on `codex/strike-axis-overlay-prototype`
 **Target branch:** `codex/strike-axis-overlay-plan` for this doc; implementation used `codex/strike-axis-overlay-prototype`.
-**Scope:** Prototype an on-chart, right-side strike profile overlay while keeping the existing strike rail available.
+**Scope:** Prototype an on-chart, right-side strike profile overlay with the existing strike rail available as a collapsible fallback.
 
 ---
 
@@ -82,13 +82,10 @@ Verification completed:
 
 Remaining follow-up work:
 
-- Decide whether the on-chart overlay should eventually replace, collapse, or coexist with the standalone strike rail.
-- Add richer hover/tooltip details if users want per-strike values on the overlay itself.
-- Consider split call/put rendering for Open Interest and Options Volume after the simple net view is validated.
-- Add user-facing controls for right offset, anchor width, or max bar width if the fixed defaults need tuning; the current implementation keeps the stored `STRIKE_OVERLAY_RIGHT_OFFSET_KEY` plumbing but exposes no UI for it.
 - Refine mobile behavior later; the prototype remains targeted at the large-monitor desktop layout.
 - Add Premium only after confirming the desired signed net convention.
 - Decide whether manually shifted chart spacing should be persisted per ticker/session or remain an in-memory chart interaction only.
+- Decide whether the collapsed strike rail should remain as an expandable fallback long term, or be removed after more live use.
 
 ### Follow-up Fix - 2026-04-27
 
@@ -99,6 +96,44 @@ Fixed a refresh-time snapback in the on-chart overlay prototype:
 - Offset application is now split into explicit forced calls for chart creation/toggle changes and a guarded refresh path.
 - The candle/volume `setData()` refresh path now captures and restores the visible logical range, preserving manual right-side space through background refreshes.
 - Background refreshes now preserve any larger manual right-side gap and only top the gap back up when the view is still at the latest bars.
+
+### Refinement Update - 2026-04-27
+
+Extended the prototype after validating the on-chart overlay:
+
+- Overlay ON now auto-collapses the standalone strike rail so the price chart reclaims the rail column.
+- The manual strike rail collapse now truly collapses the whole column instead of leaving a blank 28px/inline-width grid track.
+- The collapsed rail keeps a small expand affordance at the boundary; expanding while overlay is enabled turns the overlay off and restores the rail.
+- Added rail-style hover details on overlay bars using the existing profile payload values: strike, net, call side, put side, and total for OI/Options Volume.
+- Added split call/put rendering for Open Interest and Options Volume. The larger side draws underneath and the shorter side draws on top, matching the old horizontal rail comparison style.
+- Added compact toolbar spacing controls under `Opt`: right gap, label gap, and max bar width. Settings persist in `localStorage`.
+- Kept the existing signed-net rendering for GEX, Gamma, Delta, Vanna, and Charm.
+
+Issues encountered and fixes:
+
+- The old collapse state only hid the Plotly rail contents and set `--gex-col-w` to `28px`, so the chart never reclaimed the full column. Collapse now sets the rail track to `0px` and hides the rail body.
+- Saved rail width was applied as an inline CSS variable after collapse, overriding the collapsed width. The collapse path now explicitly writes `--gex-col-w: 0px`, and restore/resize code avoids reapplying saved width while collapsed.
+- The first overlay tooltip implementation matched the app's rail cards too closely and rendered as a large dark panel. It was replaced with a compact Plotly-style hover label.
+- The compact tooltip initially stretched to the full chart height because `#price-chart` inherits the generic `.chart-container > div { flex: 1; width: 100%; height: 100%; }` rule for direct child divs. The tooltip now overrides that with `flex: none`, `width: max-content`, `height: auto`, and zero min-size.
+- The in-app browser continued to show older inline CSS/JS during quick iterations. Each verification pass required restarting the `127.0.0.1:5002` Flask prototype and loading a cache-busted URL.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py`
+- Node syntax check of all inline `<script>` blocks
+- `git diff --check`
+- Restarted the local `127.0.0.1:5002` prototype process after the refinement changes.
+- In-app browser verification on `127.0.0.1:5002` confirmed Overlay ON collapses the rail column and expands the price chart.
+- In-app browser verification confirmed Options Volume split call/put overlay bars render on-chart.
+- In-app browser verification confirmed the `Opt` spacing controls appear and update persisted overlay spacing settings.
+- In-app browser verification confirmed the overlay tooltip is now a compact strike-rail-style box instead of a full-height chart panel.
+
+Remaining follow-up work:
+
+- Refine mobile behavior later only if the target environment changes; current target remains large-monitor desktop.
+- Add Premium only after confirming the desired signed net convention.
+- Decide whether manually shifted chart spacing should be persisted per ticker/session or remain an in-memory chart interaction only.
+- Decide whether the collapsed strike rail should remain as an expandable fallback long term, or be removed after more live use.
 
 ---
 

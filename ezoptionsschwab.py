@@ -7590,7 +7590,7 @@ def index():
             width: 100%;
             align-items: stretch;
         }
-        .chart-grid.gex-collapsed { --gex-col-w: 28px; }
+        .chart-grid.gex-collapsed { --gex-col-w: 0px; }
         /* Row 1: workspace toolbar shell (col 1) + GEX column header (col 2) + rail tabs (col 3). */
         .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
         .chart-grid > .gex-col-header       { grid-column: 2; grid-row: 1; }
@@ -8960,6 +8960,7 @@ def index():
 
         /* Strike rail (always-on, collapsible) — lives between chart and rail */
         .gex-col-header {
+            position: relative;
             display: flex;
             align-items: stretch;
             gap: 6px;
@@ -9089,8 +9090,29 @@ def index():
         .chart-grid.gex-collapsed .gex-column > .gex-side-panel-wrap {
             display: none;
         }
+        .chart-grid.gex-collapsed .gex-column { display: none; }
         .chart-grid.gex-collapsed .gex-resize-handle { display: none; }
-        .chart-grid.gex-collapsed .gex-col-header { padding: 0 2px; justify-content: center; }
+        .chart-grid.gex-collapsed .gex-col-header {
+            padding: 0;
+            overflow: visible;
+            background: transparent;
+            border: 0;
+            min-height: 0;
+            justify-content: center;
+            z-index: 12;
+        }
+        .chart-grid.gex-collapsed .gex-col-toggle {
+            position: absolute;
+            right: -12px;
+            top: 7px;
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.28);
+        }
 
         /* ── Secondary chart tab bar ──────────────────────────────── */
         .secondary-tabs {
@@ -9173,6 +9195,51 @@ def index():
             border-radius: 4px;
             box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
             transform: translateZ(0);
+        }
+        .tv-strike-overlay-bar.side-under {
+            opacity: 0.52;
+        }
+        .tv-strike-overlay-tooltip {
+            position: absolute;
+            z-index: 55;
+            display: none;
+            flex: none !important;
+            align-self: flex-start !important;
+            width: max-content !important;
+            height: auto !important;
+            min-width: 0 !important;
+            min-height: 0 !important;
+            max-width: 190px;
+            padding: 4px 6px;
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            border-radius: 0;
+            background: var(--call);
+            color: #fff;
+            font-size: 12px;
+            line-height: 1.2;
+            font-weight: 700;
+            pointer-events: none;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.34);
+            white-space: nowrap;
+        }
+        .tv-strike-overlay-tooltip.negative {
+            background: var(--put);
+        }
+        .tv-strike-overlay-tooltip::after {
+            content: '';
+            position: absolute;
+            right: -6px;
+            top: 50%;
+            transform: translateY(-50%);
+            border-width: 6px 0 6px 6px;
+            border-style: solid;
+            border-color: transparent transparent transparent var(--call);
+        }
+        .tv-strike-overlay-tooltip.negative::after {
+            border-left-color: var(--put);
+        }
+        .tv-strike-overlay-tooltip .tt-row {
+            display: block;
         }
         .tv-drawing-overlay {
             position: absolute;
@@ -9494,6 +9561,42 @@ def index():
         .strike-overlay-select:focus {
             outline: none;
             border-color: var(--accent);
+        }
+        .strike-overlay-settings {
+            position: relative;
+        }
+        .strike-overlay-settings-panel {
+            position: fixed;
+            display: none;
+            z-index: 90;
+            width: 254px;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: rgba(18, 23, 30, 0.98);
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+        }
+        .strike-overlay-settings.open .strike-overlay-settings-panel {
+            display: grid;
+            gap: 8px;
+        }
+        .strike-overlay-control {
+            display: grid;
+            grid-template-columns: 80px minmax(0, 1fr) 34px;
+            align-items: center;
+            gap: 8px;
+            color: var(--fg-2);
+            font-size: 10px;
+        }
+        .strike-overlay-control input[type="range"] {
+            width: 100%;
+            height: 4px;
+        }
+        .strike-overlay-control output {
+            color: var(--fg-0);
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+            text-align: right;
         }
         .tv-draw-dropdown {
             position: relative;
@@ -11233,6 +11336,8 @@ def index():
         const STRIKE_OVERLAY_ENABLED_KEY = 'gex.strikeOverlayEnabled';
         const STRIKE_OVERLAY_METRIC_KEY = 'gex.strikeOverlayMetric';
         const STRIKE_OVERLAY_RIGHT_OFFSET_KEY = 'gex.strikeOverlayRightOffset';
+        const STRIKE_OVERLAY_ANCHOR_GAP_KEY = 'gex.strikeOverlayAnchorGap';
+        const STRIKE_OVERLAY_MAX_WIDTH_KEY = 'gex.strikeOverlayMaxWidth';
         const STRIKE_RAIL_PREF_VERSION_KEY = 'gex.strikeRailTabPrefVersion';
         let activeStrikeRailTab = (() => {
             try {
@@ -11253,6 +11358,7 @@ def index():
         })();
         let tvStrikeOverlayProfiles = {};
         let tvStrikeOverlayPending = false;
+        let tvStrikeOverlayRenderedRows = [];
         let strikeOverlayEnabled = (() => {
             try { return localStorage.getItem(STRIKE_OVERLAY_ENABLED_KEY) === '1'; } catch (e) { return false; }
         })();
@@ -14552,15 +14658,52 @@ def index():
                     ? 'Strike overlay metric'
                     : 'Choose the metric to show when Overlay is enabled';
             });
+            document.querySelectorAll('[data-strike-overlay-setting]').forEach(input => {
+                const key = input.dataset.strikeOverlaySetting;
+                const value = getStrikeOverlaySettingValue(key);
+                if (String(input.value) !== String(value)) input.value = String(value);
+                const output = input.closest('.strike-overlay-control')?.querySelector('output');
+                if (output) output.value = String(value);
+            });
+        }
+
+        function readClampedNumberSetting(storageKey, fallback, min, max) {
+            try {
+                const raw = parseFloat(localStorage.getItem(storageKey));
+                if (Number.isFinite(raw)) return Math.max(min, Math.min(max, raw));
+            } catch (e) {}
+            return fallback;
         }
 
         function getStrikeOverlayRightOffset() {
-            let offset = 18;
-            try {
-                const raw = parseFloat(localStorage.getItem(STRIKE_OVERLAY_RIGHT_OFFSET_KEY));
-                if (Number.isFinite(raw)) offset = Math.max(4, Math.min(48, raw));
-            } catch (e) {}
-            return offset;
+            return readClampedNumberSetting(STRIKE_OVERLAY_RIGHT_OFFSET_KEY, 18, 4, 60);
+        }
+
+        function getStrikeOverlayAnchorGap() {
+            return readClampedNumberSetting(STRIKE_OVERLAY_ANCHOR_GAP_KEY, 96, 48, 180);
+        }
+
+        function getStrikeOverlayMaxWidth() {
+            return readClampedNumberSetting(STRIKE_OVERLAY_MAX_WIDTH_KEY, 260, 80, 420);
+        }
+
+        function getStrikeOverlaySettingValue(key) {
+            if (key === 'rightOffset') return Math.round(getStrikeOverlayRightOffset());
+            if (key === 'anchorGap') return Math.round(getStrikeOverlayAnchorGap());
+            if (key === 'maxWidth') return Math.round(getStrikeOverlayMaxWidth());
+            return 0;
+        }
+
+        function persistStrikeOverlaySetting(key, value) {
+            const storageKey = key === 'rightOffset'
+                ? STRIKE_OVERLAY_RIGHT_OFFSET_KEY
+                : key === 'anchorGap'
+                    ? STRIKE_OVERLAY_ANCHOR_GAP_KEY
+                    : key === 'maxWidth'
+                        ? STRIKE_OVERLAY_MAX_WIDTH_KEY
+                        : null;
+            if (!storageKey) return;
+            try { localStorage.setItem(storageKey, String(Math.round(Number(value)))); } catch (e) {}
         }
 
         function shouldApplyStrikeOverlayRightOffset(offset) {
@@ -14612,6 +14755,119 @@ def index():
             overlay.replaceChildren();
             overlay.style.display = 'none';
             overlay.dataset.visibleCount = '0';
+            tvStrikeOverlayRenderedRows = [];
+            const tooltip = document.querySelector('#price-chart .tv-strike-overlay-tooltip');
+            if (tooltip) tooltip.style.display = 'none';
+        }
+
+        function ensureTVStrikeOverlayTooltip() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let tooltip = container.querySelector('.tv-strike-overlay-tooltip');
+            if (!tooltip) {
+                tooltip = document.createElement('div');
+                tooltip.className = 'tv-strike-overlay-tooltip';
+                container.appendChild(tooltip);
+            }
+            return tooltip;
+        }
+
+        function escapeTooltipHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function formatStrikeOverlayValue(value, metric) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '—';
+            const abs = Math.abs(n);
+            const sign = n < 0 ? '-' : '';
+            const prefix = ['gex', 'gamma', 'delta', 'vanna', 'charm'].includes(metric) ? '$' : '';
+            if (abs >= 1e9) return sign + prefix + (abs / 1e9).toFixed(2) + 'B';
+            if (abs >= 1e6) return sign + prefix + (abs / 1e6).toFixed(2) + 'M';
+            if (abs >= 1e3) return sign + prefix + (abs / 1e3).toFixed(1) + 'K';
+            return sign + prefix + Math.round(abs).toLocaleString();
+        }
+
+        function formatStrikeOverlayFullValue(value, metric) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '—';
+            const prefix = ['gex', 'gamma', 'delta', 'vanna', 'charm'].includes(metric) ? '$' : '';
+            const sign = n < 0 ? '-' : '';
+            return sign + prefix + Math.round(Math.abs(n)).toLocaleString();
+        }
+
+        function buildStrikeOverlayTooltipHtml(item) {
+            const metric = item.metric || activeStrikeOverlayMetric;
+            const row = item.row || {};
+            const callValue = Number(row.call || 0);
+            const putValue = Number(row.put || 0);
+            const totalValue = callValue + putValue;
+            const netValue = Number(row.value || 0);
+            const strike = Number(item.strike).toFixed(2).replace(/\.00$/, '');
+            const rows = [
+                ['Strike', strike],
+                ['Net ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(netValue, metric)],
+                ['Call ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(callValue, metric)],
+                ['Put ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(putValue, metric)],
+            ];
+            if (['open_interest', 'options_volume'].includes(metric)) {
+                rows.push(['Total', formatStrikeOverlayFullValue(totalValue, metric)]);
+            }
+            return rows.map(([name, value]) => (
+                '<div class="tt-row">' + escapeTooltipHtml(name) + ' ' + escapeTooltipHtml(value) + '</div>'
+            )).join('');
+        }
+
+        function positionTVStrikeOverlayTooltip(tooltip, item) {
+            const container = document.getElementById('price-chart');
+            if (!tooltip || !container || !item) return;
+            const left = Math.max(8, Math.min(
+                item.x - tooltip.offsetWidth - 8,
+                container.clientWidth - tooltip.offsetWidth - 12
+            ));
+            const top = Math.max(8, Math.min(
+                item.y - (tooltip.offsetHeight / 2),
+                container.clientHeight - tooltip.offsetHeight - 8
+            ));
+            tooltip.style.left = `${left}px`;
+            tooltip.style.top = `${top}px`;
+        }
+
+        function findTVStrikeOverlayHoverRow(event) {
+            if (!strikeOverlayEnabled || !tvStrikeOverlayRenderedRows.length) return null;
+            const container = document.getElementById('price-chart');
+            if (!container || !event) return null;
+            const bounds = container.getBoundingClientRect();
+            const cursorX = event.clientX - bounds.left;
+            const cursorY = event.clientY - bounds.top;
+            return tvStrikeOverlayRenderedRows
+                .map(item => {
+                    const dx = cursorX < item.x ? item.x - cursorX : cursorX > item.x + item.width ? cursorX - item.x - item.width : 0;
+                    const dy = Math.abs(cursorY - item.y);
+                    return Object.assign({ dist: (dx * dx) + (dy * dy) }, item);
+                })
+                .filter(item => item.dist <= 196 && cursorX >= item.x - 10 && cursorX <= item.anchorX + 10)
+                .sort((a, b) => a.dist - b.dist)[0] || null;
+        }
+
+        function updateTVStrikeOverlayTooltip(event) {
+            const tooltip = ensureTVStrikeOverlayTooltip();
+            if (!tooltip) return false;
+            const item = findTVStrikeOverlayHoverRow(event);
+            if (!item) {
+                tooltip.style.display = 'none';
+                return false;
+            }
+            tooltip.innerHTML = buildStrikeOverlayTooltipHtml(item);
+            tooltip.classList.toggle('negative', Number(item.value || 0) < 0);
+            tooltip.style.display = 'block';
+            positionTVStrikeOverlayTooltip(tooltip, item);
+            return true;
         }
 
         function setStrikeOverlayProfiles(data) {
@@ -14649,6 +14905,7 @@ def index():
             if (!strikeOverlayEnabled || !tvPriceChart || !tvCandleSeries || !rows.length || !width || !height) {
                 overlay.style.display = 'none';
                 overlay.dataset.visibleCount = '0';
+                tvStrikeOverlayRenderedRows = [];
                 return;
             }
 
@@ -14664,9 +14921,9 @@ def index():
                     : 0;
             } catch (e) {}
             const plotBottom = Math.max(0, height - timeScaleHeight);
-            const labelSafeWidth = 96;
+            const labelSafeWidth = getStrikeOverlayAnchorGap();
             const anchorX = Math.max(48, width - priceScaleWidth - labelSafeWidth);
-            const maxBarWidth = Math.min(260, Math.max(80, width * 0.16));
+            const maxBarWidth = Math.min(getStrikeOverlayMaxWidth(), Math.max(80, width * 0.22));
             let topPrice = null;
             let bottomPrice = null;
             try {
@@ -14705,9 +14962,13 @@ def index():
             if (!screenRows.length) {
                 overlay.style.display = 'none';
                 overlay.dataset.visibleCount = '0';
+                tvStrikeOverlayRenderedRows = [];
                 return;
             }
-            const maxAbs = Math.max(...screenRows.map(item => Math.abs(item.value))) || 1;
+            const splitMetric = ['open_interest', 'options_volume'].includes(metric);
+            const maxAbs = splitMetric
+                ? Math.max(...screenRows.map(item => Math.max(Math.abs(Number(item.row.call || 0)), Math.abs(Number(item.row.put || 0))))) || 1
+                : Math.max(...screenRows.map(item => Math.abs(item.value))) || 1;
             const gaps = [];
             for (let i = 1; i < screenRows.length; i += 1) {
                 const gap = Math.abs(screenRows[i].y - screenRows[i - 1].y);
@@ -14718,27 +14979,66 @@ def index():
             const callC = getComputedStyle(document.documentElement).getPropertyValue('--call').trim() || '#10B981';
             const putC = getComputedStyle(document.documentElement).getPropertyValue('--put').trim() || '#EF4444';
             const fragment = document.createDocumentFragment();
+            const renderedRows = [];
 
             screenRows.forEach(item => {
-                const magnitude = Math.abs(item.value) / maxAbs;
-                const barWidth = Math.max(2, Math.round(maxBarWidth * magnitude));
-                const x = Math.max(0, anchorX - barWidth);
-                const opacity = Math.min(0.9, 0.28 + 0.62 * magnitude);
+                const callValue = Math.abs(Number(item.row.call || 0));
+                const putValue = Math.abs(Number(item.row.put || 0));
                 const label = STRIKE_RAIL_LABELS[metric] || metric;
-                const bar = document.createElement('div');
-                bar.className = 'tv-strike-overlay-bar';
-                bar.style.left = x + 'px';
-                bar.style.top = (item.y - (barHeight / 2)) + 'px';
-                bar.style.width = barWidth + 'px';
-                bar.style.height = barHeight + 'px';
-                bar.style.background = item.value >= 0 ? callC : putC;
-                bar.style.opacity = opacity.toFixed(3);
-                bar.title = label + ' ' + item.strike + ': ' + Math.round(item.value).toLocaleString();
-                fragment.appendChild(bar);
+                const addBar = (barWidth, color, opacity, className = '') => {
+                    const x = Math.max(0, anchorX - barWidth);
+                    const bar = document.createElement('div');
+                    bar.className = 'tv-strike-overlay-bar' + (className ? ' ' + className : '');
+                    bar.style.left = x + 'px';
+                    bar.style.top = (item.y - (barHeight / 2)) + 'px';
+                    bar.style.width = barWidth + 'px';
+                    bar.style.height = barHeight + 'px';
+                    bar.style.background = color;
+                    bar.style.opacity = opacity.toFixed(3);
+                    bar.title = label + ' ' + item.strike + ': ' + formatStrikeOverlayValue(item.value, metric);
+                    fragment.appendChild(bar);
+                    return { x, width: barWidth };
+                };
+                let hitX;
+                let hitWidth;
+                if (splitMetric) {
+                    const callWidth = callValue > 0 ? Math.max(2, Math.round(maxBarWidth * (callValue / maxAbs))) : 0;
+                    const putWidth = putValue > 0 ? Math.max(2, Math.round(maxBarWidth * (putValue / maxAbs))) : 0;
+                    const biggerIsCall = callWidth >= putWidth;
+                    const firstWidth = biggerIsCall ? callWidth : putWidth;
+                    const secondWidth = biggerIsCall ? putWidth : callWidth;
+                    const firstColor = biggerIsCall ? callC : putC;
+                    const secondColor = biggerIsCall ? putC : callC;
+                    if (firstWidth) {
+                        const first = addBar(firstWidth, firstColor, 0.48, 'side-under');
+                        hitX = first.x;
+                        hitWidth = first.width;
+                    }
+                    if (secondWidth) {
+                        const second = addBar(secondWidth, secondColor, 0.9);
+                        hitX = Math.min(hitX == null ? second.x : hitX, second.x);
+                        hitWidth = Math.max(hitWidth || 0, second.width);
+                    }
+                } else {
+                    const magnitude = Math.abs(item.value) / maxAbs;
+                    const barWidth = Math.max(2, Math.round(maxBarWidth * magnitude));
+                    const opacity = Math.min(0.9, 0.28 + 0.62 * magnitude);
+                    const bar = addBar(barWidth, item.value >= 0 ? callC : putC, opacity);
+                    hitX = bar.x;
+                    hitWidth = bar.width;
+                }
+                renderedRows.push(Object.assign({}, item, {
+                    metric,
+                    x: hitX == null ? anchorX : hitX,
+                    width: hitWidth || 2,
+                    height: barHeight,
+                    anchorX,
+                }));
             });
             overlay.appendChild(fragment);
             overlay.style.display = 'block';
             overlay.dataset.visibleCount = String(screenRows.length);
+            tvStrikeOverlayRenderedRows = renderedRows;
         }
 
         function scheduleTVStrikeOverlayDraw() {
@@ -14768,6 +15068,13 @@ def index():
                     tvStrikeOverlayProfiles = lastData.strike_profiles || {};
                 }
                 applyStrikeOverlayRightOffset({ force: true });
+                if (strikeOverlayEnabled) {
+                    applyGexColumnCollapse(true);
+                } else {
+                    let userCollapsed = false;
+                    try { userCollapsed = localStorage.getItem(GEX_COL_COLLAPSE_KEY) === '1'; } catch (e) {}
+                    applyGexColumnCollapse(userCollapsed);
+                }
                 syncStrikeOverlayControls();
                 scheduleTVStrikeOverlayDraw();
             });
@@ -14790,6 +15097,60 @@ def index():
                 scheduleTVStrikeOverlayDraw();
             });
             group.appendChild(select);
+
+            const settingsWrap = document.createElement('div');
+            settingsWrap.className = 'strike-overlay-settings';
+            const settingsBtn = document.createElement('button');
+            settingsBtn.type = 'button';
+            settingsBtn.className = 'tv-tb-btn icon';
+            settingsBtn.textContent = 'Opt';
+            settingsBtn.title = 'Strike overlay spacing';
+            const panel = document.createElement('div');
+            panel.className = 'strike-overlay-settings-panel';
+            [
+                ['rightOffset', 'Right gap', 4, 60, 1],
+                ['anchorGap', 'Label gap', 48, 180, 4],
+                ['maxWidth', 'Max width', 80, 420, 10],
+            ].forEach(([key, label, min, max, step]) => {
+                const row = document.createElement('label');
+                row.className = 'strike-overlay-control';
+                const text = document.createElement('span');
+                text.textContent = label;
+                const input = document.createElement('input');
+                input.type = 'range';
+                input.min = String(min);
+                input.max = String(max);
+                input.step = String(step);
+                input.value = String(getStrikeOverlaySettingValue(key));
+                input.dataset.strikeOverlaySetting = key;
+                const output = document.createElement('output');
+                output.value = input.value;
+                input.addEventListener('input', () => {
+                    output.value = input.value;
+                    persistStrikeOverlaySetting(key, input.value);
+                    if (key === 'rightOffset') applyStrikeOverlayRightOffset({ force: true });
+                    scheduleTVStrikeOverlayDraw();
+                });
+                row.appendChild(text);
+                row.appendChild(input);
+                row.appendChild(output);
+                panel.appendChild(row);
+            });
+            settingsBtn.addEventListener('click', event => {
+                event.stopPropagation();
+                const open = !settingsWrap.classList.contains('open');
+                document.querySelectorAll('.strike-overlay-settings.open').forEach(el => el.classList.remove('open'));
+                settingsWrap.classList.toggle('open', open);
+                if (open) {
+                    const rect = settingsBtn.getBoundingClientRect();
+                    panel.style.left = Math.max(8, Math.min(window.innerWidth - 262, rect.left)) + 'px';
+                    panel.style.top = (rect.bottom + 6) + 'px';
+                    syncStrikeOverlayControls();
+                }
+            });
+            settingsWrap.appendChild(settingsBtn);
+            settingsWrap.appendChild(panel);
+            group.appendChild(settingsWrap);
 
             parent.appendChild(group);
             syncStrikeOverlayControls();
@@ -15897,12 +16258,18 @@ def index():
             if (tvToolbarMenuDismissBound) return;
             tvToolbarMenuDismissBound = true;
             document.addEventListener('pointerdown', event => {
+                document.querySelectorAll('.strike-overlay-settings.open').forEach(el => {
+                    if (!el.contains(event.target)) el.classList.remove('open');
+                });
                 if (!tvOpenDrawMenuRoot) return;
                 if (tvOpenDrawMenuRoot.contains(event.target)) return;
                 closeTVToolbarMenus();
             });
             document.addEventListener('keydown', event => {
-                if (event.key === 'Escape') closeTVToolbarMenus();
+                if (event.key === 'Escape') {
+                    document.querySelectorAll('.strike-overlay-settings.open').forEach(el => el.classList.remove('open'));
+                    closeTVToolbarMenus();
+                }
             });
             window.addEventListener('resize', () => {
                 if (!tvOpenDrawMenuRoot) return;
@@ -16873,11 +17240,21 @@ def index():
                     container.addEventListener('wheel',    () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
                     container.addEventListener('mouseup',  () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); });
                     container.addEventListener('touchend', () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
-                    container.addEventListener('mousemove', (event) => updateTVHistoricalTooltip(event));
+                    container.addEventListener('mousemove', (event) => {
+                        const handledStrike = updateTVStrikeOverlayTooltip(event);
+                        if (handledStrike) {
+                            const tooltip = ensureTVHistoricalTooltip();
+                            if (tooltip) tooltip.style.display = 'none';
+                        } else {
+                            updateTVHistoricalTooltip(event);
+                        }
+                    });
                     container.addEventListener('mouseleave', () => {
                         if (tvDrawMode) clearTVDrawingPreview();
                         const tooltip = ensureTVHistoricalTooltip();
                         if (tooltip) tooltip.style.display = 'none';
+                        const strikeTooltip = ensureTVStrikeOverlayTooltip();
+                        if (strikeTooltip) strikeTooltip.style.display = 'none';
                     });
                 }
                 const _tc2 = document.getElementById('tv-toolbar-container');
@@ -17474,6 +17851,16 @@ def index():
             const btn  = document.getElementById('gex-col-toggle');
             if (!grid) return;
             grid.classList.toggle('gex-collapsed', !!collapsed);
+            if (collapsed) {
+                grid.style.setProperty('--gex-col-w', '0px');
+            } else {
+                let savedWidth = 352;
+                try {
+                    const raw = parseFloat(localStorage.getItem(GEX_COL_WIDTH_KEY));
+                    if (Number.isFinite(raw)) savedWidth = raw;
+                } catch (e) {}
+                applyGexColWidth(savedWidth, false);
+            }
             if (btn) {
                 btn.textContent = collapsed ? '›' : '‹';
                 btn.title = collapsed ? 'Expand Strike Rail' : 'Collapse Strike Rail';
@@ -17493,6 +17880,13 @@ def index():
             if (!btn || btn.__wired) return;
             btn.__wired = true;
             btn.addEventListener('click', () => {
+                if (isGexColumnCollapsed() && strikeOverlayEnabled) {
+                    strikeOverlayEnabled = false;
+                    try { localStorage.setItem(STRIKE_OVERLAY_ENABLED_KEY, '0'); } catch (e) {}
+                    applyStrikeOverlayRightOffset({ force: true });
+                    syncStrikeOverlayControls();
+                    scheduleTVStrikeOverlayDraw();
+                }
                 const next = !isGexColumnCollapsed();
                 try { localStorage.setItem(GEX_COL_COLLAPSE_KEY, next ? '1' : '0'); } catch (e) {}
                 applyGexColumnCollapse(next);
@@ -17536,6 +17930,7 @@ def index():
         (function restoreGexColumnCollapse() {
             let collapsed = false;
             try { collapsed = localStorage.getItem(GEX_COL_COLLAPSE_KEY) === '1'; } catch (e) {}
+            collapsed = collapsed || !!strikeOverlayEnabled;
             // Defer until DOM is parsed
             if (document.readyState === 'loading') {
                 document.addEventListener('DOMContentLoaded', () => { ensureStrikeRailResizeHandle(); applyGexColumnCollapse(collapsed); wireGexColumnToggle(); });
@@ -17551,6 +17946,7 @@ def index():
                 const raw = parseFloat(localStorage.getItem(GEX_COL_WIDTH_KEY));
                 if (Number.isFinite(raw)) savedWidth = raw;
             } catch (e) {}
+            if (isGexColumnCollapsed()) return;
             applyGexColWidth(savedWidth, false);
         })();
 
@@ -20216,8 +20612,13 @@ def index():
         window.addEventListener('resize', () => {
             const grid = document.getElementById('chart-grid');
             if (grid) {
-                const liveWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w')) || 352;
-                applyGexColWidth(liveWidth, false);
+                if (isGexColumnCollapsed()) {
+                    grid.style.setProperty('--gex-col-w', '0px');
+                } else {
+                    const parsedWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w'));
+                    const liveWidth = Number.isFinite(parsedWidth) ? parsedWidth : 352;
+                    applyGexColWidth(liveWidth, false);
+                }
             }
             Object.keys(charts).forEach(chartKey => {
                 const chartElement = document.getElementById(`${chartKey}-chart`);
