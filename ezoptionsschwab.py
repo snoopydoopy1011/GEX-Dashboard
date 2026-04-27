@@ -14795,6 +14795,31 @@ def index():
             window.addEventListener('mouseup', tvEndChannelHandleDrag);
         }
 
+        // Drag any line of a selected channel to translate it vertically:
+        //   base segment     → shift base (p1 + p2) together, keeps slope
+        //   parallel segment → shift parallel anchor (p3) → adjusts width
+        //   midline          → shift the entire channel
+        function tvBeginChannelSegmentDrag(event, def, segmentKind) {
+            if (!def || def.type !== 'channel') return;
+            if (!tvCandleSeries) return;
+            const point = tvOverlayPointFromEvent(event);
+            if (!point) return;
+            const startPrice = tvCandleSeries.coordinateToPrice(point.y);
+            if (startPrice == null || Number.isNaN(startPrice)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            tvChannelDragState = {
+                defId: def.id,
+                handle: 'segment',
+                segment: segmentKind,
+                startPrice: Number(startPrice),
+                originalDef: JSON.parse(JSON.stringify(def)),
+                handleEl: null,
+            };
+            window.addEventListener('mousemove', tvHandleChannelHandleDragMove);
+            window.addEventListener('mouseup', tvEndChannelHandleDrag);
+        }
+
         function tvHandleChannelHandleDragMove(event) {
             if (!tvChannelDragState) return;
             const def = tvFindDrawingById(tvChannelDragState.defId);
@@ -14807,6 +14832,33 @@ def index():
             if (!tvCandleSeries) return;
             const price = tvCandleSeries.coordinateToPrice(point.y);
             if (price == null || Number.isNaN(price)) return;
+            if (tvChannelDragState.handle === 'segment') {
+                const orig = tvChannelDragState.originalDef;
+                const dy = Number(price) - tvChannelDragState.startPrice;
+                if (!Number.isFinite(dy)) return;
+                const seg = tvChannelDragState.segment;
+                if (seg === 'base') {
+                    def.p1 = Number(orig.p1) + dy;
+                    def.p2 = Number(orig.p2) + dy;
+                } else if (seg === 'parallel') {
+                    const baseP3 = Number(orig.p3);
+                    if (Number.isFinite(baseP3)) {
+                        def.p3 = baseP3 + dy;
+                    } else {
+                        // Fallback: derive p3 from current channel width and apply shift.
+                        const ch = tvComputeChannelData(orig);
+                        if (ch) def.p3 = ch.q1 + dy;
+                    }
+                } else if (seg === 'mid') {
+                    def.p1 = Number(orig.p1) + dy;
+                    def.p2 = Number(orig.p2) + dy;
+                    if (Number.isFinite(Number(orig.p3))) {
+                        def.p3 = Number(orig.p3) + dy;
+                    }
+                }
+                scheduleTVDrawingOverlayDraw();
+                return;
+            }
             if (tvChannelDragState.handle === 'h3') {
                 // Vertical-only: shift parallel line by mutating p3 directly.
                 def.p3 = Number(price);
@@ -14816,12 +14868,15 @@ def index():
                 let time = null;
                 try { time = tvPriceChart.timeScale().coordinateToTime(point.x); } catch (e) { time = null; }
                 if (!time) time = tvLogicalToTime(logical);
+                // When the HV-snap lock is on, hold the base price fixed so the
+                // channel can still be stretched along time but not rotated.
+                const lockSlope = getTVChannelAxisSnapEnabled();
                 if (tvChannelDragState.handle === 'h1') {
-                    def.p1 = Number(price);
+                    if (!lockSlope) def.p1 = Number(price);
                     if (time != null) { def.t1 = time; def.l1 = null; }
                     else { def.l1 = logical; def.t1 = null; }
                 } else if (tvChannelDragState.handle === 'h2') {
-                    def.p2 = Number(price);
+                    if (!lockSlope) def.p2 = Number(price);
                     if (time != null) { def.t2 = time; def.l2 = null; }
                     else { def.l2 = logical; def.t2 = null; }
                 }
@@ -16422,10 +16477,34 @@ def index():
                     }, def.labelPosition, width, height)));
                 }
                 if (interactive) {
-                    [
-                        { x1: screen.x1, y1: screen.y1, x2: screen.x2, y2: screen.y2 },
-                        { x1: screen.px1, y1: screen.py1, x2: screen.px2, y2: screen.py2 },
-                    ].forEach(line => {
+                    const hitSegments = [
+                        { kind: 'base',     x1: screen.x1, y1: screen.y1, x2: screen.x2, y2: screen.y2 },
+                        { kind: 'parallel', x1: screen.px1, y1: screen.py1, x2: screen.px2, y2: screen.py2 },
+                    ];
+                    if (def.showMidline !== false) {
+                        hitSegments.push({ kind: 'mid', x1: screen.mx1, y1: screen.my1, x2: screen.mx2, y2: screen.my2 });
+                    }
+                    if (screen.extendRight) {
+                        hitSegments.push({
+                            kind: 'base',
+                            x1: screen.extendRight.baseFromX, y1: screen.extendRight.baseFromY,
+                            x2: screen.extendRight.toX, y2: screen.extendRight.baseToY,
+                        });
+                        hitSegments.push({
+                            kind: 'parallel',
+                            x1: screen.extendRight.parallelFromX, y1: screen.extendRight.parallelFromY,
+                            x2: screen.extendRight.toX, y2: screen.extendRight.parallelToY,
+                        });
+                        if (def.showMidline !== false) {
+                            hitSegments.push({
+                                kind: 'mid',
+                                x1: screen.extendRight.midFromX, y1: screen.extendRight.midFromY,
+                                x2: screen.extendRight.toX, y2: screen.extendRight.midToY,
+                            });
+                        }
+                    }
+                    const isSelectedChannel = def.id === tvSelectedDrawingId;
+                    hitSegments.forEach(line => {
                         const hit = createSvgEl('line', {
                             class: 'tv-drawing-hitbox',
                             x1: line.x1,
@@ -16434,7 +16513,14 @@ def index():
                             y2: line.y2,
                             'stroke-width': Math.max(12, strokeWidth + 8),
                         });
-                        bindSelect(hit);
+                        if (isSelectedChannel) {
+                            hit.style.cursor = 'ns-resize';
+                            hit.addEventListener('mousedown', event => {
+                                tvBeginChannelSegmentDrag(event, def, line.kind);
+                            });
+                        } else {
+                            bindSelect(hit);
+                        }
                         group.appendChild(hit);
                     });
                     if (def.id === tvSelectedDrawingId) {
