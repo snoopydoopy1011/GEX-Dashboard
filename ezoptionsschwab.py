@@ -9764,6 +9764,25 @@ def index():
             white-space: nowrap;
             user-select: none;
         }
+        .tv-timeframe-select {
+            height: 24px;
+            min-width: 72px;
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            background: var(--bg-1);
+            color: var(--fg-1);
+            font-size: 11px;
+            font-weight: 600;
+            line-height: 1.35;
+            padding: 2px 22px 2px 8px;
+            cursor: pointer;
+        }
+        .tv-timeframe-select:hover,
+        .tv-timeframe-select:focus {
+            color: var(--fg-0);
+            border-color: var(--accent);
+            outline: none;
+        }
         /* Indicator legend — inside canvas, pointer-events none so it doesn't block */
         .tv-indicator-legend {
             position: absolute;
@@ -11637,12 +11656,35 @@ def index():
             } catch (e) {}
         }
 
+        function syncTimeframeControls(value) {
+            const selects = [
+                document.getElementById('timeframe'),
+                document.getElementById('tv-toolbar-timeframe'),
+            ].filter(Boolean);
+            const nextValue = String(value || (selects[0] && selects[0].value) || '1');
+            selects.forEach(select => {
+                const hasOption = Array.from(select.options || []).some(option => option.value === nextValue);
+                if (hasOption && select.value !== nextValue) select.value = nextValue;
+            });
+        }
+
         function applyPersistedTimeframePreference() {
             const select = document.getElementById('timeframe');
             const persisted = getPersistedTimeframe();
             if (!select || !persisted) return;
             const hasOption = Array.from(select.options || []).some(option => option.value === persisted);
-            if (hasOption) select.value = persisted;
+            if (hasOption) {
+                select.value = persisted;
+                syncTimeframeControls(persisted);
+            }
+        }
+
+        function handleTimeframeChange(value) {
+            syncTimeframeControls(value);
+            persistSelectedTimeframe(value);
+            tvForceSessionFocus = true;
+            updateData();
+            startCandleCloseTimer();
         }
 
         // List of Plotly chart div IDs that carry a current-price line shape
@@ -12790,10 +12832,7 @@ def index():
 
         // Coloring mode listeners
         document.getElementById('timeframe').addEventListener('change', function() {
-            persistSelectedTimeframe(this.value);
-            tvForceSessionFocus = true;
-            updateData();
-            startCandleCloseTimer();
+            handleTimeframeChange(this.value);
         });
         document.getElementById('coloring_mode').addEventListener('change', updateData);
         document.getElementById('exposure_metric').addEventListener('change', updateData);
@@ -16813,6 +16852,24 @@ def index():
             volumeStatusEl.title = 'Intrabar volume is confirmed from 1-minute CHART_EQUITY bars. Quote ticks do not carry live volume.';
             addRight(volumeStatusEl);
 
+            const sourceTimeframe = document.getElementById('timeframe');
+            if (sourceTimeframe) {
+                const toolbarTimeframe = document.createElement('select');
+                toolbarTimeframe.id = 'tv-toolbar-timeframe';
+                toolbarTimeframe.className = 'tv-timeframe-select';
+                toolbarTimeframe.title = 'Candle timeframe';
+                toolbarTimeframe.setAttribute('aria-label', 'Candle timeframe');
+                Array.from(sourceTimeframe.options || []).forEach(option => {
+                    toolbarTimeframe.appendChild(option.cloneNode(true));
+                });
+                toolbarTimeframe.value = sourceTimeframe.value;
+                toolbarTimeframe.addEventListener('change', function() {
+                    handleTimeframeChange(this.value);
+                });
+                addRight(toolbarTimeframe);
+                syncTimeframeControls(sourceTimeframe.value);
+            }
+
             // Candle close timer
             const timerEl = document.createElement('span');
             timerEl.id = 'candle-close-timer';
@@ -20726,7 +20783,10 @@ def index():
             const preferLocalIndicatorState = !!options.preferLocalIndicatorState;
             const settingsSchemaVersion = Number(settings.settings_schema_version || 0);
             if (settings.ticker) document.getElementById('ticker').value = settings.ticker;
-            if (settings.timeframe) document.getElementById('timeframe').value = settings.timeframe;
+            if (settings.timeframe) {
+                document.getElementById('timeframe').value = settings.timeframe;
+                syncTimeframeControls(settings.timeframe);
+            }
             if (settings.strike_range) {
                 document.getElementById('strike_range').value = settings.strike_range;
                 document.getElementById('strike_range_value').textContent = settings.strike_range + '%';
