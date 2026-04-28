@@ -5448,6 +5448,14 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         sentiment = 0.0
         if total_vol > 0:
             sentiment = (call_vol - put_vol) / total_vol  # -1..+1
+        call_voi = (call_vol / call_oi) if call_oi > 0 else None
+        put_voi  = (put_vol  / put_oi)  if put_oi  > 0 else None
+        voi_call_share = None
+        if call_voi is not None and put_voi is not None and (call_voi + put_voi) > 0:
+            voi_call_share = call_voi / (call_voi + put_voi)
+        voi_cp_ratio = (call_voi / put_voi) if (call_voi is not None and put_voi not in (None, 0)) else None
+        total_oi = call_oi + put_oi
+        voi_total = (total_vol / total_oi) if total_oi > 0 else None
         out['chain_activity'] = {
             'call_oi': call_oi,
             'put_oi': put_oi,
@@ -5457,6 +5465,11 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
             'vol_call_share': (call_vol / total_vol) if total_vol > 0 else None,
             'oi_cp_ratio':  (call_oi  / put_oi)  if put_oi  > 0 else None,
             'vol_cp_ratio': (call_vol / put_vol) if put_vol > 0 else None,
+            'call_voi': call_voi,
+            'put_voi':  put_voi,
+            'voi_call_share': voi_call_share,
+            'voi_cp_ratio':   voi_cp_ratio,
+            'voi_total':      voi_total,
             'sentiment':    sentiment,
         }
     except Exception as e:
@@ -11308,6 +11321,14 @@ def index():
                                 <div class="rail-bar-split" data-met="vol_split">—</div>
                             </div>
                             <span class="num" data-met="vol_cp">—</span>
+                        </div>
+                        <div class="rail-bar rail-bar-rich">
+                            <span>V/OI</span>
+                            <div>
+                                <div class="rail-bar-track"><div class="rail-bar-fill" data-met="voi_fill"></div></div>
+                                <div class="rail-bar-split" data-met="voi_split">—</div>
+                            </div>
+                            <span class="num" data-met="voi_cp">—</span>
                         </div>
                     </div>
                     <div class="rail-card" id="rail-card-iv">
@@ -18704,6 +18725,14 @@ def index():
                             '</div>' +
                             '<span class="num" data-met="vol_cp">—</span>' +
                         '</div>' +
+                        '<div class="rail-bar rail-bar-rich">' +
+                            '<span>V/OI</span>' +
+                            '<div>' +
+                                '<div class="rail-bar-track"><div class="rail-bar-fill" data-met="voi_fill"></div></div>' +
+                                '<div class="rail-bar-split" data-met="voi_split">—</div>' +
+                            '</div>' +
+                            '<span class="num" data-met="voi_cp">—</span>' +
+                        '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-iv">' +
                         '<div class="rail-card-header-row">' +
@@ -21292,6 +21321,7 @@ def index():
             const biasEl = document.querySelector('#rail-card-activity [data-met="activity_bias"]');
             const oiFill  = document.querySelector('#rail-card-activity [data-met="oi_fill"]');
             const volFill = document.querySelector('#rail-card-activity [data-met="vol_fill"]');
+            const voiFill = document.querySelector('#rail-card-activity [data-met="voi_fill"]');
             const setSplit = (key, share, callValue, putValue) => {
                 if (share == null || !isFinite(share)) {
                     _setMet(key, '—');
@@ -21307,6 +21337,8 @@ def index():
                 _setMet('vol_cp', '—');
                 _setMet('oi_split', '—');
                 _setMet('vol_split', '—');
+                _setMet('voi_cp', '—');
+                _setMet('voi_split', '—');
                 if (biasEl) biasEl.classList.remove('pos', 'neg');
                 if (oiFill) {
                     oiFill.style.width = '0%';
@@ -21315,6 +21347,10 @@ def index():
                 if (volFill) {
                     volFill.style.width = '0%';
                     volFill.classList.remove('pos', 'neg');
+                }
+                if (voiFill) {
+                    voiFill.style.width = '0%';
+                    voiFill.classList.remove('pos', 'neg');
                 }
                 return;
             }
@@ -21352,6 +21388,19 @@ def index():
                 volFill.style.width = fillPct(ca.vol_call_share) + '%';
                 volFill.classList.toggle('pos', ca.vol_call_share != null && ca.vol_call_share >= 0.5);
                 volFill.classList.toggle('neg', ca.vol_call_share != null && ca.vol_call_share < 0.5);
+            }
+            const fmt2 = v => (v == null || !isFinite(v)) ? '—' : v.toFixed(2);
+            const callVoi = ca.call_voi, putVoi = ca.put_voi;
+            if (callVoi == null && putVoi == null) {
+                _setMet('voi_split', '—');
+            } else {
+                _setMet('voi_split', `C ${fmt2(callVoi)} | P ${fmt2(putVoi)}`);
+            }
+            _setMet('voi_cp', ca.voi_cp_ratio == null ? '—' : ('C/P ' + ca.voi_cp_ratio.toFixed(2)));
+            if (voiFill) {
+                voiFill.style.width = fillPct(ca.voi_call_share) + '%';
+                voiFill.classList.toggle('pos', ca.voi_call_share != null && ca.voi_call_share >= 0.5);
+                voiFill.classList.toggle('neg', ca.voi_call_share != null && ca.voi_call_share < 0.5);
             }
         }
 
