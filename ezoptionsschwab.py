@@ -306,6 +306,19 @@ def calculate_expected_move_snapshot(calls, puts, spot_price, selected_expiries=
         'lower': float(spot_price - expected_move),
     }
 
+
+def _coerce_positive_float(value):
+    try:
+        out = float(value)
+        return out if math.isfinite(out) and out > 0 else None
+    except Exception:
+        return None
+
+
+def _expected_move_cache_key(ticker, trading_date, selected_expiries=None):
+    expiries = tuple(sorted(str(x) for x in (selected_expiries or []) if x))
+    return (ticker or '__anon__', trading_date, expiries)
+
 # Function to store centroid data
 def store_centroid_data(ticker, price, calls, puts):
     """Store call and put centroid data for 5-minute intervals during market hours only"""
@@ -4882,7 +4895,7 @@ _SESSION_IV_BASELINE = {}
 _SESSION_EM_BASELINE = {}
 
 
-def get_pinned_expected_move(calls, puts, spot_price, ticker, selected_expiries=None):
+def get_pinned_expected_move(calls, puts, spot_price, ticker, selected_expiries=None, open_spot=None):
     """Return an Expected Move snapshot pinned at the 09:30 ET open.
 
     Pre-open (or pre-cache) returns a fresh dynamic snapshot so the card isn't
@@ -4897,20 +4910,27 @@ def get_pinned_expected_move(calls, puts, spot_price, ticker, selected_expiries=
     now_et = datetime.now(et)
     today = now_et.date()
     rth_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-    key = (ticker or '__anon__', today)
+    key = _expected_move_cache_key(ticker, today, selected_expiries)
 
     cached = _SESSION_EM_BASELINE.get(key)
     if cached:
         return cached
 
+    pin_at_open = now_et >= rth_open
+    anchor_spot = _coerce_positive_float(open_spot) if pin_at_open else None
+    if anchor_spot is None:
+        anchor_spot = _coerce_positive_float(spot_price)
+    if anchor_spot is None:
+        return None
+
     snapshot = calculate_expected_move_snapshot(
-        calls, puts, spot_price, selected_expiries=selected_expiries
+        calls, puts, anchor_spot, selected_expiries=selected_expiries
     )
     if not snapshot:
         return None
 
-    snapshot['open_spot'] = float(spot_price)
-    snapshot['pinned'] = now_et >= rth_open
+    snapshot['open_spot'] = float(anchor_spot)
+    snapshot['pinned'] = pin_at_open
 
     if snapshot['pinned']:
         _SESSION_EM_BASELINE[key] = snapshot
@@ -4920,6 +4940,46 @@ def get_pinned_expected_move(calls, puts, spot_price, ticker, selected_expiries=
             _SESSION_EM_BASELINE.pop(k, None)
 
     return snapshot
+
+
+def apply_expected_move_snapshot_to_key_levels(levels, snapshot):
+    """Return key levels with EM entries aligned to the pinned expected-move snapshot."""
+    if not isinstance(levels, dict) or not isinstance(snapshot, dict):
+        return levels
+    move = _coerce_positive_float(snapshot.get('move'))
+    anchor = _coerce_positive_float(snapshot.get('open_spot'))
+    if move is None:
+        return levels
+    if anchor is None:
+        anchor = _coerce_positive_float(snapshot.get('atm_strike'))
+    if anchor is None:
+        upper = _coerce_positive_float(snapshot.get('upper'))
+        lower = _coerce_positive_float(snapshot.get('lower'))
+        if upper is None or lower is None:
+            return levels
+        anchor = (upper + lower) / 2.0
+    out = dict(levels)
+    out['em_upper'] = {'price': float(anchor + move), 'move': float(move)}
+    out['em_lower'] = {'price': float(anchor - move), 'move': float(move)}
+    out['em_upper_2'] = {'price': float(anchor + 2 * move), 'move': float(move)}
+    out['em_lower_2'] = {'price': float(anchor - 2 * move), 'move': float(move)}
+    return out
+
+
+def apply_expected_move_snapshot_to_stats(stats, snapshot):
+    """Align trader-stat EM fields with the same pinned snapshot used by chart lines."""
+    if not isinstance(stats, dict) or not isinstance(snapshot, dict):
+        return stats
+    move = _coerce_positive_float(snapshot.get('move'))
+    anchor = _coerce_positive_float(snapshot.get('open_spot'))
+    if move is None or anchor is None:
+        return stats
+    stats = dict(stats)
+    stats['em_move'] = float(move)
+    stats['em_upper'] = float(anchor + move)
+    stats['em_lower'] = float(anchor - move)
+    stats['em_pct'] = round(move / anchor * 100, 2) if anchor else stats.get('em_pct')
+    return stats
 
 def _compute_session_deltas(ticker, net_gex, net_dex, scope_id=None):
     if ticker is None or net_gex is None:
@@ -13493,6 +13553,13 @@ def index():
             return out;
         }
 
+        function getTVAvwapAnchorPrice(anchorTime) {
+            const data = calcAVwap(getTVVwapSourceCandles(), anchorTime);
+            const first = Array.isArray(data) && data.length ? data[0] : null;
+            const value = Number(first && first.value);
+            return Number.isFinite(value) ? value : null;
+        }
+
         function formatTVAVwapAutoLabel(anchorTime) {
             const t = Number(anchorTime);
             if (!Number.isFinite(t)) return 'AVWAP';
@@ -16593,15 +16660,19 @@ def index():
             if (def.type === 'avwap') {
                 const anchorX = tvResolveDrawingAnchorX(def.anchorTime, null, null);
                 if (anchorX == null || Number.isNaN(anchorX)) return null;
-                const anchorPrice = Number(def.anchorPrice);
-                const anchorY = Number.isFinite(anchorPrice) ? tvCandleSeries.priceToCoordinate(anchorPrice) : null;
                 // Last-point coordinates for label placement
                 const points = tvIndicatorDataCache['avwap:' + def.id];
-                let endX = null, endY = null;
+                let anchorY = null, endX = null, endY = null;
                 if (Array.isArray(points) && points.length && Array.isArray(points[0]) && points[0].length) {
+                    const first = points[0][0];
+                    anchorY = tvCandleSeries.priceToCoordinate(first.value);
                     const last = points[0][points[0].length - 1];
                     endX = tvResolveDrawingAnchorX(last.time, null, null);
                     endY = tvCandleSeries.priceToCoordinate(last.value);
+                }
+                if (!Number.isFinite(anchorY)) {
+                    const anchorPrice = Number(def.anchorPrice);
+                    anchorY = Number.isFinite(anchorPrice) ? tvCandleSeries.priceToCoordinate(anchorPrice) : null;
                 }
                 return {
                     type: 'avwap',
@@ -17404,10 +17475,11 @@ def index():
             if (tvDrawMode === 'avwap') {
                 if (!clickTime) return;
                 const anchorTime = snapTVAVwapAnchorTime(clickTime);
+                const anchorPrice = getTVAvwapAnchorPrice(anchorTime);
                 finishTVDrawingCreation({
                     type: 'avwap',
                     anchorTime,
-                    anchorPrice: price,
+                    anchorPrice: Number.isFinite(anchorPrice) ? anchorPrice : price,
                     label: formatTVAVwapAutoLabel(anchorTime),
                     color: drawColor,
                     lineWidth: 2,
@@ -22570,12 +22642,20 @@ def update():
             quote_response = client.quote(quote_ticker)
             if not quote_response.ok:
                 raise Exception(f"Failed to fetch quote for display: {quote_response.status_code} {quote_response.reason}")
+            quote_data = quote_response.json()
+            ticker_data = quote_data.get(quote_ticker, {})
+            quote = ticker_data.get('quote', {})
+            quote_open = (
+                quote.get('openPrice')
+                or quote.get('regularMarketOpen')
+                or quote.get('open')
+            )
 
             # --- Expected Move Range pinned at 09:30 ET open ---
             expected_move_range = None
             live_straddle = None
             pinned_snapshot = get_pinned_expected_move(
-                calls, puts, S, quote_ticker, selected_expiries=expiry_dates
+                calls, puts, S, quote_ticker, selected_expiries=expiry_dates, open_spot=quote_open
             )
             if pinned_snapshot:
                 expected_move_range = {
@@ -22600,10 +22680,6 @@ def update():
                 }
 
             if quote_response.ok:
-                quote_data = quote_response.json()
-                ticker_data = quote_data.get(quote_ticker, {})
-                quote = ticker_data.get('quote', {})
-
                 # compute high/low diffs relative to current price
                 high_price = quote.get('highPrice', S)
                 low_price  = quote.get('lowPrice', S)
@@ -22767,7 +22843,38 @@ def update_price():
         key_levels = None
         top_oi = {'calls': [], 'puts': [], 'both': []}
         S_for_panel = cached.get('S')
+        quote_ticker = "$SPX" if ticker == "MARKET" else ("SPY" if ticker == "MARKET2" else ticker)
+        pinned_em_snapshot = None
+        quote_open = None
         if calls is not None and puts is not None and S_for_panel is not None:
+            try:
+                cached_em_key = _expected_move_cache_key(
+                    quote_ticker,
+                    datetime.now(pytz.timezone('US/Eastern')).date(),
+                    selected_expiries,
+                )
+                cached_em = _SESSION_EM_BASELINE.get(cached_em_key)
+                if cached_em:
+                    pinned_em_snapshot = cached_em
+                else:
+                    quote_response = client.quote(quote_ticker)
+                    if quote_response.ok:
+                        quote_data = quote_response.json()
+                        ticker_data = quote_data.get(quote_ticker, {})
+                        quote = ticker_data.get('quote', {})
+                        quote_open = (
+                            quote.get('openPrice')
+                            or quote.get('regularMarketOpen')
+                            or quote.get('open')
+                        )
+                    pinned_em_snapshot = get_pinned_expected_move(
+                        calls, puts, S_for_panel, quote_ticker,
+                        selected_expiries=selected_expiries,
+                        open_spot=quote_open,
+                    )
+            except Exception as e:
+                print(f"[expected_move] pinned chart EM build failed: {e}")
+                pinned_em_snapshot = None
             try:
                 # Keep historical intraday bubbles in sync with the price-chart
                 # refresh loop as well as the heavier /update loop. This avoids
@@ -22790,6 +22897,7 @@ def update_price():
                     selected_expiries=selected_expiries,
                     strike_range=strike_range,
                 )
+                key_levels = apply_expected_move_snapshot_to_key_levels(key_levels, pinned_em_snapshot)
             except Exception as e:
                 print(f"[key_levels] build failed: {e}")
                 key_levels = None
@@ -22816,6 +22924,7 @@ def update_price():
                     gate_strike_alerts=gate_alerts,
                     scope_id=full_scope_id,
                 )
+                trader_stats = apply_expected_move_snapshot_to_stats(trader_stats, pinned_em_snapshot)
             except Exception as e:
                 print(f"[trader_stats] build failed: {e}")
                 trader_stats = None
@@ -22839,6 +22948,12 @@ def update_price():
                         selected_expiries=[nearest_exp],
                         strike_range=strike_range,
                     )
+                    pinned_em_0dte = get_pinned_expected_move(
+                        c0, p0, S_for_panel, quote_ticker,
+                        selected_expiries=[nearest_exp],
+                        open_spot=quote_open,
+                    )
+                    key_levels_0dte = apply_expected_move_snapshot_to_key_levels(key_levels_0dte, pinned_em_0dte)
                     stats_0dte = compute_trader_stats(
                         c0, p0, S_for_panel,
                         strike_range=strike_range,
@@ -22849,6 +22964,7 @@ def update_price():
                         gate_strike_alerts=gate_alerts,
                         scope_id=nearest_scope_id,
                     )
+                    stats_0dte = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
             except Exception as e:
                 print(f"[0dte_bundle] build failed: {e}")
 
