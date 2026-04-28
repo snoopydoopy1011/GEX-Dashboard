@@ -1058,6 +1058,86 @@ def aggregate_by_strike(df, value_columns, strike_interval):
     
     return aggregated
 
+_HV_DAILY_CACHE = {}
+
+
+def compute_historical_volatility(ticker, window=20):
+    """
+    Annualized realized volatility from log returns of the last `window` daily closes.
+    Returns dict { 'hv_20': float|None, 'samples': int, 'as_of': iso_date|None }.
+    Cached per (ticker, ET trading date) to avoid re-pulling daily history on every tick.
+    """
+    if not ticker:
+        return {'hv_20': None, 'samples': 0, 'as_of': None}
+    if client is None:
+        return {'hv_20': None, 'samples': 0, 'as_of': None}
+
+    sym = ticker
+    if sym == "MARKET":
+        sym = "$SPX"
+    elif sym == "MARKET2":
+        sym = "SPY"
+
+    try:
+        today_et = datetime.now(pytz.timezone('US/Eastern')).date()
+    except Exception:
+        today_et = datetime.utcnow().date()
+
+    cache_key = (sym, today_et, int(window))
+    cached = _HV_DAILY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    out = {'hv_20': None, 'samples': 0, 'as_of': None}
+    try:
+        response = client.price_history(
+            symbol=sym,
+            periodType="year",
+            period=1,
+            frequencyType="daily",
+            frequency=1,
+            needExtendedHoursData=False,
+        )
+        if not response.ok:
+            _HV_DAILY_CACHE[cache_key] = out
+            return out
+        data = response.json() or {}
+        candles = list(data.get('candles') or [])
+        if len(candles) < 2:
+            _HV_DAILY_CACHE[cache_key] = out
+            return out
+        candles.sort(key=lambda x: x.get('datetime', 0))
+        closes = [float(c['close']) for c in candles if c.get('close') is not None and c.get('close') > 0]
+        if len(closes) < 2:
+            _HV_DAILY_CACHE[cache_key] = out
+            return out
+        # Use last (window+1) closes -> window log returns
+        tail = closes[-(int(window) + 1):]
+        if len(tail) < 2:
+            _HV_DAILY_CACHE[cache_key] = out
+            return out
+        log_returns = np.diff(np.log(np.asarray(tail, dtype=float)))
+        if log_returns.size < 2:
+            _HV_DAILY_CACHE[cache_key] = out
+            return out
+        # Sample std (ddof=1) annualized by sqrt(252)
+        hv = float(np.std(log_returns, ddof=1) * math.sqrt(252))
+        last_ts = candles[-1].get('datetime')
+        as_of = None
+        if last_ts is not None:
+            try:
+                as_of = datetime.fromtimestamp(last_ts / 1000.0, pytz.timezone('US/Eastern')).date().isoformat()
+            except Exception:
+                as_of = None
+        out = {'hv_20': hv, 'samples': int(log_returns.size), 'as_of': as_of}
+    except Exception as e:
+        print(f"[compute_historical_volatility] {ticker} failed: {e}")
+        out = {'hv_20': None, 'samples': 0, 'as_of': None}
+
+    _HV_DAILY_CACHE[cache_key] = out
+    return out
+
+
 def calculate_time_to_expiration(expiry_date):
     """
     Calculate time to expiration in years using Eastern Time.
@@ -5247,6 +5327,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'session_deltas': None,
         'level_deltas':   None,
         'iv_context':     None,
+        'rv_iv':          None,
         'flow_pulse':     [],
         'flow_pulse_summary': {'label': 'mixed', 'score': 0.0, 'weighted_premium': 0.0, 'gross_premium': 0.0, 'hedge_share': 0.0},
     }
@@ -5377,6 +5458,36 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     except Exception as e:
         print(f"[compute_trader_stats] iv_context failed: {e}")
         out['iv_context'] = None
+
+    try:
+        hv_block = compute_historical_volatility(ticker, window=20) if ticker else {'hv_20': None, 'samples': 0, 'as_of': None}
+        atm_iv_val = None
+        if isinstance(out.get('iv_context'), dict):
+            atm_iv_val = out['iv_context'].get('atm_iv')
+        hv_val = hv_block.get('hv_20') if isinstance(hv_block, dict) else None
+        if hv_val is not None and atm_iv_val is not None:
+            spread = atm_iv_val - hv_val
+            # 1pt fair band: |spread| < 0.01 in decimal vol units
+            if abs(spread) < 0.01:
+                bias = 'fair'
+            elif spread > 0:
+                bias = 'iv_rich'
+            else:
+                bias = 'iv_cheap'
+        else:
+            spread = None
+            bias = None
+        out['rv_iv'] = {
+            'hv_20':   hv_val,
+            'atm_iv':  atm_iv_val,
+            'spread':  spread,
+            'bias':    bias,
+            'samples': hv_block.get('samples') if isinstance(hv_block, dict) else 0,
+            'as_of':   hv_block.get('as_of') if isinstance(hv_block, dict) else None,
+        }
+    except Exception as e:
+        print(f"[compute_trader_stats] rv_iv failed: {e}")
+        out['rv_iv'] = None
 
     try:
         out['flow_pulse'] = build_flow_pulse_snapshot(
@@ -8331,6 +8442,17 @@ def index():
         }
         .rail-iv-stat-value.pos { color: var(--call); }
         .rail-iv-stat-value.neg { color: var(--put); }
+        .rail-iv-rv {
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--border);
+            color: var(--fg-2);
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: 0.02em;
+        }
+        .rail-iv-rv.pos { color: var(--call); }
+        .rail-iv-rv.neg { color: var(--put); }
         .rail-pulse-list {
             display: flex;
             flex-direction: column;
@@ -11169,6 +11291,7 @@ def index():
                             <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>
                             <div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
                         </div>
+                        <div class="rail-iv-rv" data-met="rv_iv_line">HV20 — · ATM IV — · IV —</div>
                     </div>
                     <div class="rail-card" id="rail-card-centroid">
                         <div class="rail-card-header-row">
@@ -18318,6 +18441,7 @@ def index():
                             '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>' +
                             '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>' +
                         '</div>' +
+                        '<div class="rail-iv-rv" data-met="rv_iv_line">HV20 — · ATM IV — · IV —</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-centroid">' +
                         '<div class="rail-card-header-row">' +
@@ -20826,6 +20950,30 @@ def index():
             const fmtPct = value => (value == null || !isFinite(value)) ? '—' : (value * 100).toFixed(1) + '%';
             const fmtPts = value => (value == null || !isFinite(value)) ? '—' : ((value > 0 ? '+' : '') + (value * 100).toFixed(1) + ' pts');
             const iv = stats && stats.iv_context;
+            const rv = stats && stats.rv_iv;
+            const renderRvLine = () => {
+                if (!rv || (rv.hv_20 == null && rv.atm_iv == null)) {
+                    _setMet('rv_iv_line', 'HV20 — · ATM IV — · IV —');
+                    document.querySelectorAll('[data-met="rv_iv_line"]').forEach(el => {
+                        el.classList.remove('pos', 'neg');
+                    });
+                    return;
+                }
+                const hvTxt = fmtPct(rv.hv_20);
+                const ivTxt = fmtPct(rv.atm_iv);
+                let spreadTxt = '—';
+                if (rv.spread != null && isFinite(rv.spread)) {
+                    const pts = rv.spread * 100;
+                    const sign = pts > 0 ? '+' : '';
+                    spreadTxt = sign + pts.toFixed(1) + ' pts';
+                }
+                _setMet('rv_iv_line', 'HV20 ' + hvTxt + ' · ATM IV ' + ivTxt + ' · IV ' + spreadTxt);
+                document.querySelectorAll('[data-met="rv_iv_line"]').forEach(el => {
+                    el.classList.remove('pos', 'neg');
+                    if (rv.bias === 'iv_rich') el.classList.add('pos');
+                    else if (rv.bias === 'iv_cheap') el.classList.add('neg');
+                });
+            };
             if (!iv) {
                 _setMet('iv_expiry', 'Near expiry');
                 _setMet('iv_atm', '—');
@@ -20839,6 +20987,7 @@ def index():
                 _setMet('iv_skew_change', '—');
                 setTone('iv_skew_spread', null);
                 setTone('iv_skew_change', null);
+                renderRvLine();
                 return;
             }
             _setMet('iv_expiry', iv.expiry_text || 'Near expiry');
@@ -20853,6 +21002,7 @@ def index():
             _setMet('iv_skew_change', fmtPts(iv.skew_change));
             setTone('iv_skew_spread', iv.skew_spread);
             setTone('iv_skew_change', iv.skew_change);
+            renderRvLine();
         }
 
         function renderChainActivity(stats) {
