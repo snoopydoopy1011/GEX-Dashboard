@@ -319,6 +319,98 @@ def _expected_move_cache_key(ticker, trading_date, selected_expiries=None):
     expiries = tuple(sorted(str(x) for x in (selected_expiries or []) if x))
     return (ticker or '__anon__', trading_date, expiries)
 
+
+def get_stored_open_expected_move_snapshot(
+    ticker, trading_date=None, open_spot=None, selected_expiries=None, calls=None, puts=None
+):
+    """Return the first stored RTH expected-move row for a ticker/date.
+
+    The option chain is a live quote source. After the open, recomputing the
+    straddle from that chain gives a live straddle, not the 09:30 ET straddle.
+    interval_session_data stores the intraday EM snapshots, so the first RTH row
+    is the closest persisted representation of the open-pinned move.
+    """
+    if not ticker:
+        return None
+
+    et = pytz.timezone('US/Eastern')
+    if trading_date is None:
+        trading_date = datetime.now(et).date()
+    if hasattr(trading_date, 'strftime'):
+        date_text = trading_date.strftime('%Y-%m-%d')
+        date_obj = trading_date
+    else:
+        date_text = str(trading_date)
+        try:
+            date_obj = datetime.strptime(date_text, '%Y-%m-%d').date()
+        except Exception:
+            date_obj = datetime.now(et).date()
+
+    market_open = et.localize(datetime.combine(date_obj, datetime.min.time()).replace(hour=9, minute=30))
+    market_close = et.localize(datetime.combine(date_obj, datetime.min.time()).replace(hour=16, minute=0))
+
+    try:
+        with closing(sqlite_connect()) as conn:
+            with closing(conn.cursor()) as cursor:
+                cursor.execute('''
+                    SELECT timestamp, price, expected_move, expected_move_upper, expected_move_lower
+                    FROM interval_session_data
+                    WHERE ticker = ?
+                      AND date = ?
+                      AND timestamp >= ?
+                      AND timestamp <= ?
+                      AND expected_move IS NOT NULL
+                      AND expected_move > 0
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                ''', (ticker, date_text, int(market_open.timestamp()), int(market_close.timestamp())))
+                row = cursor.fetchone()
+    except Exception as e:
+        print(f"[expected_move] stored open lookup failed: {e}")
+        return None
+
+    if not row:
+        return None
+
+    timestamp, row_price, move, row_upper, row_lower = row
+    move = _coerce_positive_float(move)
+    if move is None:
+        return None
+
+    anchor = _coerce_positive_float(open_spot) or _coerce_positive_float(row_price)
+    upper = float(anchor + move) if anchor is not None else _coerce_positive_float(row_upper)
+    lower = float(anchor - move) if anchor is not None else _coerce_positive_float(row_lower)
+    if upper is None or lower is None:
+        return None
+
+    expiry = None
+    atm_strike = None
+    if calls is not None and puts is not None:
+        stored_contract = _select_expected_move_contracts(
+            calls, puts, anchor or row_price, selected_expiries=None
+        )
+        contract = _select_expected_move_contracts(
+            calls, puts, anchor or row_price, selected_expiries=selected_expiries
+        )
+        if selected_expiries and stored_contract and contract:
+            if stored_contract.get('expiry') != contract.get('expiry'):
+                return None
+        if contract:
+            expiry = contract.get('expiry')
+            atm_strike = contract.get('atm_strike')
+
+    return {
+        'expiry': expiry,
+        'atm_strike': float(atm_strike) if atm_strike is not None else None,
+        'move': float(move),
+        'upper': float(upper),
+        'lower': float(lower),
+        'open_spot': float(anchor) if anchor is not None else float((upper + lower) / 2.0),
+        'pinned': True,
+        'source': 'stored_open',
+        'timestamp': int(timestamp),
+    }
+
 # Function to store centroid data
 def store_centroid_data(ticker, price, calls, puts):
     """Store call and put centroid data for 5-minute intervals during market hours only"""
@@ -4922,6 +5014,22 @@ def get_pinned_expected_move(calls, puts, spot_price, ticker, selected_expiries=
         anchor_spot = _coerce_positive_float(spot_price)
     if anchor_spot is None:
         return None
+
+    if pin_at_open:
+        stored_snapshot = get_stored_open_expected_move_snapshot(
+            ticker,
+            trading_date=today,
+            open_spot=anchor_spot,
+            selected_expiries=selected_expiries,
+            calls=calls,
+            puts=puts,
+        )
+        if stored_snapshot:
+            _SESSION_EM_BASELINE[key] = stored_snapshot
+            stale = [k for k in _SESSION_EM_BASELINE if k[1] < today - timedelta(days=1)]
+            for k in stale:
+                _SESSION_EM_BASELINE.pop(k, None)
+            return stored_snapshot
 
     snapshot = calculate_expected_move_snapshot(
         calls, puts, anchor_spot, selected_expiries=selected_expiries
@@ -22655,7 +22763,7 @@ def update():
             expected_move_range = None
             live_straddle = None
             pinned_snapshot = get_pinned_expected_move(
-                calls, puts, S, quote_ticker, selected_expiries=expiry_dates, open_spot=quote_open
+                calls, puts, S, ticker, selected_expiries=expiry_dates, open_spot=quote_open
             )
             if pinned_snapshot:
                 expected_move_range = {
@@ -22663,8 +22771,12 @@ def update():
                     'upper': round(pinned_snapshot['upper'], 2),
                     'move': round(pinned_snapshot['move'], 2),
                     'open_spot': round(pinned_snapshot['open_spot'], 2),
-                    'atm_strike': round(pinned_snapshot['atm_strike'], 2),
+                    'atm_strike': (
+                        round(pinned_snapshot['atm_strike'], 2)
+                        if pinned_snapshot.get('atm_strike') is not None else None
+                    ),
                     'pinned': bool(pinned_snapshot.get('pinned')),
+                    'source': pinned_snapshot.get('source'),
                 }
 
             # --- Live ATM straddle (recomputed every tick) ---
@@ -22849,7 +22961,7 @@ def update_price():
         if calls is not None and puts is not None and S_for_panel is not None:
             try:
                 cached_em_key = _expected_move_cache_key(
-                    quote_ticker,
+                    ticker,
                     datetime.now(pytz.timezone('US/Eastern')).date(),
                     selected_expiries,
                 )
@@ -22868,7 +22980,7 @@ def update_price():
                             or quote.get('open')
                         )
                     pinned_em_snapshot = get_pinned_expected_move(
-                        calls, puts, S_for_panel, quote_ticker,
+                        calls, puts, S_for_panel, ticker,
                         selected_expiries=selected_expiries,
                         open_spot=quote_open,
                     )
@@ -22949,7 +23061,7 @@ def update_price():
                         strike_range=strike_range,
                     )
                     pinned_em_0dte = get_pinned_expected_move(
-                        c0, p0, S_for_panel, quote_ticker,
+                        c0, p0, S_for_panel, ticker,
                         selected_expiries=[nearest_exp],
                         open_spot=quote_open,
                     )
