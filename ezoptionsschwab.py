@@ -5259,6 +5259,279 @@ def compute_iv_context(calls, puts, S, ticker=None):
     return out
 
 
+def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, regime=None, base_size=10):
+    """Rank near-ATM call/put candidates for discretionary 0-1DTE entries."""
+    empty = {
+        'status': 'unavailable',
+        'expiry_text': 'Near expiry',
+        'call': None,
+        'put': None,
+        'size': {'normal': int(base_size), 'suggested': None, 'label': 'Waiting', 'risk': 'unknown'},
+        'headline': 'Contract helper unavailable',
+        'note': 'Need a live near-expiry option chain with bid/ask quotes.',
+    }
+    if S is None or calls is None or puts is None or calls.empty or puts.empty:
+        return empty
+
+    def _clean_expiry_set(values):
+        return set(str(v) for v in (values or []) if v)
+
+    def _expiry_iso(row):
+        raw = row.get('expiration_date', row.get('expiration'))
+        try:
+            return pd.to_datetime(raw).date().isoformat()
+        except Exception:
+            return None
+
+    def _filter_scope(df):
+        f = df.copy()
+        expiries = _expiration_series_iso(f)
+        allowed = _clean_expiry_set(selected_expiries)
+        if allowed and expiries is not None:
+            f = f[expiries.isin(allowed)].copy()
+            expiries = _expiration_series_iso(f)
+        if expiries is None or f.empty:
+            return f, None
+        today = datetime.now(pytz.timezone('US/Eastern')).date()
+        expiry_rows = sorted(set(expiries.dropna().astype(str).tolist()))
+        short_expiries = []
+        for exp in expiry_rows:
+            try:
+                dte = (datetime.fromisoformat(exp).date() - today).days
+            except Exception:
+                dte = 99
+            if 0 <= dte <= 1:
+                short_expiries.append(exp)
+        chosen = (short_expiries[0] if short_expiries else expiry_rows[0]) if expiry_rows else None
+        if chosen:
+            f = f[expiries == chosen].copy()
+        return f, chosen
+
+    call_scope, call_exp = _filter_scope(calls)
+    put_scope, put_exp = _filter_scope(puts)
+    chosen_expiry = call_exp or put_exp
+    if call_exp and put_exp and call_exp != put_exp:
+        put_expiries = _expiration_series_iso(put_scope)
+        if put_expiries is not None:
+            put_scope = put_scope[put_expiries == call_exp].copy()
+            chosen_expiry = call_exp
+    if call_scope.empty or put_scope.empty:
+        return empty
+
+    def _numeric(row, key, default=0.0):
+        try:
+            val = float(row.get(key, default) or default)
+            return val if math.isfinite(val) else default
+        except Exception:
+            return default
+
+    def _mid(row):
+        bid = _numeric(row, 'bid')
+        ask = _numeric(row, 'ask')
+        mark = _numeric(row, 'mark')
+        last = _numeric(row, 'lastPrice')
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        if mark > 0:
+            return mark
+        if last > 0:
+            return last
+        if ask > 0:
+            return ask
+        if bid > 0:
+            return bid
+        return 0.0
+
+    def _candidate_rows(df, side):
+        working = df.copy()
+        working['strike'] = pd.to_numeric(working['strike'], errors='coerce')
+        working = working.dropna(subset=['strike'])
+        if working.empty:
+            return []
+        if side == 'call':
+            pool = working[working['strike'] >= float(S)].sort_values('strike').head(3)
+            if pool.empty:
+                pool = working.iloc[(working['strike'] - float(S)).abs().argsort()[:3]]
+        else:
+            pool = working[working['strike'] <= float(S)].sort_values('strike', ascending=False).head(3)
+            if pool.empty:
+                pool = working.iloc[(working['strike'] - float(S)).abs().argsort()[:3]]
+        return [row for _, row in pool.iterrows()]
+
+    def _score_candidates(df, side):
+        rows = _candidate_rows(df, side)
+        if not rows:
+            return None, []
+        atm_mid = max(_mid(rows[0]), 0.01)
+        scored = []
+        rv_bias = (rv_iv or {}).get('bias') if isinstance(rv_iv, dict) else None
+        for idx, row in enumerate(rows):
+            strike = _numeric(row, 'strike')
+            bid = _numeric(row, 'bid')
+            ask = _numeric(row, 'ask')
+            mid = _mid(row)
+            if mid <= 0:
+                continue
+            spread = max(ask - bid, 0.0) if ask > 0 and bid > 0 else None
+            spread_pct = (spread / mid) if spread is not None and mid > 0 else None
+            volume = max(_numeric(row, 'volume'), 0.0)
+            oi = max(_numeric(row, 'openInterest'), 0.0)
+            gamma = abs(_numeric(row, 'gamma'))
+            delta = abs(_numeric(row, 'delta'))
+            iv = _numeric(row, 'impliedVolatility', None)
+            distance_pct = abs(strike - float(S)) / float(S) if S else 0.0
+            premium_relief = max(0.0, min(0.35, (atm_mid - mid) / atm_mid))
+            spread_score = 0.0 if spread_pct is None else max(0.0, min(1.0, 1.0 - (spread_pct / 0.18)))
+            liquidity_score = max(0.0, min(1.0, (volume / 750.0) * 0.65 + (oi / 2500.0) * 0.35))
+            gamma_score = max(0.0, min(1.0, (gamma / max(mid, 0.01)) * 8.0))
+            delta_target = 0.48 if idx == 0 else (0.38 if idx == 1 else 0.30)
+            delta_score = max(0.0, 1.0 - min(abs(delta - delta_target) / 0.25, 1.0))
+            distance_score = max(0.0, 1.0 - min(distance_pct / 0.012, 1.0))
+            score = (
+                spread_score * 0.28 +
+                liquidity_score * 0.18 +
+                gamma_score * 0.20 +
+                delta_score * 0.16 +
+                distance_score * 0.10 +
+                premium_relief * 0.08
+            )
+            if idx == 0 and atm_mid >= 1.75 and premium_relief < 0.05:
+                score -= 0.04
+            if rv_bias == 'iv_rich' and idx == 0:
+                score -= 0.03
+            if regime == 'Short Gamma' and idx > 0:
+                score += 0.03
+            if spread_pct is not None and spread_pct > 0.30:
+                score -= 0.18
+            if spread_pct is None and ask > 0:
+                score -= 0.10
+            if bid <= 0:
+                score -= 0.12
+            if delta < 0.10:
+                score -= 0.22
+            if delta < 0.05:
+                score -= 0.18
+            if mid < 0.05:
+                score -= 0.10
+            label = f"{strike:.0f}{'C' if side == 'call' else 'P'}"
+            reasons = []
+            if idx == 0:
+                reasons.append('ATM anchor')
+            elif idx == 1:
+                reasons.append('1 OTM')
+            else:
+                reasons.append('2 OTM')
+            if spread_pct is not None:
+                reasons.append(f"{spread_pct * 100:.0f}% spread")
+            if premium_relief >= 0.15:
+                reasons.append('premium relief')
+            if gamma_score >= 0.55:
+                reasons.append('good gamma/$')
+            if regime == 'Short Gamma':
+                reasons.append('negative gamma')
+            scored.append({
+                'side': side,
+                'label': label,
+                'strike': strike,
+                'mid': mid,
+                'bid': bid if bid > 0 else None,
+                'ask': ask if ask > 0 else None,
+                'spread_pct': spread_pct,
+                'volume': volume,
+                'open_interest': oi,
+                'delta': delta,
+                'gamma': gamma,
+                'iv': iv,
+                'rank': idx,
+                'score': round(max(0.0, min(1.0, score)), 3),
+                'reasons': reasons[:4],
+                'contract_symbol': row.get('contractSymbol'),
+                'expiry': _expiry_iso(row) or chosen_expiry,
+            })
+        scored.sort(key=lambda x: (x['score'], -x['rank']), reverse=True)
+        return (scored[0] if scored else None), scored
+
+    call_best, call_all = _score_candidates(call_scope, 'call')
+    put_best, put_all = _score_candidates(put_scope, 'put')
+    if not call_best and not put_best:
+        return empty
+
+    def _risk_points(candidate):
+        if not candidate:
+            return 1
+        pts = 0
+        spread_pct = candidate.get('spread_pct')
+        mid = candidate.get('mid') or 0
+        delta = candidate.get('delta') or 0
+        if spread_pct is None or spread_pct > 0.18:
+            pts += 1
+        if mid >= 2.50:
+            pts += 1
+        if mid > 0 and mid < 0.05:
+            pts += 1
+        if delta > 0 and delta < 0.10:
+            pts += 1
+        if candidate.get('score', 0) < 0.45:
+            pts += 1
+        return pts
+
+    avg_mid = np.mean([c['mid'] for c in (call_best, put_best) if c]) if (call_best or put_best) else 0
+    risk = max(_risk_points(call_best), _risk_points(put_best))
+    if isinstance(rv_iv, dict):
+        if rv_iv.get('bias') == 'iv_rich':
+            risk += 1
+        spread = rv_iv.get('spread')
+        if spread is not None and spread > 0.04:
+            risk += 1
+    if regime == 'Short Gamma':
+        risk += 1
+    if avg_mid >= 3.50:
+        risk += 1
+    suggested = int(base_size)
+    if risk >= 5:
+        suggested = max(1, round(base_size * 0.3))
+        risk_label = 'Defensive'
+    elif risk >= 3:
+        suggested = max(1, round(base_size * 0.5))
+        risk_label = 'Reduced'
+    elif risk >= 2:
+        suggested = max(1, round(base_size * 0.7))
+        risk_label = 'Light'
+    else:
+        risk_label = 'Normal'
+
+    context_bits = []
+    if regime == 'Short Gamma':
+        context_bits.append('negative gamma')
+    elif regime == 'Long Gamma':
+        context_bits.append('positive gamma')
+    if isinstance(rv_iv, dict) and rv_iv.get('bias') == 'iv_rich':
+        context_bits.append('IV rich')
+    elif isinstance(rv_iv, dict) and rv_iv.get('bias') == 'iv_cheap':
+        context_bits.append('IV cheap')
+    if avg_mid:
+        context_bits.append(f"avg mid ${avg_mid:.2f}")
+
+    return {
+        'status': 'ready',
+        'expiry_text': _format_flow_blotter_expiry(chosen_expiry) or 'Near expiry',
+        'call': call_best,
+        'put': put_best,
+        'alternates': {
+            'call': call_all[1:3] if call_all else [],
+            'put': put_all[1:3] if put_all else [],
+        },
+        'size': {
+            'normal': int(base_size),
+            'suggested': int(suggested),
+            'label': risk_label,
+            'risk': 'high' if risk >= 4 else ('medium' if risk >= 2 else 'low'),
+        },
+        'headline': f"{risk_label} size",
+        'note': ' · '.join(context_bits) if context_bits else 'Near-ATM chain quality check.',
+    }
+
+
 # Phase 3 Stage 3 — Live flow alerts engine
 # Module-level state; intentionally module-scoped so it survives across ticks.
 _ALERT_COOLDOWNS = {}   # (ticker, alert_id) -> float unix ts of last fire
@@ -5533,6 +5806,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'level_deltas':   None,
         'iv_context':     None,
         'rv_iv':          None,
+        'contract_helper': None,
         'flow_pulse':     [],
         'flow_pulse_summary': {'label': 'mixed', 'score': 0.0, 'weighted_premium': 0.0, 'gross_premium': 0.0, 'hedge_share': 0.0},
     }
@@ -5706,6 +5980,20 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     except Exception as e:
         print(f"[compute_trader_stats] rv_iv failed: {e}")
         out['rv_iv'] = None
+
+    try:
+        out['contract_helper'] = compute_contract_helper(
+            calls,
+            puts,
+            S,
+            selected_expiries=selected_expiries,
+            rv_iv=out.get('rv_iv'),
+            regime=out.get('regime'),
+            base_size=10,
+        )
+    except Exception as e:
+        print(f"[compute_trader_stats] contract_helper failed: {e}")
+        out['contract_helper'] = None
 
     try:
         out['flow_pulse'] = build_flow_pulse_snapshot(
@@ -8521,6 +8809,72 @@ def index():
         }
         .gex-scope-btn.active {
             background: var(--accent); color: #fff; border-color: var(--accent);
+        }
+        .contract-helper-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .contract-helper-side {
+            min-width: 0;
+            padding: 8px 9px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-0);
+        }
+        .contract-helper-side.call { border-left: 3px solid var(--call); }
+        .contract-helper-side.put { border-left: 3px solid var(--put); }
+        .contract-helper-label {
+            color: var(--fg-2);
+            font-size: 9px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            line-height: 1.2;
+        }
+        .contract-helper-contract {
+            margin-top: 4px;
+            color: var(--fg-0);
+            font-size: 15px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.1;
+        }
+        .contract-helper-side.call .contract-helper-contract { color: var(--call); }
+        .contract-helper-side.put .contract-helper-contract { color: var(--put); }
+        .contract-helper-meta {
+            margin-top: 4px;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.35;
+        }
+        .contract-helper-size {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+            margin-top: 9px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+            color: var(--fg-2);
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .contract-helper-size strong {
+            color: var(--fg-0);
+            font-size: 13px;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: 0;
+            text-transform: none;
+        }
+        .contract-helper-size strong.pos { color: var(--call); }
+        .contract-helper-size strong.neg { color: var(--put); }
+        .contract-helper-note {
+            margin-top: 6px;
+            color: var(--fg-1);
+            font-size: 10px;
+            line-height: 1.4;
         }
         .rail-range-track {
             position: relative;
@@ -11379,6 +11733,29 @@ def index():
                             <button class="gex-scope-btn" data-scope="all">All</button>
                             <button class="gex-scope-btn" data-scope="0dte">0DTE</button>
                         </div>
+                    </div>
+                    <div class="rail-card" id="rail-card-contract-helper">
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Contract Helper</div>
+                            <div class="rail-card-note" data-met="contract_expiry">Near expiry</div>
+                        </div>
+                        <div class="contract-helper-grid">
+                            <div class="contract-helper-side call">
+                                <div class="contract-helper-label">Call candidate</div>
+                                <div class="contract-helper-contract" data-met="contract_call">—</div>
+                                <div class="contract-helper-meta" data-met="contract_call_meta">—</div>
+                            </div>
+                            <div class="contract-helper-side put">
+                                <div class="contract-helper-label">Put candidate</div>
+                                <div class="contract-helper-contract" data-met="contract_put">—</div>
+                                <div class="contract-helper-meta" data-met="contract_put_meta">—</div>
+                            </div>
+                        </div>
+                        <div class="contract-helper-size">
+                            <span data-met="contract_size_label">Size guide</span>
+                            <strong data-met="contract_size">—</strong>
+                        </div>
+                        <div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>
                     </div>
                     <div class="rail-card" id="rail-card-range">
                         <div class="rail-card-header-row">
@@ -18795,6 +19172,29 @@ def index():
                             '<button class="gex-scope-btn" data-scope="0dte">0DTE</button>' +
                         '</div>' +
                     '</div>' +
+                    '<div class="rail-card" id="rail-card-contract-helper">' +
+                        '<div class="rail-card-header-row">' +
+                            '<div class="rail-card-header">Contract Helper</div>' +
+                            '<div class="rail-card-note" data-met="contract_expiry">Near expiry</div>' +
+                        '</div>' +
+                        '<div class="contract-helper-grid">' +
+                            '<div class="contract-helper-side call">' +
+                                '<div class="contract-helper-label">Call candidate</div>' +
+                                '<div class="contract-helper-contract" data-met="contract_call">—</div>' +
+                                '<div class="contract-helper-meta" data-met="contract_call_meta">—</div>' +
+                            '</div>' +
+                            '<div class="contract-helper-side put">' +
+                                '<div class="contract-helper-label">Put candidate</div>' +
+                                '<div class="contract-helper-contract" data-met="contract_put">—</div>' +
+                                '<div class="contract-helper-meta" data-met="contract_put_meta">—</div>' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="contract-helper-size">' +
+                            '<span data-met="contract_size_label">Size guide</span>' +
+                            '<strong data-met="contract_size">—</strong>' +
+                        '</div>' +
+                        '<div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>' +
+                    '</div>' +
                     '<div class="rail-card" id="rail-card-range">' +
                         '<div class="rail-card-header-row">' +
                             '<div class="rail-card-header">Expected Move <span data-met="em_pct"></span></div>' +
@@ -19629,6 +20029,7 @@ def index():
             const stats = getScopedStats();
             const levels = getScopedKeyLevels();
             renderMarketMetrics(stats);
+            renderContractHelper(stats);
             renderDealerImpact(stats);
             renderGammaProfile(stats);
             renderChainActivity(stats);
@@ -19719,6 +20120,7 @@ def index():
                 renderRailKeyLevels(null);
                 renderDealerImpact(null);
                 renderMarketMetrics(null);
+                renderContractHelper(null);
                 renderGammaProfile(null);
                 renderChainActivity(null);
                 renderIVContext(null);
@@ -19731,6 +20133,7 @@ def index():
             renderRailKeyLevels(stats);
             renderDealerImpact(stats);
             renderMarketMetrics(stats);
+            renderContractHelper(stats);
             renderGammaProfile(stats);
             renderChainActivity(stats);
             renderCentroidPanel(stats.centroid_panel || null);
@@ -21413,6 +21816,49 @@ def index():
                 dDexEl.classList.toggle('pos', dDex != null && dDex > 0);
                 dDexEl.classList.toggle('neg', dDex != null && dDex < 0);
             }
+        }
+
+        function renderContractHelper(stats) {
+            const helper = stats && stats.contract_helper;
+            const sizeEl = document.querySelector('#rail-card-contract-helper [data-met="contract_size"]');
+            const setSizeTone = risk => {
+                if (!sizeEl) return;
+                sizeEl.classList.remove('pos', 'neg');
+                if (risk === 'low') sizeEl.classList.add('pos');
+                if (risk === 'high') sizeEl.classList.add('neg');
+            };
+            const fmtCandidateMeta = row => {
+                if (!row) return '—';
+                const mid = (row.mid != null && isFinite(row.mid)) ? ('$' + row.mid.toFixed(2)) : '—';
+                const spread = (row.spread_pct != null && isFinite(row.spread_pct)) ? Math.round(row.spread_pct * 100) + '% spr' : 'spr —';
+                const score = (row.score != null && isFinite(row.score)) ? Math.round(row.score * 100) : null;
+                const reason = Array.isArray(row.reasons) && row.reasons.length ? row.reasons.slice(0, 2).join(', ') : '';
+                return mid + ' · ' + spread + (score == null ? '' : ' · q ' + score) + (reason ? ' · ' + reason : '');
+            };
+            if (!helper || helper.status !== 'ready') {
+                _setMet('contract_expiry', 'Near expiry');
+                _setMet('contract_call', '—');
+                _setMet('contract_put', '—');
+                _setMet('contract_call_meta', '—');
+                _setMet('contract_put_meta', '—');
+                _setMet('contract_size_label', 'Size guide');
+                _setMet('contract_size', '—');
+                _setMet('contract_note', (helper && helper.note) || 'Scores nearby ATM to 2 OTM contracts.');
+                setSizeTone(null);
+                return;
+            }
+            const call = helper.call || null;
+            const put = helper.put || null;
+            const size = helper.size || {};
+            _setMet('contract_expiry', helper.expiry_text || 'Near expiry');
+            _setMet('contract_call', call ? (call.label || '—') : '—');
+            _setMet('contract_put', put ? (put.label || '—') : '—');
+            _setMet('contract_call_meta', fmtCandidateMeta(call));
+            _setMet('contract_put_meta', fmtCandidateMeta(put));
+            _setMet('contract_size_label', (size.label || 'Size') + ' size');
+            _setMet('contract_size', (size.suggested == null || size.normal == null) ? '—' : (size.suggested + ' / ' + size.normal));
+            _setMet('contract_note', helper.note || 'Contract quality weighs spread, liquidity, gamma/$, premium, IV/RV, and gamma regime.');
+            setSizeTone(size.risk || null);
         }
 
         function renderGammaProfile(stats) {
