@@ -11432,6 +11432,7 @@ def index():
         let tvResizeObserver = null;
         // Indicator series references
         let tvIndicatorSeries = {};
+        let tvAvwapSeriesById = {}; // drawing.id -> LineSeries for AVWAP drawings
         // Sub-pane charts for RSI, MACD, and ATR
         let tvRsiChart = null, tvRsiSeries = null;
         let tvMacdChart = null, tvMacdSeries = {};
@@ -11538,7 +11539,7 @@ def index():
         // Time-scale sync state
         let tvSyncHandlers = [], tvSyncingTimeScale = false;
         // Drawing state
-        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'text'
+        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'text' | 'avwap'
         let tvDrawStart = null;         // {price, time, x, y} of first click
         let tvDrawingDefs = [];         // serializable drawing definitions — survive full re-renders
         let tvDrawingPreviewDef = null; // transient preview while placing a multi-click drawing
@@ -12409,7 +12410,7 @@ def index():
                     color: displayBar.close >= displayBar.open ? callColor : putColor,
                 });
             } catch(e) {}
-            if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
+            if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             scheduleTVStrikeOverlayDraw();
         }
 
@@ -13448,6 +13449,123 @@ def index():
             }
             return out;
         }
+
+        // Anchored VWAP: cumulative typical-price-weighted-by-volume from anchor bar forward.
+        // Includes ALL bars from anchor onward (no session filter — anchor is user-chosen).
+        function calcAVwap(candles, anchorTime) {
+            if (!Array.isArray(candles) || !candles.length) return [];
+            const anchor = Number(anchorTime);
+            if (!Number.isFinite(anchor)) return [];
+            let cumPV = 0;
+            let cumVol = 0;
+            const out = [];
+            for (let i = 0; i < candles.length; i += 1) {
+                const c = candles[i];
+                const t = Number(c && c.time);
+                if (!Number.isFinite(t) || t < anchor) continue;
+                const typical = (c.high + c.low + c.close) / 3;
+                const vol = c.volume || 0;
+                cumPV += typical * vol;
+                cumVol += vol;
+                out.push({ time: t, value: cumVol > 0 ? cumPV / cumVol : c.close });
+            }
+            return out;
+        }
+
+        function formatTVAVwapAutoLabel(anchorTime) {
+            const t = Number(anchorTime);
+            if (!Number.isFinite(t)) return 'AVWAP';
+            try {
+                const fmt = new Intl.DateTimeFormat('en-US', {
+                    timeZone: 'America/New_York',
+                    month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', hour12: false,
+                });
+                const parts = fmt.formatToParts(new Date(t * 1000));
+                const get = key => (parts.find(p => p.type === key) || {}).value || '';
+                return `AVWAP ${get('month')}/${get('day')} ${get('hour')}:${get('minute')}`;
+            } catch (e) {
+                return 'AVWAP';
+            }
+        }
+
+        function snapTVAVwapAnchorTime(rawTime) {
+            const candles = getTVVwapSourceCandles();
+            const target = Number(rawTime);
+            if (!candles.length || !Number.isFinite(target)) return target;
+            let best = null;
+            let bestDist = Infinity;
+            for (let i = 0; i < candles.length; i += 1) {
+                const t = Number(candles[i] && candles[i].time);
+                if (!Number.isFinite(t)) continue;
+                const d = Math.abs(t - target);
+                if (d < bestDist) { bestDist = d; best = t; }
+            }
+            return best != null ? best : target;
+        }
+
+        function applyTVAvwapDrawings() {
+            if (!tvPriceChart || !tvCandleSeries) return;
+            const defs = Array.isArray(tvDrawingDefs) ? tvDrawingDefs.filter(d => d && d.type === 'avwap') : [];
+            const liveIds = new Set(defs.map(d => d.id));
+            // Remove series for AVWAP defs that no longer exist
+            Object.keys(tvAvwapSeriesById).forEach(id => {
+                if (!liveIds.has(id)) {
+                    try { tvPriceChart.removeSeries(tvAvwapSeriesById[id]); } catch (e) {}
+                    delete tvAvwapSeriesById[id];
+                    delete tvIndicatorDataCache['avwap:' + id];
+                }
+            });
+            if (!defs.length) return;
+            const sourceCandles = getTVVwapSourceCandles();
+            defs.forEach(def => {
+                const data = calcAVwap(sourceCandles, def.anchorTime);
+                const seriesTitle = def.label && def.label.trim()
+                    ? def.label
+                    : formatTVAVwapAutoLabel(def.anchorTime);
+                const options = tvIndicatorSeriesOptions(
+                    def.color || '#FFD700',
+                    clampTVDrawingLineWidth(def.lineWidth),
+                    normalizeTVDrawingStyle(def.lineStyle),
+                    seriesTitle
+                );
+                let series = tvAvwapSeriesById[def.id];
+                if (!series) {
+                    series = tvPriceChart.addLineSeries(options);
+                    tvAvwapSeriesById[def.id] = series;
+                } else {
+                    series.applyOptions(options);
+                }
+                series.setData(data);
+                setTVIndicatorDataCache('avwap:' + def.id, [data]);
+            });
+        }
+
+        function findTVAvwapDrawingHitId(param) {
+            if (!tvPriceChart || !tvCandleSeries || !param || !param.point) return '';
+            const chartPoint = tvResolveChartPoint(param);
+            if (!chartPoint || !Number.isFinite(chartPoint.price)) return '';
+            const targetTime = Number(chartPoint.time);
+            if (!Number.isFinite(targetTime)) return '';
+            const targetY = Number(param.point.y);
+            let bestId = '';
+            let bestDistance = Number.POSITIVE_INFINITY;
+            (tvDrawingDefs || []).forEach(def => {
+                if (!def || def.type !== 'avwap') return;
+                const points = tvIndicatorDataCache['avwap:' + def.id];
+                if (!Array.isArray(points) || !points.length) return;
+                points.forEach(pointSet => {
+                    const value = getTVIndicatorNearestValue(pointSet, targetTime);
+                    if (!Number.isFinite(value)) return;
+                    const y = tvCandleSeries.priceToCoordinate(value);
+                    if (!Number.isFinite(y)) return;
+                    const d = Math.abs(y - targetY);
+                    if (d < bestDistance) { bestDistance = d; bestId = def.id; }
+                });
+            });
+            return bestDistance <= 10 ? bestId : '';
+        }
+
         function calcBB(closes, period=20, mult=2) {
             const sma = calcSMA(closes, period);
             return sma.map((mid, i) => {
@@ -14064,6 +14182,8 @@ def index():
 
             renderTopOI(_lastTopOI);
 
+            applyTVAvwapDrawings();
+
             // Update legend overlay
             updateIndicatorLegend();
         }
@@ -14678,6 +14798,9 @@ def index():
 
         function normalizeTVDrawingLabelPosition(type, position) {
             const value = String(position || '').trim().toLowerCase();
+            if (type === 'avwap') {
+                return ['axis', 'start', 'middle', 'end'].includes(value) ? value : 'axis';
+            }
             if (type === 'trendline' || type === 'channel') {
                 return ['auto', 'start', 'middle', 'end'].includes(value) ? value : 'auto';
             }
@@ -14721,6 +14844,15 @@ def index():
                 delete normalized.extendRight;
                 delete normalized.fillColor;
                 delete normalized.midlineColor;
+            }
+            if (normalized.type === 'avwap') {
+                const rawAnchor = Number(normalized.anchorTime);
+                normalized.anchorTime = Number.isFinite(rawAnchor) ? rawAnchor : null;
+                const anchorPrice = Number(normalized.anchorPrice);
+                normalized.anchorPrice = Number.isFinite(anchorPrice) ? anchorPrice : null;
+                if (!normalized.label) {
+                    normalized.label = formatTVAVwapAutoLabel(normalized.anchorTime);
+                }
             }
             if (normalized.id !== '__preview__') {
                 if (Number.isFinite(Number(normalized.time))) {
@@ -15209,6 +15341,14 @@ def index():
         }
 
         function getTVDrawingLabelPositionOptions(type) {
+            if (type === 'avwap') {
+                return [
+                    { value: 'axis', label: 'Price Axis Only' },
+                    { value: 'start', label: 'On Chart — Start' },
+                    { value: 'middle', label: 'On Chart — Middle' },
+                    { value: 'end', label: 'On Chart — End' },
+                ];
+            }
             if (type === 'trendline' || type === 'channel') {
                 return [
                     { value: 'auto', label: 'Auto' },
@@ -16056,6 +16196,7 @@ def index():
                     if (def.type === 'hline') {
                         syncTVUserHLinePriceLines();
                     }
+                    if (def.type === 'avwap') applyTVAvwapDrawings();
                     if (def.type === 'hline' || def.type === 'channel') {
                         updateTVDrawingEditor();
                     }
@@ -16082,6 +16223,7 @@ def index():
                     def.lineWidth = clampTVDrawingLineWidth(event.target.value);
                     persistTVDrawings();
                     if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    if (def.type === 'avwap') applyTVAvwapDrawings();
                     tvRefreshDrawingLevels();
                     scheduleTVDrawingOverlayDraw();
                 });
@@ -16091,6 +16233,7 @@ def index():
                     def.lineStyle = normalizeTVDrawingStyle(event.target.value);
                     persistTVDrawings();
                     if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    if (def.type === 'avwap') applyTVAvwapDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
                 editor.querySelector('#tv-selected-draw-text').addEventListener('input', event => {
@@ -16103,6 +16246,7 @@ def index():
                     }
                     persistTVDrawings();
                     if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    if (def.type === 'avwap') applyTVAvwapDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
                 editor.querySelector('#tv-selected-draw-label-position').addEventListener('change', event => {
@@ -16180,6 +16324,7 @@ def index():
                     : def.type === 'trendline' ? 'Trend Line'
                     : def.type === 'channel' ? 'Channel'
                     : def.type === 'rect' ? 'Box'
+                    : def.type === 'avwap' ? 'Anchored VWAP'
                     : 'Text Label';
                 titleEl.textContent = typeLabel;
             }
@@ -16423,6 +16568,27 @@ def index():
                 const x = tvResolveDrawingAnchorX(def.time, def.logical, def.previewX);
                 if (x == null || Number.isNaN(x)) return null;
                 return { type: 'text', x, y };
+            }
+            if (def.type === 'avwap') {
+                const anchorX = tvResolveDrawingAnchorX(def.anchorTime, null, null);
+                if (anchorX == null || Number.isNaN(anchorX)) return null;
+                const anchorPrice = Number(def.anchorPrice);
+                const anchorY = Number.isFinite(anchorPrice) ? tvCandleSeries.priceToCoordinate(anchorPrice) : null;
+                // Last-point coordinates for label placement
+                const points = tvIndicatorDataCache['avwap:' + def.id];
+                let endX = null, endY = null;
+                if (Array.isArray(points) && points.length && Array.isArray(points[0]) && points[0].length) {
+                    const last = points[0][points[0].length - 1];
+                    endX = tvResolveDrawingAnchorX(last.time, null, null);
+                    endY = tvCandleSeries.priceToCoordinate(last.value);
+                }
+                return {
+                    type: 'avwap',
+                    anchorX,
+                    anchorY: Number.isFinite(anchorY) ? anchorY : null,
+                    endX: Number.isFinite(endX) ? endX : null,
+                    endY: Number.isFinite(endY) ? endY : null,
+                };
             }
             return null;
         }
@@ -16746,6 +16912,48 @@ def index():
                     bindSelect(hit);
                     group.appendChild(hit);
                 }
+            } else if (screen.type === 'avwap') {
+                // The actual line is rendered via a LightweightCharts line series
+                // (managed in applyTVAvwapDrawings). The overlay only paints the
+                // selectable anchor handle and the label badge.
+                if (Number.isFinite(screen.anchorX) && Number.isFinite(screen.anchorY)) {
+                    const handle = createSvgEl('circle', {
+                        class: 'tv-drawing-anchor',
+                        cx: screen.anchorX,
+                        cy: screen.anchorY,
+                        r: def.id === tvSelectedDrawingId ? 6 : 5,
+                        fill: def.color,
+                        stroke: def.id === tvSelectedDrawingId ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.55)',
+                        'stroke-width': def.id === tvSelectedDrawingId ? 2 : 1.5,
+                    });
+                    if (interactive) {
+                        handle.style.cursor = 'pointer';
+                        bindSelect(handle);
+                    }
+                    group.appendChild(handle);
+                }
+                if (labelText && def.labelPosition !== 'axis') {
+                    const placement = (def.labelPosition === 'start' || !Number.isFinite(screen.endX) || !Number.isFinite(screen.endY))
+                        ? { x: (screen.anchorX || 0) + 10, y: (screen.anchorY || 0) - 14, anchor: 'left', boundWidth: width, boundHeight: height }
+                        : { x: screen.endX + 8, y: screen.endY - 12, anchor: 'left', boundWidth: width, boundHeight: height };
+                    const badge = appendTVDrawingBadge(group, Object.assign({
+                        label: labelText,
+                        color: def.color,
+                    }, placement));
+                    if (interactive && badge) {
+                        const hit = createSvgEl('rect', {
+                            class: 'tv-drawing-hitbox',
+                            x: badge.x,
+                            y: badge.y,
+                            rx: 6,
+                            ry: 6,
+                            width: badge.width,
+                            height: badge.height,
+                        });
+                        bindSelect(hit);
+                        group.appendChild(hit);
+                    }
+                }
             } else if (screen.type === 'text') {
                 const text = labelText;
                 const badge = appendTVDrawingBadge(group, {
@@ -16825,6 +17033,7 @@ def index():
         function tvRestoreDrawings() {
             syncTVUserHLinePriceLines();
             tvRefreshDrawingLevels();
+            applyTVAvwapDrawings();
             scheduleTVDrawingOverlayDraw();
         }
 
@@ -17130,6 +17339,13 @@ def index():
 
         function tvHandleChartClick(param) {
             if (!tvDrawMode && param && param.point) {
+                const avwapHitId = findTVAvwapDrawingHitId(param);
+                if (avwapHitId) {
+                    tvSelectedDrawingId = avwapHitId;
+                    updateTVDrawingEditor();
+                    scheduleTVDrawingOverlayDraw();
+                    return;
+                }
                 const indicatorKey = findTVIndicatorHitKey(param);
                 if (indicatorKey) {
                     tvSelectedDrawingId = null;
@@ -17160,6 +17376,22 @@ def index():
                     lineWidth: 2,
                     lineStyle: 'solid',
                     preset: getActiveTVHLinePresetKey(),
+                });
+                return;
+            }
+
+            if (tvDrawMode === 'avwap') {
+                if (!clickTime) return;
+                const anchorTime = snapTVAVwapAnchorTime(clickTime);
+                finishTVDrawingCreation({
+                    type: 'avwap',
+                    anchorTime,
+                    anchorPrice: price,
+                    label: formatTVAVwapAutoLabel(anchorTime),
+                    color: drawColor,
+                    lineWidth: 2,
+                    lineStyle: 'solid',
+                    labelPosition: 'axis',
                 });
                 return;
             }
@@ -17524,6 +17756,7 @@ def index():
                 { key:'trendline', label:'↗ Trend',  title:'Draw trend line (click start, click end)' },
                 { key:'channel',   label:'∥ Channel', title:'Draw parallel channel (click two trend points, then width)' },
                 { key:'rect',      label:'▭ Box',    title:'Draw rectangle between two prices (click two points)' },
+                { key:'avwap',     label:'⚓ AVWAP',  title:'Anchored VWAP — click any candle to anchor' },
                 { key:'text',      label:'T Label',  title:'Add price label (click to place)' },
             ];
             drawDefs.forEach(def => {
@@ -18244,7 +18477,7 @@ def index():
             scheduleSessionLevelCloudDraw();
             scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
-            if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds);
+            if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             renderKeyLevels(getScopedKeyLevels());
             renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
             tvRefreshOverlayLevelPrices();
@@ -20685,6 +20918,7 @@ def index():
                     tvCandleSeries = null;
                     tvVolumeSeries = null;
                     tvIndicatorSeries = {};
+                    tvAvwapSeriesById = {};
                     tvIndicatorDataCache = {};
                     tvHistoricalPoints = [];
                     tvHistoricalExpectedMoveSeries = [];
