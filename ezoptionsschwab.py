@@ -4075,6 +4075,7 @@ def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_ex
         'options_volume': ('volume', 'call_minus_put'),
     }
     empty_payload = {key: [] for key in profiles}
+    empty_payload['voi_ratio'] = []
     if S is None:
         return empty_payload
     try:
@@ -4139,6 +4140,42 @@ def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_ex
         call_map = _sum_by_strike(calls_df, column)
         put_map = _sum_by_strike(puts_df, column)
         payload[key] = _rows_from_maps(call_map, put_map, mode) if (call_map or put_map) else []
+
+    def _voi_ratio_by_strike(df):
+        if df.empty or 'volume' not in df.columns or 'openInterest' not in df.columns:
+            return {}
+        w = df[['strike', 'volume', 'openInterest']].copy()
+        w['volume'] = pd.to_numeric(w['volume'], errors='coerce').fillna(0.0)
+        w['openInterest'] = pd.to_numeric(w['openInterest'], errors='coerce').fillna(0.0)
+        grouped = w.groupby('strike').agg({'volume': 'sum', 'openInterest': 'sum'})
+        out = {}
+        for strike, r in grouped.iterrows():
+            oi = float(r['openInterest'] or 0)
+            vol = float(r['volume'] or 0)
+            ratio = (vol / oi) if oi > 0 else 0.0
+            if math.isfinite(ratio):
+                out[float(strike)] = ratio
+        return out
+
+    voi_call_map = _voi_ratio_by_strike(calls_df)
+    voi_put_map = _voi_ratio_by_strike(puts_df)
+    voi_rows = []
+    for strike in sorted(set(voi_call_map) | set(voi_put_map)):
+        call_value = float(voi_call_map.get(strike, 0.0) or 0.0)
+        put_value = float(voi_put_map.get(strike, 0.0) or 0.0)
+        if call_value == 0 and put_value == 0:
+            continue
+        value = call_value - put_value
+        if not all(math.isfinite(v) for v in (strike, call_value, put_value, value)):
+            continue
+        voi_rows.append({
+            'strike': float(strike),
+            'value': float(value),
+            'call': call_value,
+            'put': put_value,
+            'abs_value': abs(float(value)),
+        })
+    payload['voi_ratio'] = voi_rows
     return payload
 
 
@@ -11613,7 +11650,9 @@ def index():
             open_interest: 'OI',
             options_volume: 'Options Vol',
             premium: 'Premium',
+            voi_ratio: 'V/OI',
         };
+        const STRIKE_OVERLAY_ONLY_METRICS = ['voi_ratio'];
         const STRIKE_OVERLAY_ENABLED_KEY = 'gex.strikeOverlayEnabled';
         const STRIKE_OVERLAY_METRIC_KEY = 'gex.strikeOverlayMetric';
         const STRIKE_OVERLAY_RIGHT_OFFSET_KEY = 'gex.strikeOverlayRightOffset';
@@ -11646,7 +11685,8 @@ def index():
         let activeStrikeOverlayMetric = (() => {
             try {
                 const saved = localStorage.getItem(STRIKE_OVERLAY_METRIC_KEY);
-                return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'gex';
+                const valid = saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved) || STRIKE_OVERLAY_ONLY_METRICS.includes(saved));
+                return valid ? saved : 'gex';
             } catch (e) {
                 return 'gex';
             }
@@ -15269,7 +15309,8 @@ def index():
         }
 
         function getStrikeOverlayMetricKeys(selectedCharts = getChartVisibility()) {
-            return getVisibleStrikeRailTabs(selectedCharts).filter(key => key !== 'premium');
+            const railKeys = getVisibleStrikeRailTabs(selectedCharts).filter(key => key !== 'premium');
+            return railKeys.concat(STRIKE_OVERLAY_ONLY_METRICS);
         }
 
         function normalizeStrikeOverlayMetric(metric) {
@@ -15430,6 +15471,10 @@ def index():
         function formatStrikeOverlayValue(value, metric) {
             const n = Number(value);
             if (!Number.isFinite(n)) return '—';
+            if (metric === 'voi_ratio') {
+                const sign = n < 0 ? '-' : '';
+                return sign + Math.abs(n).toFixed(2) + 'x';
+            }
             const abs = Math.abs(n);
             const sign = n < 0 ? '-' : '';
             const prefix = ['gex', 'gamma', 'delta', 'vanna', 'charm'].includes(metric) ? '$' : '';
@@ -15442,6 +15487,10 @@ def index():
         function formatStrikeOverlayFullValue(value, metric) {
             const n = Number(value);
             if (!Number.isFinite(n)) return '—';
+            if (metric === 'voi_ratio') {
+                const sign = n < 0 ? '-' : '';
+                return sign + Math.abs(n).toFixed(2) + 'x';
+            }
             const prefix = ['gex', 'gamma', 'delta', 'vanna', 'charm'].includes(metric) ? '$' : '';
             const sign = n < 0 ? '-' : '';
             return sign + prefix + Math.round(Math.abs(n)).toLocaleString();
@@ -15461,7 +15510,7 @@ def index():
                 ['Call ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(callValue, metric)],
                 ['Put ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(putValue, metric)],
             ];
-            if (['open_interest', 'options_volume'].includes(metric)) {
+            if (['open_interest', 'options_volume', 'voi_ratio'].includes(metric)) {
                 rows.push(['Total', formatStrikeOverlayFullValue(totalValue, metric)]);
             }
             return rows.map(([name, value]) => (
@@ -15611,7 +15660,7 @@ def index():
                 tvStrikeOverlayRenderedRows = [];
                 return;
             }
-            const splitMetric = ['open_interest', 'options_volume'].includes(metric);
+            const splitMetric = ['open_interest', 'options_volume', 'voi_ratio'].includes(metric);
             const maxAbs = splitMetric
                 ? Math.max(...screenRows.map(item => Math.max(Math.abs(Number(item.row.call || 0)), Math.abs(Number(item.row.put || 0))))) || 1
                 : Math.max(...screenRows.map(item => Math.abs(item.value))) || 1;
