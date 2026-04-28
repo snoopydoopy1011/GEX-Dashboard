@@ -10448,6 +10448,26 @@ def index():
             background: rgba(255, 255, 255, 0.06);
             border-color: rgba(255, 255, 255, 0.08);
         }
+        .tv-draw-menu-item.muted {
+            color: var(--fg-2);
+        }
+        .tv-draw-menu-empty {
+            padding: 6px 8px;
+            color: var(--fg-2);
+            font-size: 11px;
+        }
+        .tv-drawing-visibility-check {
+            width: 14px;
+            color: var(--fg-1);
+            flex: 0 0 auto;
+            text-align: center;
+        }
+        .tv-drawing-visibility-label {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
         .tv-draw-pill-text {
             display: inline-flex;
             align-items: center;
@@ -10486,6 +10506,15 @@ def index():
             background: rgba(255, 255, 255, 0.06);
             color: var(--fg-0);
             border-color: rgba(255, 255, 255, 0.06);
+        }
+        .tv-tb-btn:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+        .tv-tb-btn:disabled:hover {
+            background: transparent;
+            color: var(--fg-1);
+            border-color: transparent;
         }
         .tv-tb-btn.active {
             background: linear-gradient(180deg, rgba(59, 130, 246, 0.92), rgba(37, 99, 235, 0.92));
@@ -12108,6 +12137,7 @@ def index():
         let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'text' | 'avwap'
         let tvDrawStart = null;         // {price, time, x, y} of first click
         let tvDrawingDefs = [];         // serializable drawing definitions — survive full re-renders
+        let tvDrawingUndoStack = [];    // snapshots for user drawing actions: create, clear, delete, hide/show
         let tvDrawingPreviewDef = null; // transient preview while placing a multi-click drawing
         let tvDrawingScopeKey = '';
         let tvSelectedDrawingId = null;
@@ -14079,7 +14109,7 @@ def index():
 
         function applyTVAvwapDrawings() {
             if (!tvPriceChart || !tvCandleSeries) return;
-            const defs = Array.isArray(tvDrawingDefs) ? tvDrawingDefs.filter(d => d && d.type === 'avwap') : [];
+            const defs = Array.isArray(tvDrawingDefs) ? tvDrawingDefs.filter(d => d && !d.hidden && d.type === 'avwap') : [];
             const liveIds = new Set(defs.map(d => d.id));
             // Remove series for AVWAP defs that no longer exist
             Object.keys(tvAvwapSeriesById).forEach(id => {
@@ -14124,7 +14154,7 @@ def index():
             let bestId = '';
             let bestDistance = Number.POSITIVE_INFINITY;
             (tvDrawingDefs || []).forEach(def => {
-                if (!def || def.type !== 'avwap') return;
+                if (!def || def.hidden || def.type !== 'avwap') return;
                 const points = tvIndicatorDataCache['avwap:' + def.id];
                 if (!Array.isArray(points) || !points.length) return;
                 points.forEach(pointSet => {
@@ -15388,6 +15418,7 @@ def index():
             const normalized = { ...def };
             normalized.id = normalized.id || createTVDrawingId();
             normalized.color = normalized.color || '#FFD700';
+            normalized.hidden = normalized.hidden === true;
             normalized.lineWidth = clampTVDrawingLineWidth(normalized.lineWidth);
             normalized.lineStyle = normalizeTVDrawingStyle(normalized.lineStyle);
             normalized.logical = normalizeTVDrawingLogical(normalized.logical);
@@ -15454,6 +15485,34 @@ def index():
                 delete store[scopeKey];
             }
             saveTVDrawingStore(store);
+        }
+
+        function getTVDrawingSnapshot() {
+            return tvDrawingDefs.map(def => normalizeTVDrawingDef(def)).filter(Boolean);
+        }
+
+        function pushTVDrawingUndoSnapshot() {
+            tvDrawingUndoStack.push(JSON.stringify(getTVDrawingSnapshot()));
+            if (tvDrawingUndoStack.length > 30) tvDrawingUndoStack.shift();
+            syncTVDrawingToolbarControls();
+        }
+
+        function restoreTVDrawingSnapshot(snapshotJson) {
+            try {
+                const parsed = JSON.parse(snapshotJson || '[]');
+                tvDrawingDefs = Array.isArray(parsed)
+                    ? parsed.map(normalizeTVDrawingDef).filter(Boolean)
+                    : [];
+            } catch (e) {
+                tvDrawingDefs = [];
+            }
+            if (!tvFindDrawingById()) tvSelectedDrawingId = null;
+            tvDrawStart = null;
+            clearTVDrawingPreview();
+            persistTVDrawings();
+            tvRestoreDrawings();
+            updateTVDrawingEditor();
+            syncTVDrawingToolbarControls();
         }
 
         function tvFindDrawingById(id = tvSelectedDrawingId) {
@@ -15875,7 +15934,7 @@ def index():
                 tvUserHLinePriceLines = new Map();
                 return;
             }
-            const defs = tvDrawingDefs.filter(def => def && def.type === 'hline' && Number.isFinite(def.price));
+            const defs = tvDrawingDefs.filter(def => def && !def.hidden && def.type === 'hline' && Number.isFinite(def.price));
             const activeIds = new Set(defs.map(def => def.id));
             tvUserHLinePriceLines.forEach((line, id) => {
                 if (activeIds.has(id)) return;
@@ -16749,11 +16808,13 @@ def index():
                 });
                 editor.querySelector('[data-action="delete"]').addEventListener('click', () => {
                     if (!tvSelectedDrawingId) return;
+                    pushTVDrawingUndoSnapshot();
                     tvDrawingDefs = tvDrawingDefs.filter(def => def.id !== tvSelectedDrawingId);
                     tvSelectedDrawingId = null;
                     persistTVDrawings();
                     tvRestoreDrawings();
                     updateTVDrawingEditor();
+                    syncTVDrawingToolbarControls();
                 });
                 editor.querySelector('#tv-selected-draw-color').addEventListener('input', event => {
                     const def = tvFindDrawingById();
@@ -16985,7 +17046,9 @@ def index():
             }
             tvDrawStart = null;
             tvDrawingPreviewDef = null;
+            tvDrawingUndoStack = [];
             tvRestoreDrawings();
+            syncTVDrawingToolbarControls();
         }
 
         function tvSyncDrawingScope() {
@@ -17584,7 +17647,10 @@ def index():
                 return;
             }
 
-            tvDrawingDefs.forEach(def => appendTVDrawingShape(svg, def, false, width, height));
+            tvDrawingDefs.forEach(def => {
+                if (!def || def.hidden) return;
+                appendTVDrawingShape(svg, def, false, width, height);
+            });
             if (tvDrawingPreviewDef) {
                 appendTVDrawingShape(svg, tvDrawingPreviewDef, true, width, height);
             }
@@ -17623,12 +17689,14 @@ def index():
         function finishTVDrawingCreation(def) {
             const normalized = normalizeTVDrawingDef(def);
             if (!normalized) return null;
+            pushTVDrawingUndoSnapshot();
             tvDrawingDefs.push(normalized);
             persistTVDrawings();
             setDrawMode(null);
             tvSelectedDrawingId = normalized.id;
             tvRestoreDrawings();
             updateTVDrawingEditor();
+            syncTVDrawingToolbarControls();
             return normalized;
         }
 
@@ -17895,23 +17963,175 @@ def index():
             scheduleTVDrawingOverlayDraw();
         }
 
-        function tvUndoDrawing() {
+        function getTVDrawingTypeLabel(def) {
+            if (!def) return 'Drawing';
+            if (def.type === 'hline') return 'H-Line';
+            if (def.type === 'trendline') return 'Trend';
+            if (def.type === 'channel') return 'Channel';
+            if (def.type === 'rect') return 'Box';
+            if (def.type === 'avwap') return 'AVWAP';
+            if (def.type === 'text') return 'Label';
+            return 'Drawing';
+        }
+
+        function formatTVDrawingMenuLabel(def, index) {
+            const prefix = `${index + 1}. ${getTVDrawingTypeLabel(def)}`;
+            const label = String(def && (def.text || def.label || '') || '').trim();
+            const labelSuffix = label ? ` - ${label.slice(0, 24)}` : '';
+            const fmtPrice = value => {
+                const price = Number(value);
+                return Number.isFinite(price) ? price.toFixed(2) : '';
+            };
+            const fmtRange = (first, second) => {
+                const a = fmtPrice(first);
+                const b = fmtPrice(second);
+                if (a && b && a !== b) return `${a}-${b}`;
+                return a || b;
+            };
+            const presetLabel = (def && (def.type === 'hline' || def.type === 'channel'))
+                ? getTVHLinePreset(def.preset).label
+                : '';
+            if (def && def.type === 'hline') {
+                const priceText = fmtPrice(def.price);
+                return `${prefix}: ${[presetLabel, priceText].filter(Boolean).join(' ')}${labelSuffix}`.trim();
+            }
+            if (def && def.type === 'channel') {
+                const priceText = fmtRange(def.p1, def.p2) || fmtPrice(def.p3);
+                return `${prefix}: ${[presetLabel, priceText].filter(Boolean).join(' ')}${labelSuffix}`.trim();
+            }
+            if (label) return `${prefix}: ${label.slice(0, 28)}`;
+            if (def && def.type === 'rect') {
+                const priceText = fmtRange(def.bot, def.top);
+                if (priceText) return `${prefix} ${priceText}`;
+            }
+            if (def && def.type === 'trendline') {
+                const priceText = fmtRange(def.p1, def.p2);
+                if (priceText) return `${prefix} ${priceText}`;
+            }
+            if (def && def.type === 'avwap') {
+                const priceText = fmtPrice(def.anchorPrice);
+                if (priceText) return `${prefix} ${priceText}`;
+            }
+            if (def && def.type === 'text') {
+                const priceText = fmtPrice(def.price);
+                if (priceText) return `${prefix} ${priceText}`;
+            }
+            return prefix;
+        }
+
+        function setAllTVDrawingVisibility(hidden) {
             if (!tvDrawingDefs.length) return;
-            const removed = tvDrawingDefs.pop();
-            if (removed && removed.id === tvSelectedDrawingId) {
+            const changed = tvDrawingDefs.some(def => !!def.hidden !== hidden);
+            if (!changed) return;
+            pushTVDrawingUndoSnapshot();
+            tvDrawingDefs.forEach(def => { def.hidden = hidden; });
+            if (hidden) tvSelectedDrawingId = null;
+            persistTVDrawings();
+            tvRestoreDrawings();
+            updateTVDrawingEditor();
+            syncTVDrawingToolbarControls();
+        }
+
+        function toggleTVDrawingVisibility(id) {
+            const def = tvFindDrawingById(id);
+            if (!def) return;
+            pushTVDrawingUndoSnapshot();
+            def.hidden = !def.hidden;
+            if (def.hidden && tvSelectedDrawingId === def.id) {
                 tvSelectedDrawingId = null;
             }
             persistTVDrawings();
             tvRestoreDrawings();
+            updateTVDrawingEditor();
+            syncTVDrawingToolbarControls();
+        }
+
+        function renderTVDrawingVisibilityMenu(panel) {
+            if (!panel) return;
+            panel.innerHTML = '';
+            const section = document.createElement('div');
+            section.className = 'tv-toolbar-menu-section';
+            const heading = document.createElement('div');
+            heading.className = 'tv-toolbar-menu-title';
+            heading.textContent = 'Drawings';
+            section.appendChild(heading);
+            if (!tvDrawingDefs.length) {
+                const empty = document.createElement('div');
+                empty.className = 'tv-draw-menu-empty';
+                empty.textContent = 'No drawings yet';
+                section.appendChild(empty);
+            } else {
+                tvDrawingDefs.forEach((def, index) => {
+                    const item = document.createElement('button');
+                    item.type = 'button';
+                    item.className = 'tv-draw-menu-item tv-drawing-visibility-item';
+                    item.classList.toggle('muted', !!def.hidden);
+                    item.dataset.drawingId = def.id;
+                    item.title = def.hidden ? 'Show this drawing' : 'Hide this drawing';
+                    const visibleIcon = def.hidden ? '□' : '☑';
+                    const check = document.createElement('span');
+                    check.className = 'tv-drawing-visibility-check';
+                    check.textContent = visibleIcon;
+                    const label = document.createElement('span');
+                    label.className = 'tv-drawing-visibility-label';
+                    label.textContent = formatTVDrawingMenuLabel(def, index);
+                    item.appendChild(check);
+                    item.appendChild(label);
+                    item.addEventListener('click', event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        toggleTVDrawingVisibility(def.id);
+                    });
+                    section.appendChild(item);
+                });
+            }
+            panel.appendChild(section);
+        }
+
+        function syncTVDrawingToolbarControls() {
+            const undoBtn = document.getElementById('tv-draw-undo-button');
+            if (undoBtn) {
+                undoBtn.disabled = !tvDrawingUndoStack.length;
+                undoBtn.title = tvDrawingUndoStack.length ? 'Undo last drawing action' : 'No drawing action to undo';
+            }
+            const clearBtn = document.getElementById('tv-draw-clear-button');
+            if (clearBtn) {
+                clearBtn.disabled = !tvDrawingDefs.length;
+                clearBtn.title = tvDrawingDefs.length ? 'Clear all drawings from this chart' : 'No drawings to clear';
+            }
+            const hideBtn = document.getElementById('tv-draw-hide-button');
+            if (hideBtn) {
+                const hasDrawings = !!tvDrawingDefs.length;
+                const allHidden = hasDrawings && tvDrawingDefs.every(def => def.hidden);
+                hideBtn.disabled = !hasDrawings;
+                hideBtn.textContent = allHidden ? 'Show' : 'Hide';
+                hideBtn.title = allHidden ? 'Show all drawings' : 'Hide all drawings';
+            }
+            const menuPanel = document.getElementById('tv-drawing-visibility-menu');
+            if (menuPanel) renderTVDrawingVisibilityMenu(menuPanel);
+        }
+
+        function tvUndoDrawing() {
+            const snapshot = tvDrawingUndoStack.pop();
+            if (!snapshot) {
+                syncTVDrawingToolbarControls();
+                return;
+            }
+            restoreTVDrawingSnapshot(snapshot);
         }
 
         function tvClearDrawings() {
+            if (!tvDrawingDefs.length) return;
+            if (!window.confirm('Clear all drawings from this chart? Use Undo to restore them.')) return;
+            pushTVDrawingUndoSnapshot();
             tvSelectedDrawingId = null;
             tvDrawStart = null;
             clearTVDrawingPreview();
             tvDrawingDefs = [];
             persistTVDrawings();
             tvRestoreDrawings();
+            updateTVDrawingEditor();
+            syncTVDrawingToolbarControls();
         }
 
         function tvHandleChartClick(param) {
@@ -18424,9 +18644,32 @@ def index():
             colorWrap.appendChild(colorPicker);
             addToGroup(drawGroup, colorWrap);
 
-            // Undo / Clear / chart settings
-            addToGroup(actionsGroup, btn('↩ Undo', 'Undo last drawing', tvUndoDrawing));
-            addToGroup(actionsGroup, btn('✕ Clear', 'Clear all drawings', tvClearDrawings, 'danger'));
+            // Drawing actions
+            const undoButton = btn('↩ Undo', 'Undo last drawing action', tvUndoDrawing);
+            undoButton.id = 'tv-draw-undo-button';
+            addToGroup(actionsGroup, undoButton);
+
+            const clearButton = btn('✕ Clear', 'Clear all drawings from this chart', tvClearDrawings, 'danger');
+            clearButton.id = 'tv-draw-clear-button';
+            addToGroup(actionsGroup, clearButton);
+
+            const drawingsMenu = createToolbarMenu('Hide', 'Hide or show drawings.', {
+                toggleTitle: 'Show individual drawing visibility',
+            });
+            drawingsMenu.menuButton.id = 'tv-draw-hide-button';
+            drawingsMenu.menuButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                const hasDrawings = !!tvDrawingDefs.length;
+                if (!hasDrawings) return;
+                const allHidden = tvDrawingDefs.every(def => def.hidden);
+                setAllTVDrawingVisibility(!allHidden);
+                closeTVToolbarMenus();
+            }, true);
+            drawingsMenu.toggleButton.id = 'tv-draw-visibility-toggle';
+            drawingsMenu.menuPanel.id = 'tv-drawing-visibility-menu';
+            renderTVDrawingVisibilityMenu(drawingsMenu.menuPanel);
+            addToGroup(actionsGroup, drawingsMenu.wrap);
 
             const chartMenu = createToolbarMenu('Chart', 'Open chart style and level settings.', {
                 toggleTitle: 'Open chart settings menu',
@@ -18450,6 +18693,7 @@ def index():
             });
             chartMenu.menuPanel.appendChild(chartMenuGrid);
             addToGroup(actionsGroup, chartMenu.wrap);
+            syncTVDrawingToolbarControls();
 
             // Auto-Range toggle
             const arBtn = document.createElement('button');
@@ -21216,6 +21460,7 @@ def index():
             tvAllLevelPrices.push(...tvKeyLevelPrices, ...tvSessionLevelPrices, ...tvTopOIPrices);
             tvDrawingDefs.forEach(def => {
                 if (!def) return;
+                if (def.hidden) return;
                 if (def.type === 'hline' || def.type === 'text') {
                     tvAllLevelPrices.push(def.price);
                 } else if (def.type === 'trendline') {
