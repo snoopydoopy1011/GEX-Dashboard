@@ -13172,6 +13172,7 @@ def index():
         let tvSessionLevelLines = [];
         let tvTopOILines   = [];
         let tvUserHLinePriceLines = new Map();
+        let tvUserDrawingAxisLabelLines = new Map();
         let _lastTopOI     = null;
         let _lastTopOIContextKey = '';
         let _lastKeyLevels     = null;
@@ -16459,11 +16460,14 @@ def index():
             if (type === 'avwap') {
                 return ['axis', 'start', 'middle', 'end'].includes(value) ? value : 'axis';
             }
-            if (type === 'trendline' || type === 'channel') {
+            if (type === 'trendline') {
                 return ['auto', 'start', 'middle', 'end'].includes(value) ? value : 'auto';
             }
+            if (type === 'channel') {
+                return ['auto', 'start', 'middle', 'end', 'axis-top', 'axis-mid', 'axis-bottom'].includes(value) ? value : 'auto';
+            }
             if (type === 'rect') {
-                return ['auto', 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center'].includes(value) ? value : 'auto';
+                return ['auto', 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center', 'axis-top', 'axis-mid', 'axis-bottom'].includes(value) ? value : 'auto';
             }
             return '';
         }
@@ -16975,6 +16979,15 @@ def index():
             return LS.Solid;
         }
 
+        function clearTVUserDrawingAxisLabelLines() {
+            if (tvCandleSeries) {
+                tvUserDrawingAxisLabelLines.forEach(line => {
+                    try { tvCandleSeries.removePriceLine(line); } catch (e) {}
+                });
+            }
+            tvUserDrawingAxisLabelLines = new Map();
+        }
+
         function clearTVUserHLinePriceLines() {
             if (tvCandleSeries) {
                 tvUserHLinePriceLines.forEach(line => {
@@ -16982,6 +16995,7 @@ def index():
                 });
             }
             tvUserHLinePriceLines = new Map();
+            clearTVUserDrawingAxisLabelLines();
         }
 
         function syncTVUserHLinePriceLines() {
@@ -17027,6 +17041,135 @@ def index():
             });
         }
 
+        function getTVVisibleRightLogical(width) {
+            try {
+                const range = tvPriceChart && tvPriceChart.timeScale && tvPriceChart.timeScale().getVisibleLogicalRange
+                    ? tvPriceChart.timeScale().getVisibleLogicalRange()
+                    : null;
+                if (range && Number.isFinite(Number(range.to))) return Number(range.to);
+            } catch (e) {}
+            const fromWidth = tvCoordinateToLogical(width);
+            return Number.isFinite(fromWidth) ? fromWidth : null;
+        }
+
+        function isTVDrawingAxisLabelPosition(position) {
+            return ['axis-top', 'axis-mid', 'axis-bottom'].includes(String(position || ''));
+        }
+
+        function getTVRightPriceScaleWidth() {
+            try {
+                const scale = tvPriceChart && tvPriceChart.priceScale ? tvPriceChart.priceScale('right') : null;
+                const scaleWidth = scale && typeof scale.width === 'function' ? scale.width() : 0;
+                return Number.isFinite(scaleWidth) ? Math.max(0, scaleWidth) : 0;
+            } catch (e) {
+                return 0;
+            }
+        }
+
+        function estimateTVDrawingAxisLabelWidth(def, price) {
+            const label = String(def && def.label || '').trim();
+            const priceText = Number.isFinite(Number(price)) ? Number(price).toFixed(2) : '';
+            const text = [label, priceText].filter(Boolean).join('  ');
+            return Math.max(76, Math.min(190, 26 + (text.length * 7)));
+        }
+
+        function getTVDrawingExtendRightX(def, width) {
+            const scaleWidth = getTVRightPriceScaleWidth();
+            const plotRight = Math.max(40, width - scaleWidth);
+            if (!def || !isTVDrawingAxisLabelPosition(def.labelPosition)) {
+                return plotRight;
+            }
+            const axisPrice = def.type === 'channel'
+                ? getTVChannelAxisLabelPrice(def, width)
+                : (def.type === 'rect' ? getTVRectAxisLabelPrice(def) : null);
+            const labelWidth = estimateTVDrawingAxisLabelWidth(def, axisPrice);
+            return Math.max(40, plotRight - labelWidth - 8);
+        }
+
+        function getTVChannelAxisLabelPrice(def, width) {
+            if (!def || def.type !== 'channel') return null;
+            const channel = tvComputeChannelData(def);
+            if (!channel || channel.vertical) return null;
+            const rightLogical = getTVVisibleRightLogical(width);
+            const fallbackLogical = Math.max(channel.l1, channel.l2);
+            const logical = Number.isFinite(rightLogical) ? rightLogical : fallbackLogical;
+            if (!Number.isFinite(logical)) return null;
+            const basePrice = channel.p1 + (channel.slope * (logical - channel.l1));
+            const parallelPrice = channel.q1 + (channel.slope * (logical - channel.l1));
+            if (!Number.isFinite(basePrice) || !Number.isFinite(parallelPrice)) return null;
+            const midPrice = (basePrice + parallelPrice) / 2;
+            if (def.labelPosition === 'axis-top') return Math.max(basePrice, parallelPrice);
+            if (def.labelPosition === 'axis-bottom') return Math.min(basePrice, parallelPrice);
+            return midPrice;
+        }
+
+        function getTVRectAxisLabelPrice(def) {
+            if (!def || def.type !== 'rect') return null;
+            const top = Number(def.top);
+            const bot = Number(def.bot);
+            if (!Number.isFinite(top) || !Number.isFinite(bot)) return null;
+            if (def.labelPosition === 'axis-top') return Math.max(top, bot);
+            if (def.labelPosition === 'axis-bottom') return Math.min(top, bot);
+            return (top + bot) / 2;
+        }
+
+        function syncTVUserDrawingAxisLabelLines(width = 0) {
+            if (!tvCandleSeries || !window.LightweightCharts) {
+                tvUserDrawingAxisLabelLines = new Map();
+                return;
+            }
+            const defs = tvDrawingDefs
+                .filter(def => def && !def.hidden && String(def.label || '').trim())
+                .map(def => {
+                    if (def.type === 'channel' && isTVDrawingAxisLabelPosition(def.labelPosition)) {
+                        const price = getTVChannelAxisLabelPrice(def, width);
+                        return Number.isFinite(price) ? { def, price } : null;
+                    }
+                    if (def.type === 'rect' && isTVDrawingAxisLabelPosition(def.labelPosition)) {
+                        const price = getTVRectAxisLabelPrice(def);
+                        return Number.isFinite(price) ? { def, price } : null;
+                    }
+                    return null;
+                })
+                .filter(Boolean);
+            const activeIds = new Set(defs.map(item => item.def.id));
+            tvUserDrawingAxisLabelLines.forEach((line, id) => {
+                if (activeIds.has(id)) return;
+                try { tvCandleSeries.removePriceLine(line); } catch (e) {}
+                tvUserDrawingAxisLabelLines.delete(id);
+            });
+            defs.forEach(({ def, price }) => {
+                const options = {
+                    price,
+                    color: def.color,
+                    lineWidth: 1,
+                    lineStyle: tvDrawingLineStyleToNative(def.lineStyle),
+                    lineVisible: false,
+                    axisLabelVisible: true,
+                    title: String(def.label || ''),
+                };
+                const existing = tvUserDrawingAxisLabelLines.get(def.id);
+                if (existing && typeof existing.applyOptions === 'function') {
+                    try {
+                        existing.applyOptions(options);
+                        return;
+                    } catch (e) {
+                        try { tvCandleSeries.removePriceLine(existing); } catch (err) {}
+                        tvUserDrawingAxisLabelLines.delete(def.id);
+                    }
+                } else if (existing) {
+                    try { tvCandleSeries.removePriceLine(existing); } catch (e) {}
+                    tvUserDrawingAxisLabelLines.delete(def.id);
+                }
+                try {
+                    const line = tvCandleSeries.createPriceLine(options);
+                    tvUserDrawingAxisLabelLines.set(def.id, line);
+                } catch (e) {
+                    console.warn('createPriceLine failed for drawing axis label', e);
+                }
+            });
+        }
+
         function getTVDrawingLabelPositionOptions(type) {
             if (type === 'avwap') {
                 return [
@@ -17037,12 +17180,20 @@ def index():
                 ];
             }
             if (type === 'trendline' || type === 'channel') {
-                return [
+                const options = [
                     { value: 'auto', label: 'Auto' },
                     { value: 'start', label: 'Start' },
                     { value: 'middle', label: 'Middle' },
                     { value: 'end', label: 'End' },
                 ];
+                if (type === 'channel') {
+                    options.push(
+                        { value: 'axis-top', label: 'Price Axis - Top' },
+                        { value: 'axis-mid', label: 'Price Axis - Midline' },
+                        { value: 'axis-bottom', label: 'Price Axis - Bottom' },
+                    );
+                }
+                return options;
             }
             if (type === 'rect') {
                 return [
@@ -17052,6 +17203,9 @@ def index():
                     { value: 'bottom-left', label: 'Bottom Left' },
                     { value: 'bottom-right', label: 'Bottom Right' },
                     { value: 'center', label: 'Center' },
+                    { value: 'axis-top', label: 'Price Axis - Top' },
+                    { value: 'axis-mid', label: 'Price Axis - Middle' },
+                    { value: 'axis-bottom', label: 'Price Axis - Bottom' },
                 ];
             }
             return [];
@@ -17068,6 +17222,28 @@ def index():
                 return { x: xMid, y: yMid - 16, anchor: 'center', boundWidth: width, boundHeight: height };
             }
             return { x: screen.x2 + 12, y: screen.y2 - 12, anchor: 'left', boundWidth: width, boundHeight: height };
+        }
+
+        function getTVChannelLabelPlacement(screen, labelPosition, width, height) {
+            const placement = labelPosition || 'auto';
+            const start = { x: screen.mx1, y: screen.my1 };
+            const end = screen.extendRight
+                ? { x: screen.extendRight.toX, y: screen.extendRight.midToY }
+                : { x: screen.mx2, y: screen.my2 };
+            const mid = {
+                x: (start.x + end.x) / 2,
+                y: (start.y + end.y) / 2,
+            };
+            if (placement === 'start') {
+                return { x: start.x + 12, y: start.y - 12, anchor: 'left', boundWidth: width, boundHeight: height };
+            }
+            if (placement === 'middle') {
+                return { x: mid.x, y: mid.y - 16, anchor: 'center', boundWidth: width, boundHeight: height };
+            }
+            if (screen.extendRight) {
+                return { x: Math.max(8, end.x - 10), y: end.y - 12, anchor: 'right', boundWidth: width, boundHeight: height };
+            }
+            return { x: end.x + 12, y: end.y - 12, anchor: 'left', boundWidth: width, boundHeight: height };
         }
 
         function getTVRectLabelPlacement(screen, labelPosition, width, height) {
@@ -17919,6 +18095,7 @@ def index():
                     if (def.type === 'hline') {
                         syncTVUserHLinePriceLines();
                     }
+                    syncTVUserDrawingAxisLabelLines();
                     if (def.type === 'avwap') applyTVAvwapDrawings();
                     if (def.type === 'hline' || def.type === 'channel') {
                         updateTVDrawingEditor();
@@ -17937,6 +18114,7 @@ def index():
                     }
                     persistTVDrawings();
                     if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    syncTVUserDrawingAxisLabelLines();
                     updateTVDrawingEditor();
                     scheduleTVDrawingOverlayDraw();
                 });
@@ -17946,6 +18124,7 @@ def index():
                     def.lineWidth = clampTVDrawingLineWidth(event.target.value);
                     persistTVDrawings();
                     if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    syncTVUserDrawingAxisLabelLines();
                     if (def.type === 'avwap') applyTVAvwapDrawings();
                     tvRefreshDrawingLevels();
                     scheduleTVDrawingOverlayDraw();
@@ -17956,6 +18135,7 @@ def index():
                     def.lineStyle = normalizeTVDrawingStyle(event.target.value);
                     persistTVDrawings();
                     if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    syncTVUserDrawingAxisLabelLines();
                     if (def.type === 'avwap') applyTVAvwapDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
@@ -17969,6 +18149,7 @@ def index():
                     }
                     persistTVDrawings();
                     if (def.type === 'hline') syncTVUserHLinePriceLines();
+                    syncTVUserDrawingAxisLabelLines();
                     if (def.type === 'avwap') applyTVAvwapDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
@@ -17977,6 +18158,7 @@ def index():
                     if (!def) return;
                     def.labelPosition = normalizeTVDrawingLabelPosition(def.type, event.target.value);
                     persistTVDrawings();
+                    syncTVUserDrawingAxisLabelLines();
                     scheduleTVDrawingOverlayDraw();
                 });
                 editor.querySelector('#tv-selected-draw-midline').addEventListener('change', event => {
@@ -18232,7 +18414,8 @@ def index():
                     my2,
                 };
                 if (def.extendRight === true) {
-                    const rightLogical = tvCoordinateToLogical(width);
+                    const extendToX = getTVDrawingExtendRightX(def, width);
+                    const rightLogical = tvCoordinateToLogical(extendToX);
                     const anchorLogical = channel.l2 >= channel.l1 ? channel.l2 : channel.l1;
                     const anchorBase = channel.l2 >= channel.l1 ? channel.p2 : channel.p1;
                     const anchorParallel = channel.l2 >= channel.l1 ? channel.q2 : channel.q1;
@@ -18255,7 +18438,7 @@ def index():
                                 parallelFromY: channel.l2 >= channel.l1 ? py2 : py1,
                                 midFromX: channel.l2 >= channel.l1 ? x2 : x1,
                                 midFromY: channel.l2 >= channel.l1 ? my2 : my1,
-                                toX: width,
+                                toX: extendToX,
                                 baseToY: baseExtY,
                                 parallelToY: parallelExtY,
                                 midToY: midExtY,
@@ -18338,12 +18521,17 @@ def index():
             const labelText = def.type === 'text' ? String(def.text || 'Label') : String(def.label || '');
             const bindSelect = (target) => {
                 if (!interactive || !target) return;
-                target.addEventListener('click', event => {
+                const selectDrawing = event => {
                     event.preventDefault();
                     event.stopPropagation();
                     tvSelectedDrawingId = def.id;
                     updateTVDrawingEditor();
                     scheduleTVDrawingOverlayDraw();
+                };
+                target.addEventListener('mousedown', selectDrawing);
+                target.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
                 });
             };
 
@@ -18532,16 +18720,11 @@ def index():
                         }));
                     }
                 }
-                if (labelText) {
+                if (labelText && !isTVDrawingAxisLabelPosition(def.labelPosition)) {
                     appendTVDrawingBadge(group, Object.assign({
                         label: labelText,
                         color: def.color,
-                    }, getTVTrendlineLabelPlacement({
-                        x1: screen.mx1,
-                        y1: screen.my1,
-                        x2: screen.mx2,
-                        y2: screen.my2,
-                    }, def.labelPosition, width, height)));
+                    }, getTVChannelLabelPlacement(screen, def.labelPosition, width, height)));
                 }
                 if (interactive) {
                     const hitSegments = [
@@ -18624,7 +18807,7 @@ def index():
                     'stroke-width': strokeWidth,
                     'stroke-dasharray': dashArray || null,
                 }));
-                if (labelText) {
+                if (labelText && !isTVDrawingAxisLabelPosition(def.labelPosition)) {
                     appendTVDrawingBadge(group, Object.assign({
                         label: labelText,
                         color: def.color,
@@ -18732,9 +18915,11 @@ def index():
             svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
             svg.replaceChildren();
             if (!tvPriceChart || !tvCandleSeries || !width || !height) {
+                syncTVUserDrawingAxisLabelLines(width);
                 updateTVDrawingEditor();
                 return;
             }
+            syncTVUserDrawingAxisLabelLines(width);
 
             tvDrawingDefs.forEach(def => {
                 if (!def || def.hidden) return;
@@ -18764,6 +18949,7 @@ def index():
 
         function tvRestoreDrawings() {
             syncTVUserHLinePriceLines();
+            syncTVUserDrawingAxisLabelLines();
             tvRefreshDrawingLevels();
             applyTVAvwapDrawings();
             scheduleTVDrawingOverlayDraw();
