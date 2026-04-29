@@ -1,6 +1,6 @@
 # Right Rail Overview Reorganization Prototype Plan
 
-**Status:** Prototype pass implemented on `codex/right-rail-overview-prototype`; review/cleanup pending  
+**Status:** Prototype and cleanup pass implemented on `codex/right-rail-overview-prototype`; ready for PR review  
 **Created:** 2026-04-28  
 **Last updated:** 2026-04-29  
 **Target branch:** `codex/right-rail-overview-prototype`  
@@ -15,12 +15,13 @@ Implemented in `ezoptionsschwab.py` on branch `codex/right-rail-overview-prototy
 
 - Added the fourth right-rail tab: `Overview | Levels | Scenarios | Flow`.
 - Added `[data-rail-panel="flow"]` and tab persistence support for `flow`.
-- Added `.chart-grid.rail-flow-active` so selecting Flow widens the right rail with `--rail-col-w: clamp(420px, 34vw, 520px)`.
+- Added `.chart-grid.rail-flow-active` so selecting Flow widens the right rail with `--rail-col-w: clamp(440px, 32vw, 560px)`.
 - Added a compact Flow rail surface under `#right-rail-flow`.
-- Duplicated the existing bottom Flow Blotter into the Flow rail as compact row cards derived from the existing `large_trades` HTML payload.
-- Preserved the existing bottom Flow Blotter and the horizontal Live Alerts / Flow Pulse strips for comparison.
+- Moved the Flow Blotter out of the bottom secondary chart area and made the right-rail Flow tab the only visible blotter surface.
+- Kept the horizontal Live Alerts / Flow Pulse strips, then reclaimed the removed blotter height by stretching the price chart and right rail.
 - Moved the contract-helper surface into the TradingView toolbar as `.tv-toolbar-helper`, placed after the strike overlay controls and before the right-side Auto-Range / Today / Reset controls.
 - Added a hover/focus helper popover with the existing call candidate, put candidate, size guide, note, and expiry hooks.
+- Reclaimed toolbar space by shortening `Auto-Range ON/OFF` to `Range ON/OFF`, making Reset icon-only, and moving the "confirmed 1-minute volume" status into the Chart menu's Data section.
 - Removed the runtime Overview contract-helper card from the visible Overview layout.
 - Consolidated Overview into four cards:
   - `#rail-card-market-state`
@@ -28,33 +29,38 @@ Implemented in `ezoptionsschwab.py` on branch `codex/right-rail-overview-prototy
   - `#rail-card-iv`
   - `#rail-card-centroid`
 - Reused the existing renderer hooks (`#rail-card-price`, `#rail-card-metrics`, `#rail-card-range`, `#rail-card-profile`, `#rail-card-activity`, `#dealer-impact`, and `data-met` hooks) inside the new composite cards to avoid recalculating or rewriting analytics.
+- Increased the default right-rail width to `clamp(360px, 24vw, 430px)`.
+- Added a persistent right-rail collapse toggle and draggable left-edge resize handle using `localStorage` keys for collapsed state and custom width.
+- Added container-query typography/layout tuning so wider rails use larger Overview numbers and a denser two-column Dealer / Hedge row layout, while narrow resized rails fall back to the compact stacked layout.
+- Replaced the temporary `buildAlertsPanelHtml` override with a single canonical compact Overview builder.
 
 Validation run on 2026-04-29:
 
 - `python3 -m py_compile ezoptionsschwab.py` passes.
 - Extracted page JavaScript parses with `new Function(...)`.
 - Local Flask smoke served the updated page on `http://127.0.0.1:5002/`.
-- Verified the served HTML contains the Flow tab, compact Overview card IDs, toolbar helper CSS/JS, and Flow rail renderer code.
+- Verified the served HTML contains the Flow tab, compact Overview card IDs, toolbar helper CSS/JS, right-rail collapse/resize controls, container-query Overview CSS, and Flow rail renderer code.
+- Verified the old toolbar `Vol: 1m confirmed` pill is no longer in the served HTML.
+- Verified the bottom secondary-chart Flow Blotter label is no longer in the served HTML.
 
 Known prototype notes / tricky parts:
 
 - No analytical formulas, Schwab data sources, or endpoints were changed.
-- The rail Flow Blotter currently derives its compact rows by parsing the existing `large_trades` HTML table in the browser. This kept the backend contract untouched, but a later cleanup should consider returning a structured flow-blotter payload if the rail version becomes permanent.
+- The rail Flow Blotter still derives compact rows by parsing the existing `large_trades` HTML table in the browser. The backend still returns `response['large_trades']` so the rail can reuse the existing payload, but the bottom chart registry no longer exposes `large_trades` as a secondary chart. A later cleanup should consider returning a structured flow-blotter payload.
 - The Flow rail filters support All / Calls / Puts and minimum premium. Sorting is intentionally reduced for this prototype; rows inherit the existing backend/default ranking.
 - The toolbar helper uses the existing `data-met="contract_*"` hooks in both the compact toolbar and popover, so `renderContractHelper(stats)` updates all helper surfaces at once.
-- Runtime rebuild safety is handled by overriding `buildAlertsPanelHtml` after the original function body. The app serves and rebuilds the new Overview markup correctly, but a cleanup pass should replace the old body outright so stale `#rail-card-contract-helper` source text is removed.
+- Runtime rebuild safety now uses one canonical `buildAlertsPanelHtml()` body. The stale original body and stale `#rail-card-contract-helper` source text were removed.
+- Right-rail width/collapse state is independent from the existing strike-rail width/collapse state. The right-rail resize handle mirrors the strike-rail interaction pattern but uses separate `localStorage` keys so the two rails do not fight each other.
+- Overview typography uses CSS container queries on `.right-rail-panels`; wide rails get larger values and paired Dealer / Hedge rows, while narrow rails remain stacked.
 - Baseline on port 5001 was not run from this same worktree after edits because it would serve the modified branch. For true side-by-side review, use a separate checkout or stash/worktree for `main` on port 5001 and this branch on port 5002.
 
 Remaining work for the next session:
 
-- Browser-review the prototype visually at desktop widths and check console output.
-- Verify Flow tab width toggles cleanly when switching back to Overview / Levels / Scenarios.
+- Browser-review the final cleanup visually at a few common desktop widths and check console output.
 - Verify rail Flow rows with live `large_trades` data and confirm the compact row fields are the right set.
-- Check toolbar crowding at common desktop widths; adjust the collapse breakpoints if Auto-Range / Today / Reset or timeframe controls are squeezed.
-- Decide whether the Flow rail should replace or continue duplicating the bottom Flow Blotter.
-- Remove the stale original `buildAlertsPanelHtml` body and keep only the new canonical markup builder.
+- Consider replacing browser-side parsing of `large_trades` HTML with a structured flow-blotter payload if the Flow tab becomes permanent.
 - Consider adding an expandable/details affordance for condensed Vol / Skew and Dealer / Hedge rows if review shows too much detail was hidden.
-- Optionally add Playwright/browser screenshots for Overview, Flow, and the toolbar helper popover after live data is available.
+- Optionally add Playwright/browser screenshots for Overview, Flow, rail collapsed/expanded, resized rail, and the toolbar helper popover after live data is available.
 
 ## 1. Read This First
 
