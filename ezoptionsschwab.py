@@ -3033,6 +3033,122 @@ def resolve_lookback_days(timeframe, override=None):
     return min(n, cap)
 
 
+# RVOL-at-time baseline cache. Keyed by (symbol, today_iso, tf, lookback_days).
+# One fetch per ticker/timeframe/window per session day.
+_RVOL_AT_TIME_CACHE = {}
+RVOL_LOOKBACK_DEFAULT = 10
+RVOL_LOOKBACK_MIN = 3
+RVOL_LOOKBACK_MAX = 30
+
+
+def compute_rvol_at_time_buckets(ticker, timeframe, lookback_days):
+    """Average RTH per-bar volume by time-of-day across prior sessions.
+
+    Returns {'baseline': {HH:MM -> avg_volume}, 'sessions_used': int,
+    'lookback_days': int}. RTH window is 9:30-16:00 ET. Today and half-days
+    (last RTH bar < 15:30 ET) are excluded so the baseline isn't skewed by
+    the in-progress session or shortened holiday closes."""
+    if ticker == "MARKET":
+        sym = "$SPX"
+    elif ticker == "MARKET2":
+        sym = "SPY"
+    else:
+        sym = ticker
+
+    tf = max(1, int(timeframe or 1))
+    try:
+        lb = int(lookback_days) if lookback_days is not None else RVOL_LOOKBACK_DEFAULT
+    except (TypeError, ValueError):
+        lb = RVOL_LOOKBACK_DEFAULT
+    lb = max(RVOL_LOOKBACK_MIN, min(lb, RVOL_LOOKBACK_MAX))
+
+    est = pytz.timezone('US/Eastern')
+    today = datetime.now(est).date()
+    cache_key = (sym, today.isoformat(), tf, lb)
+    cached = _RVOL_AT_TIME_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Cushion calendar days to cover weekends/holidays. Schwab's `period`
+    # enum tops at 10, so use startDate/endDate for the real window.
+    start_date = datetime.combine(today - timedelta(days=lb + 10), datetime.min.time())
+    end_date = datetime.combine(today + timedelta(days=1), datetime.min.time())
+
+    try:
+        response = client.price_history(
+            symbol=sym,
+            periodType="day",
+            period=min(lb, 10),
+            frequencyType="minute",
+            frequency=1,
+            startDate=int(start_date.timestamp() * 1000),
+            endDate=int(end_date.timestamp() * 1000),
+            needExtendedHoursData=False,
+        )
+        if not response.ok:
+            return {'baseline': {}, 'sessions_used': 0, 'lookback_days': lb}
+        raw = (response.json() or {}).get('candles') or []
+    except Exception as exc:
+        print(f'[compute_rvol_at_time_buckets] fetch failed: {exc}')
+        return {'baseline': {}, 'sessions_used': 0, 'lookback_days': lb}
+
+    by_date = {}
+    for c in raw:
+        try:
+            dt = datetime.fromtimestamp(c['datetime'] / 1000, est)
+        except Exception:
+            continue
+        if dt.date() >= today:
+            continue
+        mins = dt.hour * 60 + dt.minute
+        if mins < 570 or mins >= 960:  # RTH-only: 9:30 .. 16:00 ET
+            continue
+        by_date.setdefault(dt.date(), []).append(c)
+
+    eligible = []
+    for d, day_candles in by_date.items():
+        if not day_candles:
+            continue
+        last_min = max(
+            (lambda dt: dt.hour * 60 + dt.minute)(
+                datetime.fromtimestamp(c['datetime'] / 1000, est))
+            for c in day_candles
+        )
+        if last_min >= 930:  # 15:30 ET — drop half-days
+            eligible.append(d)
+
+    eligible.sort(reverse=True)
+    eligible = eligible[:lb]
+
+    bucket_volumes = {}
+    for d in eligible:
+        day_candles = sorted(by_date[d], key=lambda x: x['datetime'])
+        bucketed = aggregate_candles_to_timeframe(day_candles, tf) if tf > 1 else day_candles
+        for b in bucketed:
+            try:
+                dt = datetime.fromtimestamp(b['datetime'] / 1000, est)
+            except Exception:
+                continue
+            mins = dt.hour * 60 + dt.minute
+            if mins < 570 or mins >= 960:
+                continue
+            key = f"{dt.hour:02d}:{dt.minute:02d}"
+            bucket_volumes.setdefault(key, []).append(float(b.get('volume') or 0))
+
+    avg_by_key = {}
+    for key, vols in bucket_volumes.items():
+        if vols:
+            avg_by_key[key] = sum(vols) / len(vols)
+
+    result = {
+        'baseline': avg_by_key,
+        'lookback_days': lb,
+        'sessions_used': len(eligible),
+    }
+    _RVOL_AT_TIME_CACHE[cache_key] = result
+    return result
+
+
 def get_price_history(ticker, timeframe=1, lookback_days=None):
     if ticker == "MARKET":
         ticker = "$SPX"
@@ -6664,7 +6780,8 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
                               strike_range=0.1, use_heikin_ashi=False,
                               highlight_max_level=False, max_level_color='#800080',
                               coloring_mode='Linear Intensity', ticker=None,
-                              selected_expiries=None):
+                              selected_expiries=None, timeframe=1,
+                              rvol_lookback_days=None):
     """Return raw OHLCV + overlay data as JSON for TradingView Lightweight Charts rendering."""
     import json as _json
 
@@ -6724,6 +6841,19 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
             previous_day_close = c['close']
             break
 
+    # RVOL-at-time baseline (RTH-only, prior sessions). Empty if disabled or
+    # if the historical fetch fails — JS gracefully falls back to up/down hue.
+    rvol_payload = {'baseline': {}, 'sessions_used': 0,
+                    'lookback_days': rvol_lookback_days or RVOL_LOOKBACK_DEFAULT,
+                    'enabled': bool(rvol_lookback_days) and ticker is not None}
+    if ticker and rvol_lookback_days:
+        try:
+            rvol_payload = compute_rvol_at_time_buckets(ticker, timeframe, rvol_lookback_days)
+            rvol_payload['enabled'] = True
+        except Exception as exc:
+            print(f'[prepare_price_chart_data] rvol baseline failed: {exc}')
+    rvol_baseline = rvol_payload.get('baseline') or {}
+
     # Build Lightweight Charts candle data (time in seconds UTC)
     lc_candles = []
     lc_volume = []
@@ -6732,8 +6862,19 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         lc_candles.append({'time': ts, 'open': c['open'], 'high': c['high'],
                            'low': c['low'], 'close': c['close']})
         is_up = c['close'] >= c['open'] if i == 0 else c['close'] >= display_candles[i - 1]['close']
-        lc_volume.append({'time': ts, 'value': c['volume'],
-                          'color': call_color if is_up else put_color})
+        bar = {'time': ts, 'value': c['volume'],
+               'color': call_color if is_up else put_color,
+               'is_up': bool(is_up)}
+        if rvol_baseline:
+            dt_et = datetime.fromtimestamp(ts, est)
+            mins = dt_et.hour * 60 + dt_et.minute
+            if 570 <= mins < 960:
+                key = f"{dt_et.hour:02d}:{dt_et.minute:02d}"
+                avg = rvol_baseline.get(key)
+                if avg and avg > 0:
+                    bar['baseline'] = avg
+                    bar['rvol'] = (c['volume'] or 0) / avg
+        lc_volume.append(bar)
 
     # Multi-day raw candles for indicator warmup (SMA200, EMA, etc. need prior-day history)
     lc_indicator_candles = [
@@ -6892,6 +7033,13 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         'indicator_candles': lc_indicator_candles,
         'vwap_candles': lc_vwap_candles,
         'current_day_start_time': current_day_start_time,
+        'rvol': {
+            'baseline': rvol_payload.get('baseline') or {},
+            'sessions_used': rvol_payload.get('sessions_used', 0),
+            'lookback_days': rvol_payload.get('lookback_days', 0),
+            'enabled': bool(rvol_payload.get('baseline')),
+            'timeframe': int(timeframe or 1),
+        },
     })
 
 
@@ -12494,6 +12642,22 @@ def index():
                         </div>
                     </div>
                 </details>
+                <details class="drawer-section">
+                    <summary>Volume Coloring (RVOL)</summary>
+                    <div class="drawer-content">
+                        <p class="chart-history-help">Compare each bar's volume to the average for that time-of-day across the last N RTH sessions (half-days excluded). Bars at &ge;1.5&times; tint yellow, &ge;2&times; orange, &ge;3&times; red. Below 1.5&times; the normal up/down color is preserved.</p>
+                        <div class="control-group">
+                            <label for="rvol_enabled" style="display:flex;align-items:center;gap:8px;">
+                                <input type="checkbox" id="rvol_enabled" checked>
+                                <span>Color volume bars by RVOL-at-time</span>
+                            </label>
+                        </div>
+                        <div class="control-group">
+                            <label for="rvol_lookback_days">Lookback days:</label>
+                            <input type="number" id="rvol_lookback_days" min="3" max="30" step="1" value="10" style="width:80px;">
+                        </div>
+                    </div>
+                </details>
                 <details class="drawer-section" open>
                     <summary>Sections</summary>
                     <div class="drawer-content">
@@ -13122,6 +13286,58 @@ def index():
         let tvCandleSeries = null;
         let tvVolumeSeries = null;
         let tvResizeObserver = null;
+        // RVOL-at-time state. Baseline is {HH:MM -> avg_volume} for the
+        // selected timeframe; tvRvolEnabled gates volume-bar recoloring.
+        let tvRvolBaseline = {};
+        let tvRvolEnabled = true;
+        const RVOL_TIER_COLORS = {
+            t150: '#facc15', // 1.5x  yellow
+            t200: '#fb923c', // 2.0x  orange
+            t300: '#ec4899', // 3.0x+ magenta (red is already the down-bar hue)
+        };
+        function rvolKeyFromTime(tsSeconds) {
+            // Lightweight Charts time is UTC seconds; convert to ET HH:MM.
+            const d = new Date(tsSeconds * 1000);
+            const parts = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York', hour12: false,
+                hour: '2-digit', minute: '2-digit',
+            }).formatToParts(d);
+            let hh = '00', mm = '00';
+            for (const p of parts) {
+                if (p.type === 'hour') hh = p.value;
+                if (p.type === 'minute') mm = p.value;
+            }
+            // Intl.DateTimeFormat may return hour '24' for midnight ET; normalize.
+            if (hh === '24') hh = '00';
+            return hh + ':' + mm;
+        }
+        function rvolTierColor(rvol, isUp, callColor, putColor) {
+            // <1.5x: preserve up/down hue (the volume signal isn't notable yet).
+            // >=1.5x: tier-color the bar regardless of direction — the volume
+            // anomaly is the story, and tier color is what the user is scanning for.
+            if (!Number.isFinite(rvol) || rvol < 1.5) {
+                return isUp ? callColor : putColor;
+            }
+            if (rvol >= 3.0) return RVOL_TIER_COLORS.t300;
+            if (rvol >= 2.0) return RVOL_TIER_COLORS.t200;
+            return RVOL_TIER_COLORS.t150;
+        }
+        function applyRvolColors(volumeBars, callColor, putColor) {
+            // Mutates the bar entries in-place. Bars without rvol fall back to
+            // the up/down color the server already assigned.
+            if (!tvRvolEnabled || !Array.isArray(volumeBars)) return volumeBars;
+            for (const bar of volumeBars) {
+                if (!bar || typeof bar.rvol !== 'number') continue;
+                bar.color = rvolTierColor(bar.rvol, bar.is_up !== false, callColor, putColor);
+            }
+            return volumeBars;
+        }
+        function rvolColorForLiveBar(tsSeconds, value, isUp, callColor, putColor) {
+            if (!tvRvolEnabled) return isUp ? callColor : putColor;
+            const baseline = tvRvolBaseline[rvolKeyFromTime(tsSeconds)];
+            if (!baseline || baseline <= 0) return isUp ? callColor : putColor;
+            return rvolTierColor((value || 0) / baseline, isUp, callColor, putColor);
+        }
         // Indicator series references
         let tvIndicatorSeries = {};
         let tvAvwapSeriesById = {}; // drawing.id -> LineSeries for AVWAP drawings
@@ -14153,10 +14369,11 @@ def index():
             rollInto(tvVwapCandles);
             try { tvCandleSeries.update(tvToSeriesBar(displayBar)); } catch(e) {}
             try {
+                const _isUp = displayBar.close >= displayBar.open;
                 tvVolumeSeries.update({
                     time:  displayBar.time,
                     value: displayBar.volume || 0,
-                    color: displayBar.close >= displayBar.open ? callColor : putColor,
+                    color: rvolColorForLiveBar(displayBar.time, displayBar.volume || 0, _isUp, callColor, putColor),
                 });
             } catch(e) {}
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
@@ -14345,6 +14562,35 @@ def index():
   var popoutTimeframe=1;
   var popoutCandleTimerInterval=null;
   var popoutUpColor='#10B981', popoutDownColor='#EF4444';
+  // RVOL-at-time state (popout). Mirrors main-chart logic — see rvolColorForLiveBar / applyRvolColors.
+  var popoutRvolBaseline={};
+  var popoutRvolEnabled=true;
+  var POPOUT_RVOL_TIER={t150:'#facc15',t200:'#fb923c',t300:'#ec4899'};
+  function popoutRvolKey(tsSec){
+    var d=new Date(tsSec*1000);
+    var parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour12:false,hour:'2-digit',minute:'2-digit'}).formatToParts(d);
+    var hh='00',mm='00';
+    for(var i=0;i<parts.length;i++){if(parts[i].type==='hour')hh=parts[i].value;if(parts[i].type==='minute')mm=parts[i].value;}
+    if(hh==='24')hh='00';
+    return hh+':'+mm;
+  }
+  function popoutRvolTierColor(rvol,isUp){
+    if(!isFinite(rvol)||rvol<1.5)return isUp?popoutUpColor:popoutDownColor;
+    if(rvol>=3.0)return POPOUT_RVOL_TIER.t300;
+    if(rvol>=2.0)return POPOUT_RVOL_TIER.t200;
+    return POPOUT_RVOL_TIER.t150;
+  }
+  function popoutApplyRvolColors(bars){
+    if(!popoutRvolEnabled||!Array.isArray(bars))return bars;
+    for(var i=0;i<bars.length;i++){var b=bars[i];if(!b||typeof b.rvol!=='number')continue;b.color=popoutRvolTierColor(b.rvol,b.is_up!==false);}
+    return bars;
+  }
+  function popoutRvolColorForLive(tsSec,value,isUp){
+    if(!popoutRvolEnabled)return isUp?popoutUpColor:popoutDownColor;
+    var avg=popoutRvolBaseline[popoutRvolKey(tsSec)];
+    if(!avg||avg<=0)return isUp?popoutUpColor:popoutDownColor;
+    return popoutRvolTierColor((value||0)/avg,isUp);
+  }
     var historicalDomBound=false;
     var tvHistoricalRenderedPoints=[];
         var historicalBubbleDrawPending=false;
@@ -14540,7 +14786,10 @@ def index():
       tvCandle.applyOptions({upColor:upColor,downColor:downColor,wickUpColor:upColor,wickDownColor:downColor});
     }
     tvCandle.setData(candles);
-    tvVol.setData(priceData.volume||[]);
+    popoutRvolBaseline=(priceData.rvol&&priceData.rvol.baseline)||{};
+    var _popVolBars=priceData.volume||[];
+    popoutApplyRvolColors(_popVolBars);
+    tvVol.setData(_popVolBars);
     tvLastCandles=candles;
         tvPriceLines.forEach(function(l){try{tvCandle.removePriceLine(l);}catch(e){}});tvPriceLines=[];tvAllLevelPrices=[];
         tvHistoricalPoints=priceData.historical_exposure_levels||[];
@@ -14567,7 +14816,7 @@ def index():
     } else if(bucketStart>lc.time){
       var fresh={time:bucketStart,open:last,high:last,low:last,close:last,volume:0};
       try{tvCandle.update(fresh);}catch(e){}
-      try{if(tvVol)tvVol.update({time:bucketStart,value:0,color:popoutUpColor});}catch(e){}
+      try{if(tvVol)tvVol.update({time:bucketStart,value:0,color:popoutRvolColorForLive(bucketStart,0,true)});}catch(e){}
       tvLastCandles.push(fresh);
     }
   }
@@ -14591,7 +14840,7 @@ def index():
       tvLastCandles.push(merged);tvLastCandles.sort(function(a,b){return a.time-b.time;});
     }
     try{tvCandle.update(merged);}catch(e){}
-    try{if(tvVol)tvVol.update({time:merged.time,value:merged.volume||0,color:merged.close>=merged.open?popoutUpColor:popoutDownColor});}catch(e){}
+    try{if(tvVol)tvVol.update({time:merged.time,value:merged.volume||0,color:popoutRvolColorForLive(merged.time,merged.volume||0,merged.close>=merged.open)});}catch(e){}
     if(activeInds.size>0)applyIndicators(tvLastCandles);
   }
 
@@ -14628,7 +14877,16 @@ def index():
       var tf=val('timeframe')||'1';
       var lookbackDays=null;
       try{if(typeof op.getLookbackDaysForTimeframe==='function')lookbackDays=op.getLookbackDaysForTimeframe(tf);}catch(e){}
-      return{ticker:ticker,timeframe:tf,lookback_days:lookbackDays,call_color:val('call_color')||'#00ff00',put_color:val('put_color')||'#ff0000',levels_types:levelsTypes,levels_count:parseInt(val('levels_count'))||3,use_heikin_ashi:chk('use_heikin_ashi'),strike_range:parseFloat(val('strike_range'))/100||0.1,highlight_max_level:chk('highlight_max_level'),max_level_color:val('max_level_color')||'#800080',coloring_mode:val('coloring_mode')||'Linear Intensity'};
+      var rvolLb=null;
+      try{
+        var rvEn=d.getElementById('rvol_enabled');
+        var rvLb=d.getElementById('rvol_lookback_days');
+        if(rvEn&&!rvEn.checked){rvolLb=null;}
+        else if(rvLb){var n=parseInt(rvLb.value)||10;rvolLb=Math.max(3,Math.min(30,n));}
+        else{rvolLb=10;}
+        popoutRvolEnabled=!(rvEn&&!rvEn.checked);
+      }catch(e){}
+      return{ticker:ticker,timeframe:tf,lookback_days:lookbackDays,rvol_lookback_days:rvolLb,call_color:val('call_color')||'#00ff00',put_color:val('put_color')||'#ff0000',levels_types:levelsTypes,levels_count:parseInt(val('levels_count'))||3,use_heikin_ashi:chk('use_heikin_ashi'),strike_range:parseFloat(val('strike_range'))/100||0.1,highlight_max_level:chk('highlight_max_level'),max_level_color:val('max_level_color')||'#800080',coloring_mode:val('coloring_mode')||'Linear Intensity'};
     }catch(e){return null;}
   }
   function loadInitialData(){
@@ -20847,7 +21105,12 @@ def index():
 
             tvCandleSeries.setData(candles);
             tvLastCandles = candles;
-            tvVolumeSeries.setData(priceData.volume || []);
+            // Refresh RVOL baseline for live-bar coloring, then recolor the
+            // historical bars before handing them to the series.
+            tvRvolBaseline = (priceData.rvol && priceData.rvol.baseline) || {};
+            const volumeBars = priceData.volume || [];
+            applyRvolColors(volumeBars, callColor, putColor);
+            tvVolumeSeries.setData(volumeBars);
             if (rangeToRestoreAfterData && tvPriceChart && tvPriceChart.timeScale) {
                 try { tvPriceChart.timeScale().setVisibleLogicalRange(rangeToRestoreAfterData); } catch (e) {}
             }
@@ -23394,10 +23657,17 @@ def index():
             const tf = document.getElementById('timeframe').value;
             const lookbackDays = (typeof getLookbackDaysForTimeframe === 'function')
                 ? getLookbackDaysForTimeframe(tf) : null;
+            const rvolEl = document.getElementById('rvol_lookback_days');
+            const rvolEnabledEl = document.getElementById('rvol_enabled');
+            // Server only computes the baseline when this field is truthy, so
+            // sending null disables the feature without an extra backend flag.
+            const rvolLookback = (rvolEnabledEl && !rvolEnabledEl.checked) ? null
+                : (rvolEl ? Math.max(3, Math.min(30, parseInt(rvolEl.value) || 10)) : 10);
             return {
                 ticker: document.getElementById('ticker').value,
                 timeframe: tf,
                 lookback_days: lookbackDays,
+                rvol_lookback_days: rvolLookback,
                 call_color: callColor,
                 put_color: putColor,
                 levels_types: Array.from(document.querySelectorAll('.levels-option input:checked')).map(cb => cb.value),
@@ -24945,6 +25215,43 @@ def index():
             });
         }
 
+        const RVOL_LS_KEY = 'gex.rvolAtTime.v1';
+        const rvolEnabledInput = document.getElementById('rvol_enabled');
+        const rvolLookbackInput = document.getElementById('rvol_lookback_days');
+        try {
+            const raw = localStorage.getItem(RVOL_LS_KEY);
+            if (raw) {
+                const cfg = JSON.parse(raw) || {};
+                if (rvolEnabledInput && typeof cfg.enabled === 'boolean') rvolEnabledInput.checked = cfg.enabled;
+                if (rvolLookbackInput && cfg.lookback) rvolLookbackInput.value = String(cfg.lookback);
+            }
+        } catch (e) {}
+        if (rvolEnabledInput) tvRvolEnabled = !!rvolEnabledInput.checked;
+        function persistRvolPrefs() {
+            try {
+                localStorage.setItem(RVOL_LS_KEY, JSON.stringify({
+                    enabled: !!(rvolEnabledInput && rvolEnabledInput.checked),
+                    lookback: rvolLookbackInput ? parseInt(rvolLookbackInput.value) || 10 : 10,
+                }));
+            } catch (e) {}
+        }
+        if (rvolEnabledInput) {
+            rvolEnabledInput.addEventListener('change', () => {
+                tvRvolEnabled = !!rvolEnabledInput.checked;
+                persistRvolPrefs();
+                if (typeof fetchPriceHistory === 'function') fetchPriceHistory(true);
+            });
+        }
+        if (rvolLookbackInput) {
+            rvolLookbackInput.addEventListener('change', () => {
+                let n = parseInt(rvolLookbackInput.value) || 10;
+                n = Math.max(3, Math.min(30, n));
+                rvolLookbackInput.value = String(n);
+                persistRvolPrefs();
+                if (typeof fetchPriceHistory === 'function') fetchPriceHistory(true);
+            });
+        }
+
         tvIndicatorPrefs = normalizeTVIndicatorPrefMap(tvIndicatorPrefs);
         priceLevelPrefs = normalizePriceLevelPrefMap(priceLevelPrefs);
         hydrateTVIndicatorStateFromLocalStorage();
@@ -25481,6 +25788,7 @@ def update_price():
             selected_expiries = []
         timeframe = int(data.get('timeframe', 1))
         lookback_days = data.get('lookback_days')
+        rvol_lookback_days = data.get('rvol_lookback_days')
         call_color = data.get('call_color', '#00ff00')
         put_color = data.get('put_color', '#ff0000')
         exposure_levels_types = data.get('levels_types', [])
@@ -25548,6 +25856,8 @@ def update_price():
             coloring_mode=coloring_mode,
             ticker=ticker,
             selected_expiries=selected_expiries,
+            timeframe=timeframe,
+            rvol_lookback_days=rvol_lookback_days,
         )
         # Inject timeframe so the popout candle-close timer knows the selected interval
         try:
