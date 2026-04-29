@@ -5259,6 +5259,208 @@ def compute_iv_context(calls, puts, S, ticker=None):
     return out
 
 
+def compute_max_pain(calls, puts, S=None, selected_expiries=None):
+    """Classic OI max pain for the nearest selected expiry."""
+    out = {
+        'price': None,
+        'total_payout': None,
+        'expiry': None,
+        'expiry_text': 'Near expiry',
+        'is_0dte': False,
+        'distance': None,
+        'distance_pct': None,
+        'label': 'OI Max Pain',
+    }
+    if calls is None or puts is None or (getattr(calls, 'empty', True) and getattr(puts, 'empty', True)):
+        return out
+
+    def _scoped(df):
+        if df is None or getattr(df, 'empty', True):
+            return pd.DataFrame()
+        f = df.copy()
+        expiries = _expiration_series_iso(f)
+        if expiries is not None:
+            allowed = _normalize_expiry_list(selected_expiries)
+            if allowed:
+                f = f[expiries.isin(allowed)].copy()
+                expiries = _expiration_series_iso(f)
+            nearest = _nearest_expiration(f)
+            if nearest:
+                expiries = _expiration_series_iso(f)
+                if expiries is not None:
+                    f = f[expiries == nearest].copy()
+                return f, nearest
+        return f, None
+
+    call_scope, call_exp = _scoped(calls)
+    put_scope, put_exp = _scoped(puts)
+    expiry = call_exp or put_exp
+    if call_exp and put_exp and call_exp != put_exp:
+        put_expiries = _expiration_series_iso(put_scope)
+        if put_expiries is not None:
+            put_scope = put_scope[put_expiries == call_exp].copy()
+            expiry = call_exp
+
+    def _clean_oi(df):
+        if df is None or df.empty or 'strike' not in df.columns or 'openInterest' not in df.columns:
+            return pd.DataFrame(columns=['strike', 'openInterest'])
+        f = df[['strike', 'openInterest']].copy()
+        f['strike'] = pd.to_numeric(f['strike'], errors='coerce')
+        f['openInterest'] = pd.to_numeric(f['openInterest'], errors='coerce').fillna(0.0)
+        f = f.dropna(subset=['strike'])
+        f = f[f['openInterest'] > 0]
+        return f.groupby('strike', as_index=False)['openInterest'].sum()
+
+    c = _clean_oi(call_scope)
+    p = _clean_oi(put_scope)
+    candidate_strikes = sorted(set(c['strike'].tolist()) | set(p['strike'].tolist()))
+    if not candidate_strikes:
+        return out
+
+    c_strikes = c['strike'].to_numpy(dtype=float) if not c.empty else np.asarray([], dtype=float)
+    c_oi = c['openInterest'].to_numpy(dtype=float) if not c.empty else np.asarray([], dtype=float)
+    p_strikes = p['strike'].to_numpy(dtype=float) if not p.empty else np.asarray([], dtype=float)
+    p_oi = p['openInterest'].to_numpy(dtype=float) if not p.empty else np.asarray([], dtype=float)
+    best_strike = None
+    best_payout = None
+    for settlement in candidate_strikes:
+        call_payout = np.maximum(float(settlement) - c_strikes, 0.0) * c_oi
+        put_payout = np.maximum(p_strikes - float(settlement), 0.0) * p_oi
+        payout = float((call_payout.sum() + put_payout.sum()) * 100.0)
+        if best_payout is None or payout < best_payout:
+            best_payout = payout
+            best_strike = float(settlement)
+
+    out['price'] = best_strike
+    out['total_payout'] = best_payout
+    out['expiry'] = expiry
+    out['expiry_text'] = _format_flow_blotter_expiry(expiry) or 'Near expiry'
+    try:
+        today = datetime.now(pytz.timezone('US/Eastern')).date()
+        out['is_0dte'] = bool(expiry and datetime.fromisoformat(expiry).date() == today)
+        out['label'] = '0DTE OI Max Pain' if out['is_0dte'] else 'OI Max Pain'
+    except Exception:
+        out['is_0dte'] = False
+    try:
+        spot = float(S)
+        if best_strike is not None and spot:
+            out['distance'] = best_strike - spot
+            out['distance_pct'] = (best_strike - spot) / spot
+    except Exception:
+        pass
+    return out
+
+
+def compute_vol_pressure(price_data, S, expected_move_snapshot=None, atm_iv=None, timeframe=1):
+    """Intraday realized movement versus the live/pinned 0DTE implied move."""
+    out = {
+        'status': 'unavailable',
+        'headline': 'Vol pressure unavailable',
+        'bias': None,
+        'direction': None,
+        'open': None,
+        'spot': float(S) if S is not None else None,
+        'implied_move': None,
+        'move_used': None,
+        'directional_pressure': None,
+        'range_used': None,
+        'pace_ratio': None,
+        'bar_ratio': None,
+        'elapsed_minutes': None,
+    }
+    if S is None or not price_data or not expected_move_snapshot:
+        return out
+    move = _coerce_positive_float(expected_move_snapshot.get('move'))
+    if not move:
+        return out
+    candles = list((price_data or {}).get('candles') or [])
+    if not candles:
+        return out
+    try:
+        est = pytz.timezone('US/Eastern')
+        market_candles = filter_market_hours(candles)
+        if not market_candles:
+            market_candles = candles
+        market_candles = sorted(market_candles, key=lambda c: c.get('datetime', 0))
+        sessions = {}
+        for c in market_candles:
+            ts = c.get('datetime')
+            if ts is None:
+                continue
+            day = datetime.fromtimestamp(ts / 1000.0, est).date()
+            sessions.setdefault(day, []).append(c)
+        if not sessions:
+            return out
+        session_day = max(sessions)
+        session = sessions[session_day]
+        first = session[0]
+        last = session[-1]
+        open_spot = _coerce_positive_float(expected_move_snapshot.get('open_spot')) or _coerce_positive_float(first.get('open'))
+        spot = _coerce_positive_float(S) or _coerce_positive_float(last.get('close'))
+        if not open_spot or not spot:
+            return out
+        high = max(_coerce_positive_float(c.get('high')) or spot for c in session)
+        low = min(_coerce_positive_float(c.get('low')) or spot for c in session)
+        first_ts = int(first.get('datetime', 0) or 0)
+        last_ts = int(last.get('datetime', 0) or 0)
+        elapsed_minutes = max(1.0, (last_ts - first_ts) / 60000.0)
+        # Early-session realized pace is noisy; use a 15-minute floor so the
+        # ratio does not scream on the first candle after the open.
+        elapsed_fraction = max(15.0 / 390.0, min(1.0, elapsed_minutes / 390.0))
+        elapsed_implied_move = move * math.sqrt(elapsed_fraction)
+        directional_pressure = (spot - open_spot) / move
+        move_used = abs(spot - open_spot) / move
+        range_used = (high - low) / (2.0 * move)
+        pace_ratio = abs(spot - open_spot) / elapsed_implied_move if elapsed_implied_move > 0 else None
+        bar_ratio = None
+        iv = _coerce_positive_float(atm_iv)
+        if iv and len(session) >= 2:
+            prev = session[-2]
+            prev_close = _coerce_positive_float(prev.get('close'))
+            last_close = _coerce_positive_float(last.get('close'))
+            prev_ts = int(prev.get('datetime', 0) or 0)
+            bar_minutes = max(1.0, (last_ts - prev_ts) / 60000.0)
+            if not math.isfinite(bar_minutes) or bar_minutes <= 0:
+                bar_minutes = max(1.0, float(timeframe or 1))
+            expected_bar_move = spot * iv * math.sqrt(bar_minutes / (252.0 * 390.0))
+            if prev_close and last_close and expected_bar_move > 0:
+                bar_ratio = abs(last_close - prev_close) / expected_bar_move
+        if pace_ratio is None:
+            bias = None
+            headline = 'Tracking unavailable'
+        elif pace_ratio >= 1.75:
+            bias = 'hot'
+            headline = 'Price outrunning IV'
+        elif pace_ratio >= 1.25:
+            bias = 'firm'
+            headline = 'Realized pace firm'
+        elif pace_ratio <= 0.75:
+            bias = 'quiet'
+            headline = 'Price under IV pace'
+        else:
+            bias = 'tracking'
+            headline = 'Tracking implied pace'
+        direction = 'upside' if directional_pressure > 0.05 else ('downside' if directional_pressure < -0.05 else 'flat')
+        out.update({
+            'status': 'ready',
+            'headline': headline,
+            'bias': bias,
+            'direction': direction,
+            'open': open_spot,
+            'spot': spot,
+            'implied_move': move,
+            'move_used': move_used,
+            'directional_pressure': directional_pressure,
+            'range_used': range_used,
+            'pace_ratio': pace_ratio,
+            'bar_ratio': bar_ratio,
+            'elapsed_minutes': elapsed_minutes,
+        })
+    except Exception as e:
+        print(f"[compute_vol_pressure] failed: {e}")
+    return out
+
+
 def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, regime=None, base_size=10):
     """Rank near-ATM call/put candidates for discretionary 0-1DTE entries."""
     empty = {
@@ -5777,7 +5979,8 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
 def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=None,
                          delta_adjusted: bool = False, calculate_in_notional: bool = True,
                          ticker: str = None, gate_strike_alerts: bool = True,
-                         scope_id: str = None):
+                         scope_id: str = None, price_data=None, timeframe=1,
+                         expected_move_snapshot=None):
     """High-level trader KPIs + a short alerts list, for the header strip.
 
     Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
@@ -5806,6 +6009,8 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'level_deltas':   None,
         'iv_context':     None,
         'rv_iv':          None,
+        'vol_pressure':   None,
+        'max_pain':       None,
         'contract_helper': None,
         'flow_pulse':     [],
         'flow_pulse_summary': {'label': 'mixed', 'score': 0.0, 'weighted_premium': 0.0, 'gross_premium': 0.0, 'hedge_share': 0.0},
@@ -5952,6 +6157,12 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         out['iv_context'] = None
 
     try:
+        out['max_pain'] = compute_max_pain(calls, puts, S=S, selected_expiries=selected_expiries)
+    except Exception as e:
+        print(f"[compute_trader_stats] max_pain failed: {e}")
+        out['max_pain'] = None
+
+    try:
         hv_block = compute_historical_volatility(ticker, window=20) if ticker else {'hv_20': None, 'samples': 0, 'as_of': None}
         atm_iv_val = None
         if isinstance(out.get('iv_context'), dict):
@@ -5980,6 +6191,19 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     except Exception as e:
         print(f"[compute_trader_stats] rv_iv failed: {e}")
         out['rv_iv'] = None
+
+    try:
+        atm_iv_val = (out.get('iv_context') or {}).get('atm_iv') if isinstance(out.get('iv_context'), dict) else None
+        out['vol_pressure'] = compute_vol_pressure(
+            price_data,
+            S,
+            expected_move_snapshot=expected_move_snapshot,
+            atm_iv=atm_iv_val,
+            timeframe=timeframe,
+        )
+    except Exception as e:
+        print(f"[compute_trader_stats] vol_pressure failed: {e}")
+        out['vol_pressure'] = None
 
     try:
         out['contract_helper'] = compute_contract_helper(
@@ -9025,6 +9249,65 @@ def index():
         }
         .rail-iv-rv.pos { color: var(--call); }
         .rail-iv-rv.neg { color: var(--put); }
+        .rail-vol-pressure {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px dashed var(--border);
+        }
+        .rail-vol-pressure-row {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+            font-size: 11px;
+            color: var(--fg-2);
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-vol-pressure-headline {
+            color: var(--fg-0);
+            font-weight: 650;
+        }
+        .rail-vol-pressure-headline.pos { color: var(--call); }
+        .rail-vol-pressure-headline.neg { color: var(--put); }
+        .rail-vol-pressure-track {
+            position: relative;
+            height: 7px;
+            margin-top: 7px;
+            border-radius: 999px;
+            background: var(--bg-2);
+            overflow: hidden;
+        }
+        .rail-vol-pressure-fill {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            width: 0;
+            background: var(--fg-2);
+        }
+        .rail-vol-pressure-fill.pos {
+            background: var(--call);
+            border-radius: 0 999px 999px 0;
+        }
+        .rail-vol-pressure-fill.neg {
+            background: var(--put);
+            border-radius: 999px 0 0 999px;
+        }
+        .rail-vol-pressure-mid {
+            position: absolute;
+            top: -2px;
+            bottom: -2px;
+            left: 50%;
+            width: 1px;
+            background: var(--border);
+        }
+        .rail-vol-pressure-meta {
+            margin-top: 5px;
+            font-size: 10px;
+            color: var(--fg-2);
+            line-height: 1.35;
+            font-variant-numeric: tabular-nums;
+        }
         .rail-pulse-list {
             display: flex;
             flex-direction: column;
@@ -11924,6 +12207,17 @@ def index():
                             <div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
                         </div>
                         <div class="rail-iv-rv" data-met="rv_iv_line">HV20 — · ATM IV — · IV —</div>
+                        <div class="rail-vol-pressure">
+                            <div class="rail-vol-pressure-row">
+                                <span class="rail-vol-pressure-headline" data-met="vol_pressure_headline">Vol pressure unavailable</span>
+                                <span data-met="vol_pressure_pace">—</span>
+                            </div>
+                            <div class="rail-vol-pressure-track" aria-hidden="true">
+                                <div class="rail-vol-pressure-fill" data-met="vol_pressure_fill"></div>
+                                <div class="rail-vol-pressure-mid"></div>
+                            </div>
+                            <div class="rail-vol-pressure-meta" data-met="vol_pressure_meta">0DTE move pressure loads with price candles.</div>
+                        </div>
                     </div>
                     <div class="rail-card" id="rail-card-centroid">
                         <div class="rail-card-header-row">
@@ -19577,6 +19871,17 @@ def index():
                             '<div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>' +
                         '</div>' +
                         '<div class="rail-iv-rv" data-met="rv_iv_line">HV20 — · ATM IV — · IV —</div>' +
+                        '<div class="rail-vol-pressure">' +
+                            '<div class="rail-vol-pressure-row">' +
+                                '<span class="rail-vol-pressure-headline" data-met="vol_pressure_headline">Vol pressure unavailable</span>' +
+                                '<span data-met="vol_pressure_pace">—</span>' +
+                            '</div>' +
+                            '<div class="rail-vol-pressure-track" aria-hidden="true">' +
+                                '<div class="rail-vol-pressure-fill" data-met="vol_pressure_fill"></div>' +
+                                '<div class="rail-vol-pressure-mid"></div>' +
+                            '</div>' +
+                            '<div class="rail-vol-pressure-meta" data-met="vol_pressure_meta">0DTE move pressure loads with price candles.</div>' +
+                        '</div>' +
                     '</div>' +
                     '<div class="rail-card" id="rail-card-centroid">' +
                         '<div class="rail-card-header-row">' +
@@ -20380,6 +20685,7 @@ def index():
             renderContractHelper(stats);
             renderGammaProfile(stats);
             renderChainActivity(stats);
+            renderIVContext(stats);
             renderCentroidPanel(stats.centroid_panel || null);
             // Skip Scenario DOM work on background ticks; applyRightRailTab will
             // render it lazily on first reveal using _lastStats.
@@ -21109,10 +21415,18 @@ def index():
             }
             const spot = stats.spot;
             const levelDeltas = (stats && stats.level_deltas) || {};
+            const maxPain = stats && stats.max_pain;
             const rows = [
                 { key: 'call_wall',  label: 'Call Wall',  price: stats.call_wall,  tone: 'call' },
                 { key: 'put_wall',   label: 'Put Wall',   price: stats.put_wall,   tone: 'put'  },
                 { key: 'gamma_flip', label: 'Gamma Flip', price: stats.gamma_flip, tone: 'flip' },
+                {
+                    key: 'max_pain',
+                    label: (maxPain && maxPain.label) || 'OI Max Pain',
+                    price: maxPain && maxPain.price,
+                    tone: 'em',
+                    meta: maxPain && maxPain.expiry_text ? maxPain.expiry_text : ''
+                },
                 { key: 'em_upper',   label: '+1σ EM',     price: stats.em_upper,   tone: 'em'   },
                 { key: 'em_lower',   label: '-1σ EM',     price: stats.em_lower,   tone: 'em'   },
             ];
@@ -21136,6 +21450,7 @@ def index():
                                    '<div class="rail-level-title-row">' +
                                        '<span class="rail-level-swatch"></span>' +
                                        '<span class="rail-level-name">' + _escapeHtml(r.label) + '</span>' +
+                                       (r.meta ? '<span class="rail-level-chip">' + _escapeHtml(r.meta) + '</span>' : '') +
                                        (idx === 0 ? '<span class="rail-level-chip">Nearest</span>' : '') +
                                    '</div>' +
                                '</div>' +
@@ -22132,8 +22447,55 @@ def index():
             };
             const fmtPct = value => (value == null || !isFinite(value)) ? '—' : (value * 100).toFixed(1) + '%';
             const fmtPts = value => (value == null || !isFinite(value)) ? '—' : ((value > 0 ? '+' : '') + (value * 100).toFixed(1) + ' pts');
+            const fmtX = value => (value == null || !isFinite(value)) ? '—' : value.toFixed(2) + 'x';
             const iv = stats && stats.iv_context;
             const rv = stats && stats.rv_iv;
+            const vp = stats && stats.vol_pressure;
+            const renderVolPressure = () => {
+                const fillEls = document.querySelectorAll('[data-met="vol_pressure_fill"]');
+                const headlineEls = document.querySelectorAll('[data-met="vol_pressure_headline"]');
+                headlineEls.forEach(el => el.classList.remove('pos', 'neg'));
+                fillEls.forEach(el => {
+                    el.classList.remove('pos', 'neg');
+                    el.style.left = '50%';
+                    el.style.width = '0';
+                });
+                if (!vp || vp.status !== 'ready') {
+                    _setMet('vol_pressure_headline', 'Vol pressure unavailable');
+                    _setMet('vol_pressure_pace', '—');
+                    _setMet('vol_pressure_meta', '0DTE move pressure loads with price candles.');
+                    return;
+                }
+                const dir = typeof vp.directional_pressure === 'number' ? vp.directional_pressure : 0;
+                const used = typeof vp.move_used === 'number' ? Math.round(vp.move_used * 100) : null;
+                const rangeUsed = typeof vp.range_used === 'number' ? Math.round(vp.range_used * 100) : null;
+                const pace = fmtX(vp.pace_ratio);
+                const bar = fmtX(vp.bar_ratio);
+                const sign = dir > 0 ? '+' : '';
+                _setMet('vol_pressure_headline', vp.headline || 'Vol pressure');
+                _setMet('vol_pressure_pace', pace + ' pace');
+                _setMet(
+                    'vol_pressure_meta',
+                    'Move ' + (used == null ? '—' : used + '%') +
+                    ' · Dir ' + sign + (dir * 100).toFixed(0) + '%' +
+                    ' · Range ' + (rangeUsed == null ? '—' : rangeUsed + '%') +
+                    ' · Bar ' + bar
+                );
+                headlineEls.forEach(el => {
+                    if (vp.bias === 'hot' || vp.bias === 'firm') el.classList.add(dir >= 0 ? 'pos' : 'neg');
+                });
+                fillEls.forEach(el => {
+                    const width = Math.min(50, Math.abs(dir) * 50);
+                    el.style.width = width.toFixed(1) + '%';
+                    if (dir >= 0) {
+                        el.style.left = '50%';
+                        el.classList.add('pos');
+                    } else {
+                        el.style.left = (50 - width).toFixed(1) + '%';
+                        el.classList.add('neg');
+                    }
+                });
+            };
             const renderRvLine = () => {
                 if (!rv || (rv.hv_20 == null && rv.atm_iv == null)) {
                     _setMet('rv_iv_line', 'HV20 — · ATM IV — · IV —');
@@ -22157,6 +22519,7 @@ def index():
                     else if (rv.bias === 'iv_cheap') el.classList.add('neg');
                 });
             };
+            renderVolPressure();
             if (!iv) {
                 _setMet('iv_expiry', 'Near expiry');
                 _setMet('iv_atm', '—');
@@ -23726,6 +24089,9 @@ def update_price():
                     ticker=ticker,
                     gate_strike_alerts=gate_alerts,
                     scope_id=full_scope_id,
+                    price_data=price_data,
+                    timeframe=timeframe,
+                    expected_move_snapshot=pinned_em_snapshot,
                 )
                 trader_stats = apply_expected_move_snapshot_to_stats(trader_stats, pinned_em_snapshot)
             except Exception as e:
@@ -23766,6 +24132,9 @@ def update_price():
                         ticker=ticker,
                         gate_strike_alerts=gate_alerts,
                         scope_id=nearest_scope_id,
+                        price_data=price_data,
+                        timeframe=timeframe,
+                        expected_move_snapshot=pinned_em_0dte,
                     )
                     stats_0dte = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
             except Exception as e:
