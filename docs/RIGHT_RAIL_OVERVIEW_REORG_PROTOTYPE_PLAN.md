@@ -1,10 +1,10 @@
 # Right Rail Overview Reorganization Prototype Plan
 
-**Status:** Prototype and cleanup pass implemented on `codex/right-rail-overview-prototype`; ready for PR review  
-**Created:** 2026-04-28  
-**Last updated:** 2026-04-29  
-**Target branch:** `codex/right-rail-overview-prototype`  
-**Prototype port:** `5002`  
+**Status:** Prototype and cleanup pass implemented on `codex/right-rail-overview-prototype`; ready for PR review
+**Created:** 2026-04-28
+**Last updated:** 2026-04-29
+**Target branch:** `codex/right-rail-overview-prototype`
+**Prototype port:** `5002`
 **Baseline port:** `5001`
 
 This document is meant to be sufficient for a fresh implementation session with no context from the design conversation. It covers the proposed reorganization of the right overview rail, the contract-helper toolbar move, and a prototype workflow that keeps the current dashboard available on port 5001 while the new layout runs on port 5002.

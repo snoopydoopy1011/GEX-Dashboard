@@ -8828,6 +8828,7 @@ def index():
         }
         .right-rail-tab:hover { color: var(--fg-0); }
         .right-rail-tab.active {
+            background: color-mix(in srgb, var(--accent) 10%, transparent);
             color: var(--fg-0);
             border-bottom-color: var(--accent);
         }
@@ -9262,26 +9263,7 @@ def index():
         .positioning-card .rail-centroid-reads {
             margin-top: 8px;
         }
-        @container (min-width: 390px) {
-            .right-rail-panel[data-rail-panel="overview"] {
-                font-size: 13px;
-            }
-            .rail-card.compact-overview {
-                padding: 11px 13px;
-            }
-            .rail-card-price-big {
-                font-size: 27px;
-            }
-            .market-state-metrics .rail-metric .v,
-            .rail-metric .v {
-                font-size: 21px;
-            }
-            .rail-metric .d {
-                font-size: 12px;
-            }
-            .dealer-impact-overview-title {
-                font-size: 15px;
-            }
+        @container (min-width: 340px) {
             .hedge-read-card .dealer-impact {
                 display: grid;
                 grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -9328,6 +9310,27 @@ def index():
                 font-size: 14px;
                 white-space: nowrap;
             }
+        }
+        @container (min-width: 390px) {
+            .right-rail-panel[data-rail-panel="overview"] {
+                font-size: 13px;
+            }
+            .rail-card.compact-overview {
+                padding: 11px 13px;
+            }
+            .rail-card-price-big {
+                font-size: 27px;
+            }
+            .market-state-metrics .rail-metric .v,
+            .rail-metric .v {
+                font-size: 21px;
+            }
+            .rail-metric .d {
+                font-size: 12px;
+            }
+            .dealer-impact-overview-title {
+                font-size: 15px;
+            }
             .rail-iv-atm {
                 font-size: 24px;
             }
@@ -9367,6 +9370,7 @@ def index():
         .rail-card-note {
             color: var(--fg-2);
             font-size: 10px;
+            font-weight: 500;
             letter-spacing: 0.04em;
             text-transform: uppercase;
             white-space: nowrap;
@@ -9903,9 +9907,9 @@ def index():
         }
         .rail-sentiment-track {
             position: relative;
-            height: 4px;
+            height: 6px;
             background: linear-gradient(90deg, var(--put), var(--bg-2) 50%, var(--call));
-            border-radius: 2px;
+            border-radius: 999px;
             margin: 0 0 12px 0;
         }
         .rail-sentiment-marker {
@@ -9928,9 +9932,9 @@ def index():
             color: var(--fg-1);
         }
         .rail-bar-track {
-            height: 4px;
+            height: 6px;
             background: var(--bg-2);
-            border-radius: 2px;
+            border-radius: 999px;
             overflow: hidden;
         }
         .rail-bar-fill {
