@@ -8813,25 +8813,21 @@ def index():
         }
         .right-rail-collapse-toggle {
             position: absolute;
-            top: 4px;
-            right: 4px;
+            top: 8px;
+            right: 6px;
             z-index: 12;
-            width: 28px;
-            height: 28px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: rgba(16, 20, 27, 0.94);
+            background: transparent;
             color: var(--fg-1);
-            cursor: pointer;
-            font-size: 15px;
+            border: none;
+            padding: 2px 6px;
+            font-size: 12px;
             line-height: 1;
+            cursor: pointer;
+            border-radius: 4px;
         }
         .right-rail-collapse-toggle:hover {
             color: var(--fg-0);
-            border-color: var(--accent);
-        }
-        .chart-grid:not(.rail-collapsed) .right-rail-collapse-toggle {
-            right: calc(var(--rail-col-w) - 32px);
+            background: var(--bg-2);
         }
         /* Row 3: flow event lane spans all columns. */
         .chart-grid > .flow-event-lane { grid-column: 1 / -1; grid-row: 3; }
