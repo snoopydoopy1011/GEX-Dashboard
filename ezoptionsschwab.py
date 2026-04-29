@@ -13404,7 +13404,7 @@ def index():
         function normalizeSessionLevelSettings(raw = {}) {
             const base = Object.assign({}, DEFAULT_SESSION_LEVEL_SETTINGS, raw || {});
             const timeToMinutes = value => {
-                const match = String(value || '').match(/^(\d{2}):(\d{2})$/);
+                const match = String(value || '').match(/^(\\d{2}):(\\d{2})$/);
                 if (!match) return null;
                 return (parseInt(match[1], 10) * 60) + parseInt(match[2], 10);
             };
@@ -13424,8 +13424,8 @@ def index():
                 show_ib_extensions: !!base.show_ib_extensions,
                 near_open_minutes: Math.max(0, Math.min(330, parseInt(base.near_open_minutes, 10) || 0)),
                 opening_range_minutes: Math.max(1, Math.min(60, parseInt(base.opening_range_minutes, 10) || DEFAULT_SESSION_LEVEL_SETTINGS.opening_range_minutes)),
-                ib_start: /^\d{2}:\d{2}$/.test(String(base.ib_start || '')) ? String(base.ib_start) : DEFAULT_SESSION_LEVEL_SETTINGS.ib_start,
-                ib_end: /^\d{2}:\d{2}$/.test(String(base.ib_end || '')) ? String(base.ib_end) : DEFAULT_SESSION_LEVEL_SETTINGS.ib_end,
+                ib_start: /^\\d{2}:\\d{2}$/.test(String(base.ib_start || '')) ? String(base.ib_start) : DEFAULT_SESSION_LEVEL_SETTINGS.ib_start,
+                ib_end: /^\\d{2}:\\d{2}$/.test(String(base.ib_end || '')) ? String(base.ib_end) : DEFAULT_SESSION_LEVEL_SETTINGS.ib_end,
                 abbreviate_labels: !!base.abbreviate_labels,
                 append_price: !!base.append_price,
             };
@@ -15371,7 +15371,7 @@ def index():
 
         function rgbToHexColor(color) {
             const value = String(color || '').trim();
-            const match = value.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i);
+            const match = value.match(/^rgba?\\(\\s*(\\d{1,3})\\s*,\\s*(\\d{1,3})\\s*,\\s*(\\d{1,3})/i);
             if (!match) return '';
             const channels = match.slice(1, 4).map(v => Math.max(0, Math.min(255, Number(v) || 0)));
             return `#${channels.map(v => v.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
@@ -15382,7 +15382,7 @@ def index():
             if (!value) return '';
             const hex = value.match(/^#([0-9a-f]{6})$/i);
             if (hex) return `#${hex[1].toUpperCase()}`;
-            const token = value.match(/^var\((--[a-z0-9-]+)\)$/i);
+            const token = value.match(/^var\\((--[a-z0-9-]+)\\)$/i);
             const tokenName = token ? token[1] : (/^--[a-z0-9-]+$/i.test(value) ? value : '');
             if (tokenName) {
                 try {
@@ -17587,7 +17587,7 @@ def index():
             const putValue = Number(row.put || 0);
             const totalValue = callValue + putValue;
             const netValue = Number(row.value || 0);
-            const strike = Number(item.strike).toFixed(2).replace(/\.00$/, '');
+            const strike = Number(item.strike).toFixed(2).replace(/\\.00$/, '');
             const rows = [
                 ['Strike', strike],
                 ['Net ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(netValue, metric)],
@@ -22319,7 +22319,7 @@ def index():
             if (!isFinite(n)) return '—';
             return (Math.abs(n - Math.round(n)) < 0.001)
                 ? String(Math.round(n))
-                : n.toFixed(2).replace(/\.?0+$/, '');
+                : n.toFixed(2).replace(/\\.?0+$/, '');
         }
 
         function _isClusterableRailAlert(a) {
