@@ -4784,6 +4784,7 @@ def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None
                 profile crosses zero. If several sign changes exist, prefer
                 the crossing closest to spot because that is the most relevant
                 local regime boundary on the chart.
+    Max Pain: classic open-interest max pain for the nearest selected expiry.
     Max +/- GEX: live strongest positive / negative net GEX strikes. When a
                  strike window is provided, rank these inside that window so
                  the chart overlays match the visible strike rail.
@@ -4793,7 +4794,7 @@ def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None
     (e.g. EM only when bid/ask are present).
     """
     out = {
-        'call_wall': None, 'put_wall': None, 'gamma_flip': None,
+        'call_wall': None, 'put_wall': None, 'gamma_flip': None, 'max_pain': None,
         'em_upper': None, 'em_lower': None,
         'call_wall_2': None, 'put_wall_2': None, 'hvl': None,
         'max_positive_gex': None, 'max_negative_gex': None,
@@ -4847,6 +4848,13 @@ def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None
         if len(ranked_puts) > 1:
             pw2_strike, pw2_oi = ranked_puts[1]
             out['put_wall_2'] = {'price': float(pw2_strike), 'oi': float(pw2_oi)}
+
+    try:
+        max_pain = compute_max_pain(c, p, S=S, selected_expiries=selected_expiries)
+        if isinstance(max_pain, dict) and max_pain.get('price') is not None:
+            out['max_pain'] = max_pain
+    except Exception:
+        pass
 
     if strikes:
         net = {s: call_map.get(s, 0) - put_map.get(s, 0) for s in strikes}
@@ -5133,17 +5141,28 @@ def _compute_level_session_deltas(ticker, levels, scope_id=None):
         today = datetime.now(pytz.timezone('US/Eastern')).date()
     except Exception:
         return None
-    keys = ('call_wall', 'put_wall', 'gamma_flip', 'em_upper', 'em_lower')
+    keys = ('call_wall', 'put_wall', 'gamma_flip', 'max_pain', 'em_upper', 'em_lower')
     key = (ticker, today, scope_id or 'default')
     if key not in _SESSION_LEVEL_BASELINE:
-        _SESSION_LEVEL_BASELINE[key] = {name: levels.get(name) for name in keys}
+        _SESSION_LEVEL_BASELINE[key] = {name: _level_price_value(levels.get(name)) for name in keys}
     base = _SESSION_LEVEL_BASELINE[key]
     out = {}
     for name in keys:
-        cur = levels.get(name)
+        cur = _level_price_value(levels.get(name))
         ref = base.get(name)
         out[name] = (cur - ref) if (cur is not None and ref is not None) else None
     return out
+
+
+def _level_price_value(value):
+    if isinstance(value, dict):
+        value = value.get('price')
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 def _pick_strike_iv(df, target, side='nearest'):
@@ -6312,6 +6331,12 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         out['session_deltas'] = None
 
     try:
+        out['max_pain'] = compute_max_pain(calls, puts, S=S, selected_expiries=selected_expiries)
+    except Exception as e:
+        print(f"[compute_trader_stats] max_pain failed: {e}")
+        out['max_pain'] = None
+
+    try:
         out['level_deltas'] = _compute_level_session_deltas(ticker, out, scope_id=scope_id)
     except Exception as e:
         print(f"[compute_trader_stats] level_deltas failed: {e}")
@@ -6328,12 +6353,6 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     except Exception as e:
         print(f"[compute_trader_stats] iv_context failed: {e}")
         out['iv_context'] = None
-
-    try:
-        out['max_pain'] = compute_max_pain(calls, puts, S=S, selected_expiries=selected_expiries)
-    except Exception as e:
-        print(f"[compute_trader_stats] max_pain failed: {e}")
-        out['max_pain'] = None
 
     try:
         hv_block = compute_historical_volatility(ticker, window=20) if ticker else {'hv_20': None, 'samples': 0, 'as_of': None}
@@ -13060,7 +13079,7 @@ def index():
         const PRICE_LEVEL_GROUPS = [
             {
                 label: 'Dealer Flow',
-                keys: ['call_wall', 'put_wall', 'gamma_flip', 'em_upper', 'em_lower']
+                keys: ['call_wall', 'put_wall', 'gamma_flip', 'max_pain', 'em_upper', 'em_lower']
             },
             {
                 label: 'Dealer Flow Secondary',
@@ -13084,6 +13103,7 @@ def index():
             call_wall: { label: 'Call Wall', visible: true, color: 'var(--call)', lineWidth: 2, lineStyle: 'solid' },
             put_wall: { label: 'Put Wall', visible: true, color: 'var(--put)', lineWidth: 2, lineStyle: 'solid' },
             gamma_flip: { label: 'Gamma Flip', visible: true, color: 'var(--warn)', lineWidth: 2, lineStyle: 'dashed' },
+            max_pain: { label: 'OI Max Pain', visible: true, color: 'var(--info)', lineWidth: 1, lineStyle: 'large-dashed' },
             em_upper: { label: '+1σ EM', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dotted' },
             em_lower: { label: '-1σ EM', visible: true, color: 'var(--fg-1)', lineWidth: 1, lineStyle: 'dotted' },
             call_wall_2: { label: 'Call Wall 2', visible: true, color: 'var(--call)', lineWidth: 1, lineStyle: 'dashed' },
@@ -23019,7 +23039,7 @@ def index():
             apply();
         }
 
-        // ── Key levels (Call Wall / Put Wall / Gamma Flip / ±1σ EM) ──────────
+        // ── Key levels (Call Wall / Put Wall / Gamma Flip / Max Pain / ±1σ EM) ──────────
         function clearKeyLevels() {
             tvKeyLevelPrices = [];
             if (!tvCandleSeries) { tvKeyLevelLines = []; return; }
@@ -23042,6 +23062,7 @@ def index():
                 { key: 'call_wall',   show: true },
                 { key: 'put_wall',    show: true },
                 { key: 'gamma_flip',  show: true },
+                { key: 'max_pain',    show: true },
                 { key: 'em_upper',    show: true },
                 { key: 'em_lower',    show: true },
                 { key: 'call_wall_2', show: showWalls2 },
@@ -23066,7 +23087,7 @@ def index():
                         lineWidth: pref.lineWidth,
                         lineStyle: tvIndicatorLineStyleValue(pref.lineStyle),
                         axisLabelVisible: true,
-                        title: pref.label,
+                        title: entry.label || pref.label,
                     });
                     tvKeyLevelLines.push(line);
                     renderedPrices.push(entry.price);
