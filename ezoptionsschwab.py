@@ -17066,24 +17066,9 @@ def index():
             }
         }
 
-        function estimateTVDrawingAxisLabelWidth(def, price) {
-            const label = String(def && def.label || '').trim();
-            const priceText = Number.isFinite(Number(price)) ? Number(price).toFixed(2) : '';
-            const text = [label, priceText].filter(Boolean).join('  ');
-            return Math.max(76, Math.min(190, 26 + (text.length * 7)));
-        }
-
         function getTVDrawingExtendRightX(def, width) {
             const scaleWidth = getTVRightPriceScaleWidth();
-            const plotRight = Math.max(40, width - scaleWidth);
-            if (!def || !isTVDrawingAxisLabelPosition(def.labelPosition)) {
-                return plotRight;
-            }
-            const axisPrice = def.type === 'channel'
-                ? getTVChannelAxisLabelPrice(def, width)
-                : (def.type === 'rect' ? getTVRectAxisLabelPrice(def) : null);
-            const labelWidth = estimateTVDrawingAxisLabelWidth(def, axisPrice);
-            return Math.max(40, plotRight - labelWidth - 8);
+            return Math.max(40, width - scaleWidth);
         }
 
         function getTVChannelAxisLabelPrice(def, width) {
@@ -17263,6 +17248,68 @@ def index():
                 return { x: screen.x + (screen.w / 2), y: screen.y + (screen.h / 2) - 11, anchor: 'center', boundWidth: width, boundHeight: height };
             }
             return { x: screen.x + inset, y: screen.y + inset, anchor: 'left', boundWidth: width, boundHeight: height };
+        }
+
+        function appendTVDrawingAxisBadge(group, def, price, width, height) {
+            if (!group || !def || !Number.isFinite(Number(price))) return null;
+            const y = tvCandleSeries ? tvCandleSeries.priceToCoordinate(Number(price)) : null;
+            if (y == null || Number.isNaN(y)) return null;
+            const labelText = String(def.label || '').trim();
+            const valueText = Number(price).toFixed(2);
+            const badgeHeight = 18;
+            const labelWidth = labelText ? Math.max(38, Math.min(150, 14 + (labelText.length * 7))) : 0;
+            const valueWidth = Math.max(50, Math.min(78, 14 + (valueText.length * 7)));
+            const totalWidth = labelWidth + valueWidth;
+            const x = Math.max(4, Math.min(width - totalWidth - 4, width - totalWidth - 8));
+            const top = height > badgeHeight
+                ? Math.max(4, Math.min(height - badgeHeight - 4, y - (badgeHeight / 2)))
+                : 0;
+            const fill = def.color || '#FFD700';
+            const textFill = '#ffffff';
+
+            if (labelText) {
+                group.appendChild(createSvgEl('rect', {
+                    class: 'tv-drawing-shape',
+                    x,
+                    y: top,
+                    rx: 2,
+                    ry: 2,
+                    width: labelWidth,
+                    height: badgeHeight,
+                    fill,
+                    stroke: fill,
+                    'stroke-width': 1,
+                }));
+                group.appendChild(createSvgEl('text', {
+                    class: 'tv-drawing-text',
+                    x: x + 7,
+                    y: top + (badgeHeight / 2),
+                    fill: textFill,
+                }));
+                group.lastChild.textContent = labelText;
+            }
+
+            const valueX = x + labelWidth;
+            group.appendChild(createSvgEl('rect', {
+                class: 'tv-drawing-shape',
+                x: valueX,
+                y: top,
+                rx: 2,
+                ry: 2,
+                width: valueWidth,
+                height: badgeHeight,
+                fill,
+                stroke: fill,
+                'stroke-width': 1,
+            }));
+            group.appendChild(createSvgEl('text', {
+                class: 'tv-drawing-text',
+                x: valueX + 7,
+                y: top + (badgeHeight / 2),
+                fill: textFill,
+            }));
+            group.lastChild.textContent = valueText;
+            return { x, y: top, width: totalWidth, height: badgeHeight };
         }
 
         function scheduleTVDrawingOverlayDraw() {
@@ -18725,6 +18772,8 @@ def index():
                         label: labelText,
                         color: def.color,
                     }, getTVChannelLabelPlacement(screen, def.labelPosition, width, height)));
+                } else if (labelText && isTVDrawingAxisLabelPosition(def.labelPosition)) {
+                    appendTVDrawingAxisBadge(group, def, getTVChannelAxisLabelPrice(def, width), width, height);
                 }
                 if (interactive) {
                     const hitSegments = [
@@ -18812,6 +18861,8 @@ def index():
                         label: labelText,
                         color: def.color,
                     }, getTVRectLabelPlacement(screen, def.labelPosition, width, height)));
+                } else if (labelText && isTVDrawingAxisLabelPosition(def.labelPosition)) {
+                    appendTVDrawingAxisBadge(group, def, getTVRectAxisLabelPrice(def), width, height);
                 }
                 if (interactive) {
                     const hit = createSvgEl('rect', {
