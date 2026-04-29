@@ -2988,7 +2988,52 @@ def aggregate_candles_to_timeframe(candles, timeframe_minutes):
         })
     return result
 
-def get_price_history(ticker, timeframe=1):
+# Per-timeframe lookback policy. DEFAULTs are tuned for snappy first paint;
+# HARD_CAPs are an upper bound we'll honor if the user overrides via the
+# Chart History setting. Beyond the cap, payload size and JS render time
+# start to noticeably degrade or hit Schwab API limits (1m caps near 48d).
+LOOKBACK_DEFAULT_BY_TF = {
+    1: 10,
+    2: 10,
+    3: 15,
+    5: 60,
+    10: 60,
+    15: 90,
+    30: 120,
+    60: 180,
+    240: 180,
+    1440: 365,
+}
+LOOKBACK_CAP_BY_TF = {
+    1: 30,
+    2: 30,
+    3: 30,
+    5: 180,
+    10: 180,
+    15: 270,
+    30: 270,
+    60: 270,
+    240: 365,
+    1440: 730,
+}
+
+
+def resolve_lookback_days(timeframe, override=None):
+    """Pick a lookback window: validated user override or default."""
+    default = LOOKBACK_DEFAULT_BY_TF.get(timeframe, 20)
+    cap = LOOKBACK_CAP_BY_TF.get(timeframe, 180)
+    if override is None:
+        return default
+    try:
+        n = int(override)
+    except (TypeError, ValueError):
+        return default
+    if n < 1:
+        return default
+    return min(n, cap)
+
+
+def get_price_history(ticker, timeframe=1, lookback_days=None):
     if ticker == "MARKET":
         ticker = "$SPX"
     elif ticker == "MARKET2":
@@ -2998,22 +3043,7 @@ def get_price_history(ticker, timeframe=1):
         est = datetime.now(pytz.timezone('US/Eastern'))
         current_date = est.date()
 
-        # Map timeframe (minutes) -> trading-day lookback. Finer timeframes get less
-        # history to keep payload size bounded; coarser timeframes stretch further back
-        # so the chart shows meaningful structure without wasting bandwidth on 1-min bars.
-        PERIOD_BY_TF = {
-            1: 5,
-            2: 10,
-            3: 10,
-            5: 20,
-            10: 20,
-            15: 30,
-            30: 30,
-            60: 90,
-            240: 120,
-            1440: 180,
-        }
-        period_days = PERIOD_BY_TF.get(timeframe, 20)
+        period_days = resolve_lookback_days(timeframe, lookback_days)
 
         # +5 calendar-day cushion covers weekends/holidays that filter_market_hours() drops.
         start_date = datetime.combine(current_date - timedelta(days=period_days + 5), datetime.min.time())
@@ -11871,6 +11901,49 @@ def index():
             flex-direction: column;
             gap: 12px;
         }
+        .chart-history-help {
+            margin: 0 0 4px 0;
+            font-size: 11px;
+            color: var(--fg-2);
+            line-height: 1.4;
+        }
+        .chart-history-grid {
+            display: grid;
+            grid-template-columns: 1fr auto auto;
+            gap: 4px 10px;
+            align-items: center;
+        }
+        .chart-history-grid .ch-tf-label {
+            font-size: 12px;
+            color: var(--fg-1);
+        }
+        .chart-history-grid input.ch-days {
+            width: 64px;
+            text-align: right;
+            font-size: 12px;
+            padding: 2px 6px;
+        }
+        .chart-history-grid input.ch-days.ch-warn {
+            border: 1px solid var(--warn);
+            color: var(--warn);
+        }
+        .chart-history-grid .ch-default {
+            font-size: 10px;
+            color: var(--fg-2);
+            white-space: nowrap;
+        }
+        .chart-history-warning {
+            grid-column: 1 / -1;
+            font-size: 10px;
+            color: var(--warn);
+            margin-top: -2px;
+            min-height: 0;
+        }
+        .chart-history-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 4px;
+        }
         /* Chart visibility toggles inside the drawer's "Sections" group */
         .visibility-grid {
             display: grid;
@@ -12412,6 +12485,16 @@ def index():
                                     <button class="tm-btn tm-btn-del" onclick="forceDeleteToken()" title="Clear stored tokens">&#128465; reset</button>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section">
+                    <summary>Chart History</summary>
+                    <div class="drawer-content">
+                        <p class="chart-history-help">Days of historical candles to load per timeframe. Higher values pull more from Schwab and slow chart load. Defaults are tuned for snappy rendering. Values above the soft cap will show a warning. Hard caps protect against API limits and oversize payloads.</p>
+                        <div class="chart-history-grid" id="chart-history-grid"><!-- populated by renderChartHistorySection() --></div>
+                        <div class="chart-history-actions">
+                            <button type="button" id="chartHistoryReset" class="btn-ghost" title="Restore default lookback for every timeframe">Reset to defaults</button>
                         </div>
                     </div>
                 </details>
@@ -14546,7 +14629,10 @@ def index():
       var ticker=val('ticker');if(!ticker)return null;
       var levelsTypes=[];
       try{levelsTypes=Array.from(d.querySelectorAll('.levels-option input:checked')).map(function(cb){return cb.value;});}catch(e){}
-      return{ticker:ticker,timeframe:val('timeframe')||'1',call_color:val('call_color')||'#00ff00',put_color:val('put_color')||'#ff0000',levels_types:levelsTypes,levels_count:parseInt(val('levels_count'))||3,use_heikin_ashi:chk('use_heikin_ashi'),strike_range:parseFloat(val('strike_range'))/100||0.1,highlight_max_level:chk('highlight_max_level'),max_level_color:val('max_level_color')||'#800080',coloring_mode:val('coloring_mode')||'Linear Intensity'};
+      var tf=val('timeframe')||'1';
+      var lookbackDays=null;
+      try{if(typeof op.getLookbackDaysForTimeframe==='function')lookbackDays=op.getLookbackDaysForTimeframe(tf);}catch(e){}
+      return{ticker:ticker,timeframe:tf,lookback_days:lookbackDays,call_color:val('call_color')||'#00ff00',put_color:val('put_color')||'#ff0000',levels_types:levelsTypes,levels_count:parseInt(val('levels_count'))||3,use_heikin_ashi:chk('use_heikin_ashi'),strike_range:parseFloat(val('strike_range'))/100||0.1,highlight_max_level:chk('highlight_max_level'),max_level_color:val('max_level_color')||'#800080',coloring_mode:val('coloring_mode')||'Linear Intensity'};
     }catch(e){return null;}
   }
   function loadInitialData(){
@@ -23306,9 +23392,13 @@ def index():
         let _priceHistoryInFlight = false;
 
         function buildPricePayload() {
+            const tf = document.getElementById('timeframe').value;
+            const lookbackDays = (typeof getLookbackDaysForTimeframe === 'function')
+                ? getLookbackDaysForTimeframe(tf) : null;
             return {
                 ticker: document.getElementById('ticker').value,
-                timeframe: document.getElementById('timeframe').value,
+                timeframe: tf,
+                lookback_days: lookbackDays,
                 call_color: callColor,
                 put_color: putColor,
                 levels_types: Array.from(document.querySelectorAll('.levels-option input:checked')).map(cb => cb.value),
@@ -24761,6 +24851,101 @@ def index():
             });
         }
         renderChartVisibilitySection();
+
+        // ── Chart History (per-timeframe lookback) ────────────────────────────
+        // Mirrors LOOKBACK_DEFAULT_BY_TF / LOOKBACK_CAP_BY_TF in the backend.
+        // Soft caps trigger a UI warning; hard caps are enforced server-side too.
+        const CHART_HISTORY_TFS = [
+            { tf: '1',    label: '1 min',  def: 10,  soft: 15,  hard: 30  },
+            { tf: '2',    label: '2 min',  def: 10,  soft: 15,  hard: 30  },
+            { tf: '3',    label: '3 min',  def: 15,  soft: 20,  hard: 30  },
+            { tf: '5',    label: '5 min',  def: 60,  soft: 90,  hard: 180 },
+            { tf: '10',   label: '10 min', def: 60,  soft: 90,  hard: 180 },
+            { tf: '15',   label: '15 min', def: 90,  soft: 120, hard: 270 },
+            { tf: '30',   label: '30 min', def: 120, soft: 180, hard: 270 },
+            { tf: '60',   label: '1 hr',   def: 180, soft: 240, hard: 270 },
+            { tf: '240',  label: '4 hr',   def: 180, soft: 270, hard: 365 },
+            { tf: '1440', label: 'Daily',  def: 365, soft: 540, hard: 730 },
+        ];
+        const CHART_HISTORY_LS_KEY = 'gex.chartHistoryDays.v1';
+        function getChartHistoryMap() {
+            try {
+                const raw = localStorage.getItem(CHART_HISTORY_LS_KEY);
+                if (!raw) return {};
+                const parsed = JSON.parse(raw);
+                return (parsed && typeof parsed === 'object') ? parsed : {};
+            } catch (e) { return {}; }
+        }
+        function setChartHistoryMap(map) {
+            try { localStorage.setItem(CHART_HISTORY_LS_KEY, JSON.stringify(map || {})); } catch (e) {}
+        }
+        function getLookbackDaysForTimeframe(tfValue) {
+            const tfStr = String(tfValue);
+            const cfg = CHART_HISTORY_TFS.find(c => c.tf === tfStr);
+            if (!cfg) return null;
+            const map = getChartHistoryMap();
+            const raw = map[tfStr];
+            const n = parseInt(raw, 10);
+            if (!isFinite(n) || n < 1) return cfg.def;
+            return Math.min(n, cfg.hard);
+        }
+        window.getLookbackDaysForTimeframe = getLookbackDaysForTimeframe;
+
+        function renderChartHistorySection() {
+            const grid = document.getElementById('chart-history-grid');
+            if (!grid) return;
+            const map = getChartHistoryMap();
+            grid.innerHTML = CHART_HISTORY_TFS.map(cfg => {
+                const cur = (map[cfg.tf] != null && map[cfg.tf] !== '') ? map[cfg.tf] : cfg.def;
+                return (
+                    `<span class="ch-tf-label">${cfg.label}</span>` +
+                    `<input type="number" class="ch-days" min="1" max="${cfg.hard}" step="1" ` +
+                        `data-tf="${cfg.tf}" value="${cur}" title="Days of history (default ${cfg.def}, soft cap ${cfg.soft}, hard cap ${cfg.hard})">` +
+                    `<span class="ch-default">def ${cfg.def} · cap ${cfg.hard}</span>`
+                );
+            }).join('') + `<div class="chart-history-warning" id="chart-history-warning"></div>`;
+
+            grid.querySelectorAll('input.ch-days').forEach(inp => {
+                const cfg = CHART_HISTORY_TFS.find(c => c.tf === inp.dataset.tf);
+                const refresh = () => {
+                    let n = parseInt(inp.value, 10);
+                    if (!isFinite(n) || n < 1) n = cfg.def;
+                    if (n > cfg.hard) { n = cfg.hard; inp.value = n; }
+                    inp.classList.toggle('ch-warn', n > cfg.soft);
+                    const map = getChartHistoryMap();
+                    map[cfg.tf] = n;
+                    setChartHistoryMap(map);
+                    const warn = document.getElementById('chart-history-warning');
+                    if (warn) {
+                        if (n > cfg.soft) {
+                            warn.textContent = `${cfg.label}: ${n} days exceeds soft cap (${cfg.soft}). Chart load may slow noticeably.`;
+                        } else {
+                            warn.textContent = '';
+                        }
+                    }
+                    // Only refetch if the user changed the value for the *active* timeframe
+                    const activeTf = (document.getElementById('timeframe') || {}).value;
+                    if (activeTf === cfg.tf && typeof fetchPriceHistory === 'function') {
+                        fetchPriceHistory(true);
+                    }
+                };
+                inp.addEventListener('change', refresh);
+                inp.addEventListener('blur', refresh);
+                // Apply initial warn class without refetching
+                const n0 = parseInt(inp.value, 10);
+                if (isFinite(n0) && n0 > cfg.soft) inp.classList.add('ch-warn');
+            });
+        }
+        renderChartHistorySection();
+        const chartHistoryResetBtn = document.getElementById('chartHistoryReset');
+        if (chartHistoryResetBtn) {
+            chartHistoryResetBtn.addEventListener('click', () => {
+                setChartHistoryMap({});
+                renderChartHistorySection();
+                if (typeof fetchPriceHistory === 'function') fetchPriceHistory(true);
+            });
+        }
+
         tvIndicatorPrefs = normalizeTVIndicatorPrefMap(tvIndicatorPrefs);
         priceLevelPrefs = normalizePriceLevelPrefMap(priceLevelPrefs);
         hydrateTVIndicatorStateFromLocalStorage();
@@ -25296,6 +25481,7 @@ def update_price():
         else:
             selected_expiries = []
         timeframe = int(data.get('timeframe', 1))
+        lookback_days = data.get('lookback_days')
         call_color = data.get('call_color', '#00ff00')
         put_color = data.get('put_color', '#ff0000')
         exposure_levels_types = data.get('levels_types', [])
@@ -25322,7 +25508,7 @@ def update_price():
         else:
             gate_alerts = bool(gate_val)
 
-        price_data = get_price_history(ticker, timeframe=timeframe)
+        price_data = get_price_history(ticker, timeframe=timeframe, lookback_days=lookback_days)
         session_levels = None
         session_levels_meta = None
         if session_level_config.get('enabled'):
