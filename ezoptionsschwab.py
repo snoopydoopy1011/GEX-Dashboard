@@ -4311,6 +4311,26 @@ def _nearest_expiration(df):
     return expiries.min()
 
 
+def _expiration_for_dte(df, target_dte, selected_expiries=None):
+    """Return the first expiration matching a DTE offset from today."""
+    expiries = _expiration_series_iso(df)
+    if expiries is None:
+        return None
+    allowed = set(_normalize_expiry_list(selected_expiries))
+    today = datetime.now(pytz.timezone('US/Eastern')).date()
+    matches = []
+    for exp in sorted(set(expiries.dropna().astype(str).tolist())):
+        if allowed and exp not in allowed:
+            continue
+        try:
+            dte = (datetime.fromisoformat(exp).date() - today).days
+        except Exception:
+            continue
+        if dte == int(target_dte):
+            matches.append(exp)
+    return matches[0] if matches else None
+
+
 def compute_top_oi_strikes(calls, puts, n=5):
     """Return top-N OI strikes per side for the nearest expiration.
 
@@ -5463,7 +5483,7 @@ def compute_vol_pressure(price_data, S, expected_move_snapshot=None, atm_iv=None
 
 def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, regime=None,
                             base_size=10, em_move=None, call_wall=None, put_wall=None,
-                            gamma_flip=None):
+                            gamma_flip=None, target_dte_days=None):
     """Rank near-ATM call/put candidates for discretionary 0-1DTE entries."""
     empty = {
         'status': 'unavailable',
@@ -5487,6 +5507,26 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
         except Exception:
             return None
 
+    def _session_time_context(now_et=None):
+        now_et = now_et or datetime.now(pytz.timezone('US/Eastern'))
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        minutes_since_open = max(0.0, (now_et - market_open).total_seconds() / 60.0)
+        minutes_to_close = max(0.0, (market_close - now_et).total_seconds() / 60.0)
+        if minutes_to_close <= 60:
+            bucket = 'late'
+        elif minutes_since_open >= 300:
+            bucket = 'late-day'
+        elif minutes_since_open >= 120:
+            bucket = 'midday'
+        else:
+            bucket = 'morning'
+        return {
+            'bucket': bucket,
+            'minutes_since_open': minutes_since_open,
+            'minutes_to_close': minutes_to_close,
+        }
+
     def _filter_scope(df):
         f = df.copy()
         expiries = _expiration_series_iso(f)
@@ -5506,7 +5546,21 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
                 dte = 99
             if 0 <= dte <= 1:
                 short_expiries.append(exp)
-        chosen = (short_expiries[0] if short_expiries else expiry_rows[0]) if expiry_rows else None
+        chosen = None
+        if target_dte_days is not None:
+            target_expiries = []
+            for exp in expiry_rows:
+                try:
+                    dte = (datetime.fromisoformat(exp).date() - today).days
+                except Exception:
+                    dte = 99
+                if dte == int(target_dte_days):
+                    target_expiries.append(exp)
+            chosen = target_expiries[0] if target_expiries else None
+        else:
+            chosen = (short_expiries[0] if short_expiries else expiry_rows[0]) if expiry_rows else None
+        if target_dte_days is not None and not chosen:
+            return f.iloc[0:0].copy(), None
         if chosen:
             f = f[expiries == chosen].copy()
         return f, chosen
@@ -5521,6 +5575,12 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
             chosen_expiry = call_exp
     if call_scope.empty or put_scope.empty:
         return empty
+    today_et = datetime.now(pytz.timezone('US/Eastern')).date()
+    try:
+        chosen_dte = (datetime.fromisoformat(chosen_expiry).date() - today_et).days if chosen_expiry else None
+    except Exception:
+        chosen_dte = None
+    time_ctx = _session_time_context()
 
     def _numeric(row, key, default=0.0):
         try:
@@ -5575,6 +5635,10 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
             wall_for_side = float(wall_for_side) if wall_for_side else None
         except (TypeError, ValueError):
             wall_for_side = None
+        try:
+            flip_price = float(gamma_flip) if gamma_flip else None
+        except (TypeError, ValueError):
+            flip_price = None
         for idx, row in enumerate(rows):
             strike = _numeric(row, 'strike')
             bid = _numeric(row, 'bid')
@@ -5619,6 +5683,29 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
                 score -= 0.03
             if regime == 'Short Gamma' and idx > 0:
                 score += 0.03
+            time_decay_penalty = 0.0
+            if chosen_dte == 0:
+                if time_ctx['bucket'] == 'midday':
+                    if idx >= 2:
+                        time_decay_penalty = 0.05
+                    elif idx == 1:
+                        time_decay_penalty = 0.02
+                elif time_ctx['bucket'] == 'late-day':
+                    if idx >= 2:
+                        time_decay_penalty = 0.09
+                    elif idx == 1:
+                        time_decay_penalty = 0.04
+                elif time_ctx['bucket'] == 'late':
+                    if idx >= 2:
+                        time_decay_penalty = 0.14
+                    elif idx == 1:
+                        time_decay_penalty = 0.07
+                    elif delta < 0.35:
+                        time_decay_penalty = 0.03
+                if time_ctx['minutes_to_close'] <= 45 and delta < 0.20:
+                    time_decay_penalty += 0.06
+                if time_decay_penalty:
+                    score -= time_decay_penalty
             if spread_pct is not None and spread_pct > 0.30:
                 score -= 0.18
             if spread_pct is None and ask > 0:
@@ -5644,6 +5731,20 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
                     near_wall = True
             if past_wall:
                 score -= 0.08
+            # Gamma flip awareness: a candidate that requires crossing the flip
+            # level has an extra hurdle for a short 0-1DTE scalp.
+            through_flip = False
+            near_flip = False
+            if flip_price is not None and S:
+                spot = float(S)
+                low = min(spot, strike)
+                high = max(spot, strike)
+                if low < flip_price < high:
+                    through_flip = True
+                if abs(strike - flip_price) <= max(0.5, spot * 0.0015):
+                    near_flip = True
+            if through_flip:
+                score -= 0.05
             label = f"{strike:.0f}{'C' if side == 'call' else 'P'}"
             reasons = []
             if idx == 0:
@@ -5658,6 +5759,14 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
                 reasons.append('past wall')
             elif near_wall:
                 reasons.append('at wall')
+            if through_flip:
+                reasons.append('through flip')
+            elif near_flip:
+                reasons.append('near flip')
+            if time_decay_penalty >= 0.08:
+                reasons.append('time decay')
+            elif time_decay_penalty > 0:
+                reasons.append('clock risk')
             if distance_em is not None and distance_em <= 1.0 and idx > 0:
                 reasons.append('inside EM')
             if spread_pct is not None:
@@ -5684,6 +5793,12 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
                 'rank': idx,
                 'score': round(max(0.0, min(1.0, score)), 3),
                 'reasons': reasons[:4],
+                'past_wall': bool(past_wall),
+                'near_wall': bool(near_wall),
+                'through_flip': bool(through_flip),
+                'near_flip': bool(near_flip),
+                'distance_em': round(distance_em, 2) if distance_em is not None else None,
+                'time_decay_penalty': round(time_decay_penalty, 3),
                 'contract_symbol': row.get('contractSymbol'),
                 'expiry': _expiry_iso(row) or chosen_expiry,
             })
@@ -5712,6 +5827,18 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
             pts += 1
         if candidate.get('score', 0) < 0.45:
             pts += 1
+        if candidate.get('past_wall'):
+            pts += 1
+        if candidate.get('through_flip'):
+            pts += 1
+        if chosen_dte == 0:
+            rank = candidate.get('rank')
+            if time_ctx['bucket'] in ('midday', 'late-day', 'late') and rank is not None and rank >= 2:
+                pts += 1
+            if time_ctx['bucket'] in ('late-day', 'late') and rank is not None and rank >= 1:
+                pts += 1
+            if time_ctx['minutes_to_close'] <= 45 and delta > 0 and delta < 0.20:
+                pts += 1
         return pts
 
     avg_mid = np.mean([c['mid'] for c in (call_best, put_best) if c]) if (call_best or put_best) else 0
@@ -5750,10 +5877,18 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
         context_bits.append('IV cheap')
     if avg_mid:
         context_bits.append(f"avg mid ${avg_mid:.2f}")
+    if chosen_dte == 0 and time_ctx['bucket'] in ('midday', 'late-day', 'late'):
+        context_bits.append('0DTE clock risk')
 
     return {
         'status': 'ready',
         'expiry_text': _format_flow_blotter_expiry(chosen_expiry) or 'Near expiry',
+        'expiry': chosen_expiry,
+        'dte': chosen_dte,
+        'time_context': {
+            'bucket': time_ctx['bucket'],
+            'minutes_to_close': round(time_ctx['minutes_to_close']),
+        },
         'call': call_best,
         'put': put_best,
         'alternates': {
@@ -6049,6 +6184,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         'vol_pressure':   None,
         'max_pain':       None,
         'contract_helper': None,
+        'contract_helper_1dte': None,
         'flow_pulse':     [],
         'flow_pulse_summary': {'label': 'mixed', 'score': 0.0, 'weighted_premium': 0.0, 'gross_premium': 0.0, 'hedge_share': 0.0},
     }
@@ -6259,6 +6395,40 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     except Exception as e:
         print(f"[compute_trader_stats] contract_helper failed: {e}")
         out['contract_helper'] = None
+
+    try:
+        one_dte_exp = (
+            _expiration_for_dte(calls, 1, selected_expiries=selected_expiries)
+            or _expiration_for_dte(puts, 1, selected_expiries=selected_expiries)
+        )
+        if one_dte_exp:
+            one_dte_levels = compute_key_levels(
+                calls,
+                puts,
+                S,
+                selected_expiries=[one_dte_exp],
+                strike_range=strike_range,
+            )
+            one_dte_em = None
+            if one_dte_levels.get('em_upper'):
+                one_dte_em = one_dte_levels['em_upper'].get('move')
+            out['contract_helper_1dte'] = compute_contract_helper(
+                calls,
+                puts,
+                S,
+                selected_expiries=[one_dte_exp],
+                rv_iv=out.get('rv_iv'),
+                regime=out.get('regime'),
+                base_size=10,
+                em_move=one_dte_em,
+                call_wall=(one_dte_levels.get('call_wall') or {}).get('price'),
+                put_wall=(one_dte_levels.get('put_wall') or {}).get('price'),
+                gamma_flip=(one_dte_levels.get('gamma_flip') or {}).get('price'),
+                target_dte_days=1,
+            )
+    except Exception as e:
+        print(f"[compute_trader_stats] contract_helper_1dte failed: {e}")
+        out['contract_helper_1dte'] = None
 
     try:
         out['flow_pulse'] = build_flow_pulse_snapshot(
@@ -9560,6 +9730,9 @@ def index():
             padding: 3px 6px;
             background: rgba(245, 158, 11, 0.06);
         }
+        .tv-toolbar-helper:not(.has-compare) .tv-helper-compare {
+            display: none;
+        }
         .tv-helper-trigger {
             display: inline-flex;
             align-items: center;
@@ -9579,12 +9752,27 @@ def index():
             letter-spacing: 0.06em;
             font-size: 10px;
         }
+        .tv-helper-expiry {
+            color: var(--fg-2);
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
         .tv-helper-contract {
             font-weight: 700;
             font-variant-numeric: tabular-nums;
         }
         .tv-helper-contract.call { color: var(--call); }
         .tv-helper-contract.put { color: var(--put); }
+        .tv-helper-moneyness {
+            margin-left: -3px;
+            color: var(--fg-2);
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
         .tv-helper-size {
             color: var(--fg-0);
             font-weight: 700;
@@ -9616,10 +9804,12 @@ def index():
         }
         @media (max-width: 1280px) {
             .tv-helper-size-label,
-            .tv-helper-sep.size { display: none; }
+            .tv-helper-sep.size,
+            .tv-helper-compare { display: none; }
         }
         @media (max-width: 1120px) {
             .tv-helper-contract,
+            .tv-helper-moneyness,
             .tv-helper-sep { display: none; }
             .tv-toolbar-helper { padding-inline: 8px; }
         }
@@ -13590,6 +13780,40 @@ def index():
             return Math.max(0, tvLastCandles.length - 80);
         }
 
+        function tvDateKeyET(unixSec) {
+            if (!Number.isFinite(unixSec)) return '';
+            try {
+                return new Intl.DateTimeFormat('en-CA', {
+                    timeZone: 'America/New_York',
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                }).format(new Date(unixSec * 1000));
+            } catch (e) {
+                const d = new Date(unixSec * 1000);
+                return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+            }
+        }
+
+        function tvFindCurrentDayStartFromCandles() {
+            if (!tvLastCandles.length) return 0;
+            const todayKey = tvDateKeyET(Math.floor(Date.now() / 1000));
+            if (!todayKey) return 0;
+            const firstToday = tvLastCandles.find(candle => tvDateKeyET(Number(candle && candle.time)) === todayKey);
+            return firstToday ? Number(firstToday.time) || 0 : 0;
+        }
+
+        function tvResolveDeferredSessionFocus() {
+            if (!tvForceSessionFocus) return;
+            if (!tvCurrentDayStartTime) {
+                tvCurrentDayStartTime = tvFindCurrentDayStartFromCandles();
+            }
+            if (tvCurrentDayStartTime) {
+                tvForceSessionFocus = false;
+                tvFocusCurrentSession();
+            }
+        }
+
         function tvGetSessionFocusLogicalRange() {
             if (!tvLastCandles.length) return null;
             const startIndex = tvGetCurrentSessionStartIndex();
@@ -13751,6 +13975,7 @@ def index():
                     tvIndicatorRefreshTimer = setTimeout(() => applyIndicators(tvIndicatorCandles, tvActiveInds), 2000);
                 }
                 scheduleTVStrikeOverlayDraw();
+                tvResolveDeferredSessionFocus();
             } else if (bucketStart > lastCandle.time) {
                 // Clock has rolled past the bucket boundary but CHART_EQUITY hasn't
                 // pushed the new bar yet. Seed a provisional bucket from the last
@@ -13774,6 +13999,7 @@ def index():
                 const vwLast = tvVwapCandles[tvVwapCandles.length - 1];
                 if (!vwLast || vwLast.time < bucketStart) tvVwapCandles.push(fresh);
                 scheduleTVStrikeOverlayDraw();
+                tvResolveDeferredSessionFocus();
             }
         }
 
@@ -13832,6 +14058,7 @@ def index():
             } catch(e) {}
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             scheduleTVStrikeOverlayDraw();
+            tvResolveDeferredSessionFocus();
         }
 
         // --- Fullscreen chart support ---
@@ -19264,11 +19491,21 @@ def index():
             helperGroup.innerHTML =
                 '<button type="button" class="tv-helper-trigger" title="Contract helper details" aria-label="Open contract helper details" aria-expanded="false" aria-controls="tv-helper-popover">' +
                     '<span class="tv-helper-label">Helper</span>' +
+                    '<span class="tv-helper-expiry" data-met="contract_primary_dte">0DTE</span>' +
                     '<span class="tv-helper-contract call" data-met="contract_call">—</span>' +
+                    '<span class="tv-helper-moneyness" data-met="contract_call_rank"></span>' +
                     '<span class="tv-helper-sep">/</span>' +
                     '<span class="tv-helper-contract put" data-met="contract_put">—</span>' +
+                    '<span class="tv-helper-moneyness" data-met="contract_put_rank"></span>' +
                     '<span class="tv-helper-sep size">Size</span>' +
                     '<span class="tv-helper-size" data-met="contract_size">—</span>' +
+                    '<span class="tv-helper-sep tv-helper-compare">|</span>' +
+                    '<span class="tv-helper-expiry tv-helper-compare">1DTE</span>' +
+                    '<span class="tv-helper-contract call tv-helper-compare" data-met="contract_1dte_call">—</span>' +
+                    '<span class="tv-helper-moneyness tv-helper-compare" data-met="contract_1dte_call_rank"></span>' +
+                    '<span class="tv-helper-sep tv-helper-compare">/</span>' +
+                    '<span class="tv-helper-contract put tv-helper-compare" data-met="contract_1dte_put">—</span>' +
+                    '<span class="tv-helper-moneyness tv-helper-compare" data-met="contract_1dte_put_rank"></span>' +
                 '</button>' +
                 '<div class="tv-helper-popover" id="tv-helper-popover" role="tooltip">' +
                     '<div class="rail-card-header-row">' +
@@ -23162,30 +23399,68 @@ def index():
                 const reason = Array.isArray(row.reasons) && row.reasons.length ? row.reasons.slice(0, 2).join(', ') : '';
                 return mid + ' · ' + spread + (score == null ? '' : ' · q ' + score) + (reason ? ' · ' + reason : '');
             };
+            const fmtMoneynessTag = row => {
+                if (!row || row.rank == null || !isFinite(row.rank)) return '';
+                const rank = Number(row.rank);
+                if (rank <= 0) return 'ATM';
+                if (rank === 1) return '1 OTM';
+                return '2 OTM';
+            };
+            const fmtDteLabel = helperRow => {
+                if (!helperRow || helperRow.dte == null || !isFinite(helperRow.dte)) return '0DTE';
+                return Number(helperRow.dte) + 'DTE';
+            };
+            const setComparisonTone = helperRow => {
+                const available = !!(helperRow && helperRow.status === 'ready');
+                document.querySelectorAll('.tv-toolbar-helper').forEach(el => {
+                    el.classList.toggle('has-compare', available);
+                });
+            };
             if (!helper || helper.status !== 'ready') {
                 _setMet('contract_expiry', 'Near expiry');
+                _setMet('contract_primary_dte', '0DTE');
                 _setMet('contract_call', '—');
                 _setMet('contract_put', '—');
+                _setMet('contract_call_rank', '');
+                _setMet('contract_put_rank', '');
+                _setMet('contract_1dte_call', '—');
+                _setMet('contract_1dte_put', '—');
+                _setMet('contract_1dte_call_rank', '');
+                _setMet('contract_1dte_put_rank', '');
                 _setMet('contract_call_meta', '—');
                 _setMet('contract_put_meta', '—');
                 _setMet('contract_size_label', 'Size guide');
                 _setMet('contract_size', '—');
                 _setMet('contract_note', (helper && helper.note) || 'Scores nearby ATM to 2 OTM contracts.');
                 setSizeTone(null);
+                setComparisonTone(null);
                 return;
             }
             const call = helper.call || null;
             const put = helper.put || null;
             const size = helper.size || {};
+            const helper1dte = stats && stats.contract_helper_1dte && stats.contract_helper_1dte.status === 'ready'
+                ? stats.contract_helper_1dte
+                : null;
+            const call1dte = helper1dte ? (helper1dte.call || null) : null;
+            const put1dte = helper1dte ? (helper1dte.put || null) : null;
             _setMet('contract_expiry', helper.expiry_text || 'Near expiry');
+            _setMet('contract_primary_dte', fmtDteLabel(helper));
             _setMet('contract_call', call ? (call.label || '—') : '—');
             _setMet('contract_put', put ? (put.label || '—') : '—');
+            _setMet('contract_call_rank', fmtMoneynessTag(call));
+            _setMet('contract_put_rank', fmtMoneynessTag(put));
+            _setMet('contract_1dte_call', call1dte ? (call1dte.label || '—') : '—');
+            _setMet('contract_1dte_put', put1dte ? (put1dte.label || '—') : '—');
+            _setMet('contract_1dte_call_rank', fmtMoneynessTag(call1dte));
+            _setMet('contract_1dte_put_rank', fmtMoneynessTag(put1dte));
             _setMet('contract_call_meta', fmtCandidateMeta(call));
             _setMet('contract_put_meta', fmtCandidateMeta(put));
             _setMet('contract_size_label', (size.label || 'Size') + ' size');
             _setMet('contract_size', (size.suggested == null || size.normal == null) ? '—' : (size.suggested + ' / ' + size.normal));
             _setMet('contract_note', helper.note || 'Contract quality weighs spread, liquidity, gamma/$, premium, IV/RV, and gamma regime.');
             setSizeTone(size.risk || null);
+            setComparisonTone(helper1dte);
         }
 
         function renderGammaProfile(stats) {
