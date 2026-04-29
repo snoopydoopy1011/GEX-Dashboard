@@ -13141,6 +13141,9 @@ def index():
         let tvDrawingScopeKey = '';
         let tvSelectedDrawingId = null;
         let tvDrawingOverlayPending = false;
+        let tvDrawingOverlayActiveFrame = null;
+        let tvDrawingOverlayActiveUntil = 0;
+        let tvOverlayPointerDragActive = false;
         let tvSessionCloudOverlayPending = false;
         let tvDrawingIdCounter = 0;
         let tvOpenDrawMenuRoot = null;
@@ -17095,6 +17098,40 @@ def index():
             });
         }
 
+        function drawTVChartPriceProjectedOverlays() {
+            drawSessionLevelClouds();
+            drawTVStrikeOverlay();
+            drawTVDrawingOverlay();
+            drawTVEthOverlay();
+            drawTVHistoricalOverlay();
+            scheduleGexPanelSync();
+        }
+
+        function requestTVDrawingOverlayActiveRedraw(durationMs = 220) {
+            if (!tvPriceChart || !tvCandleSeries) return;
+            const clock = window.performance && typeof window.performance.now === 'function'
+                ? window.performance
+                : null;
+            const now = clock
+                ? clock.now()
+                : Date.now();
+            tvDrawingOverlayActiveUntil = Math.max(tvDrawingOverlayActiveUntil, now + durationMs);
+            if (tvDrawingOverlayActiveFrame != null) return;
+            const drawWhileActive = () => {
+                drawTVChartPriceProjectedOverlays();
+                const current = clock
+                    ? clock.now()
+                    : Date.now();
+                if (current < tvDrawingOverlayActiveUntil) {
+                    tvDrawingOverlayActiveFrame = requestAnimationFrame(drawWhileActive);
+                } else {
+                    tvDrawingOverlayActiveFrame = null;
+                    scheduleTVDrawingOverlayDraw();
+                }
+            };
+            tvDrawingOverlayActiveFrame = requestAnimationFrame(drawWhileActive);
+        }
+
         function ensureTVDrawingOverlay() {
             const container = document.getElementById('price-chart');
             if (!container) return null;
@@ -20329,9 +20366,40 @@ def index():
                 });
                 if (!tvHistoricalOverlayDomEventsBound) {
                     tvHistoricalOverlayDomEventsBound = true;
-                    container.addEventListener('wheel',    () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
-                    container.addEventListener('mouseup',  () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); });
-                    container.addEventListener('touchend', () => { scheduleSessionLevelCloudDraw(); scheduleTVStrikeOverlayDraw(); scheduleTVHistoricalOverlayDraw(); scheduleGexPanelSync(); }, { passive: true });
+                    const schedulePanOverlayDraws = (activeDuration = 220) => {
+                        scheduleSessionLevelCloudDraw();
+                        scheduleTVStrikeOverlayDraw();
+                        scheduleTVDrawingOverlayDraw();
+                        scheduleTVHistoricalOverlayDraw();
+                        scheduleGexPanelSync();
+                        requestTVDrawingOverlayActiveRedraw(activeDuration);
+                    };
+                    const beginOverlayPointerDrag = () => {
+                        tvOverlayPointerDragActive = true;
+                        requestTVDrawingOverlayActiveRedraw(900);
+                    };
+                    const refreshOverlayPointerDrag = event => {
+                        if (tvOverlayPointerDragActive || (event && event.buttons)) {
+                            requestTVDrawingOverlayActiveRedraw(260);
+                        }
+                    };
+                    const endOverlayPointerDrag = () => {
+                        if (tvOverlayPointerDragActive) {
+                            tvOverlayPointerDragActive = false;
+                            schedulePanOverlayDraws(420);
+                        }
+                    };
+                    container.addEventListener('pointerdown', beginOverlayPointerDrag, { passive: true });
+                    container.addEventListener('touchstart',  beginOverlayPointerDrag, { passive: true });
+                    container.addEventListener('wheel',       () => { schedulePanOverlayDraws(360); }, { passive: true });
+                    container.addEventListener('mousemove',   refreshOverlayPointerDrag, { passive: true });
+                    container.addEventListener('mouseup',     () => { schedulePanOverlayDraws(300); });
+                    container.addEventListener('touchend',    () => { schedulePanOverlayDraws(300); }, { passive: true });
+                    document.addEventListener('pointermove',  refreshOverlayPointerDrag, { passive: true });
+                    document.addEventListener('mousemove',    refreshOverlayPointerDrag, { passive: true });
+                    document.addEventListener('pointerup',    endOverlayPointerDrag, { passive: true });
+                    document.addEventListener('pointercancel', endOverlayPointerDrag, { passive: true });
+                    document.addEventListener('mouseup',      endOverlayPointerDrag);
                     container.addEventListener('mousemove', (event) => {
                         const handledStrike = updateTVStrikeOverlayTooltip(event);
                         if (handledStrike) {
