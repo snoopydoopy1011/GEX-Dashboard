@@ -5461,7 +5461,9 @@ def compute_vol_pressure(price_data, S, expected_move_snapshot=None, atm_iv=None
     return out
 
 
-def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, regime=None, base_size=10):
+def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, regime=None,
+                            base_size=10, em_move=None, call_wall=None, put_wall=None,
+                            gamma_flip=None):
     """Rank near-ATM call/put candidates for discretionary 0-1DTE entries."""
     empty = {
         'status': 'unavailable',
@@ -5567,6 +5569,12 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
         atm_mid = max(_mid(rows[0]), 0.01)
         scored = []
         rv_bias = (rv_iv or {}).get('bias') if isinstance(rv_iv, dict) else None
+        em_dollars = float(em_move) if em_move and em_move > 0 else None
+        wall_for_side = call_wall if side == 'call' else put_wall
+        try:
+            wall_for_side = float(wall_for_side) if wall_for_side else None
+        except (TypeError, ValueError):
+            wall_for_side = None
         for idx, row in enumerate(rows):
             strike = _numeric(row, 'strike')
             bid = _numeric(row, 'bid')
@@ -5582,18 +5590,26 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
             delta = abs(_numeric(row, 'delta'))
             iv = _numeric(row, 'impliedVolatility', None)
             distance_pct = abs(strike - float(S)) / float(S) if S else 0.0
+            distance_em = (abs(strike - float(S)) / em_dollars) if em_dollars else None
             premium_relief = max(0.0, min(0.35, (atm_mid - mid) / atm_mid))
             spread_score = 0.0 if spread_pct is None else max(0.0, min(1.0, 1.0 - (spread_pct / 0.18)))
             liquidity_score = max(0.0, min(1.0, (volume / 750.0) * 0.65 + (oi / 2500.0) * 0.35))
             gamma_score = max(0.0, min(1.0, (gamma / max(mid, 0.01)) * 8.0))
-            delta_target = 0.48 if idx == 0 else (0.38 if idx == 1 else 0.30)
-            delta_score = max(0.0, 1.0 - min(abs(delta - delta_target) / 0.25, 1.0))
+            # Targets in expected-move units when EM is available; otherwise fall
+            # back to fixed delta targets. EM-aware targeting auto-scales with IV
+            # so a "1 OTM" target moves wider on high-IV days and tighter on low-IV.
+            if distance_em is not None:
+                em_target = 0.0 if idx == 0 else (0.25 if idx == 1 else 0.50)
+                positioning_score = max(0.0, 1.0 - min(abs(distance_em - em_target) / 0.5, 1.0))
+            else:
+                delta_target = 0.48 if idx == 0 else (0.38 if idx == 1 else 0.30)
+                positioning_score = max(0.0, 1.0 - min(abs(delta - delta_target) / 0.25, 1.0))
             distance_score = max(0.0, 1.0 - min(distance_pct / 0.012, 1.0))
             score = (
                 spread_score * 0.28 +
                 liquidity_score * 0.18 +
                 gamma_score * 0.20 +
-                delta_score * 0.16 +
+                positioning_score * 0.16 +
                 distance_score * 0.10 +
                 premium_relief * 0.08
             )
@@ -5615,6 +5631,19 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
                 score -= 0.18
             if mid < 0.05:
                 score -= 0.10
+            # Wall awareness: a strike sitting past its own side's wall is a
+            # low-probability target for a 2-10 minute hold (gamma walls reject).
+            past_wall = False
+            near_wall = False
+            if wall_for_side is not None:
+                if side == 'call' and strike > wall_for_side:
+                    past_wall = True
+                elif side == 'put' and strike < wall_for_side:
+                    past_wall = True
+                if abs(strike - wall_for_side) <= max(0.5, float(S) * 0.0015):
+                    near_wall = True
+            if past_wall:
+                score -= 0.08
             label = f"{strike:.0f}{'C' if side == 'call' else 'P'}"
             reasons = []
             if idx == 0:
@@ -5623,6 +5652,14 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
                 reasons.append('1 OTM')
             else:
                 reasons.append('2 OTM')
+            # Wall context first — it's more actionable than EM proximity and
+            # the popover only surfaces the first couple reasons.
+            if past_wall:
+                reasons.append('past wall')
+            elif near_wall:
+                reasons.append('at wall')
+            if distance_em is not None and distance_em <= 1.0 and idx > 0:
+                reasons.append('inside EM')
             if spread_pct is not None:
                 reasons.append(f"{spread_pct * 100:.0f}% spread")
             if premium_relief >= 0.15:
@@ -6214,6 +6251,10 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
             rv_iv=out.get('rv_iv'),
             regime=out.get('regime'),
             base_size=10,
+            em_move=out.get('em_move'),
+            call_wall=out.get('call_wall'),
+            put_wall=out.get('put_wall'),
+            gamma_flip=out.get('gamma_flip'),
         )
     except Exception as e:
         print(f"[compute_trader_stats] contract_helper failed: {e}")
@@ -6436,7 +6477,12 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     current_day_candles = [c for c in sorted_candles
                            if datetime.fromtimestamp(c['datetime'] / 1000, est).date() == current_date]
     display_date = current_date
+    today_candles_present = bool(current_day_candles)
     if not current_day_candles:
+        # No today bars yet (early load before stream populates, or off-hours
+        # right after a weekend/holiday). Use the most recent session for
+        # display labels, but DO NOT advertise it as today's session start —
+        # otherwise the "Today" focus anchors to a stale date.
         most_recent_date = max(
             datetime.fromtimestamp(c['datetime'] / 1000, est).date() for c in sorted_candles)
         display_date = most_recent_date
@@ -6482,7 +6528,8 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
          'low': c['low'], 'close': c['close'], 'volume': c.get('volume', 0)}
         for c in sorted(vwap_source_candles, key=lambda x: x.get('datetime', 0))
     ]
-    current_day_start_time = int(current_day_candles[0]['datetime'] / 1000) if current_day_candles else 0
+    current_day_start_time = (int(current_day_candles[0]['datetime'] / 1000)
+                              if (current_day_candles and today_candles_present) else 0)
 
     current_price = display_candles[-1]['close'] if display_candles else 0
     last_candle = display_candles[-1] if display_candles else None
@@ -13547,10 +13594,13 @@ def index():
             if (!tvLastCandles.length) return null;
             const startIndex = tvGetCurrentSessionStartIndex();
             const sessionBars = Math.max(1, tvLastCandles.length - startIndex);
+            // When today's session is known, anchor the view to today's open with
+            // just a few bars of left breathing-room. Without it, fall back to a
+            // smaller proportional pad so we don't drag prior days into view.
             const leftPaddingBars = tvCurrentDayStartTime
-                ? Math.max(24, Math.min(120, Math.round(sessionBars * 0.45)))
-                : Math.max(12, Math.min(64, Math.round(sessionBars * 0.20)));
-            const rightPaddingBars = Math.max(3, Math.min(12, Math.round(sessionBars * 0.06)));
+                ? 4
+                : Math.max(6, Math.min(20, Math.round(sessionBars * 0.10)));
+            const rightPaddingBars = Math.max(4, Math.min(12, Math.round(sessionBars * 0.08)));
             return {
                 from: Math.max(0, startIndex - leftPaddingBars),
                 to: (tvLastCandles.length - 1) + rightPaddingBars,
@@ -13559,6 +13609,15 @@ def index():
 
         function tvFocusCurrentSession() {
             if (!tvPriceChart || !tvLastCandles.length) return;
+            // If today's session start isn't known (server response hasn't yet
+            // included today's intraday bars), defer focus until the next
+            // render that does. Anchoring to the "last 80 bars" fallback would
+            // jump us to whichever prior session is most recent in the buffer
+            // — typically a day or two back on a fresh load.
+            if (!tvCurrentDayStartTime) {
+                tvForceSessionFocus = true;
+                return;
+            }
             tvYAxisMode = 'session';
             setTimeout(() => {
                 try {
@@ -20113,6 +20172,11 @@ def index():
             const isFirstRender = !tvLastCandles.length;
             const shouldFitAll = tvAutoRange || tvForceFit;
             const shouldFocusSession = !shouldFitAll && (isFirstRender || tvForceSessionFocus);
+            // Clear the force-flags up-front so tvFocusCurrentSession() can
+            // re-set tvForceSessionFocus to defer when today's data isn't ready
+            // yet — without us clobbering it at the end of this render.
+            tvForceFit = false;
+            tvForceSessionFocus = false;
             let rangeToRestoreAfterData = null;
             if (!shouldFitAll && !shouldFocusSession && tvLastCandles.length && tvPriceChart && tvPriceChart.timeScale) {
                 try {
@@ -20191,8 +20255,6 @@ def index():
             } else if (shouldFocusSession) {
                 tvFocusCurrentSession();
             }
-            tvForceFit = false;
-            tvForceSessionFocus = false;
         }
         // ─────────────────────────────────────────────────────────────────────
 
