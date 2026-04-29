@@ -16566,7 +16566,8 @@ def index():
                 return ['auto', 'start', 'middle', 'end'].includes(value) ? value : 'auto';
             }
             if (type === 'channel') {
-                return ['auto', 'start', 'middle', 'end', 'axis-top', 'axis-mid', 'axis-bottom'].includes(value) ? value : 'auto';
+                if (value === 'auto') return 'axis-mid';
+                return ['start', 'middle', 'end', 'axis-top', 'axis-mid', 'axis-bottom'].includes(value) ? value : 'axis-mid';
             }
             if (type === 'rect') {
                 return ['auto', 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center', 'axis-top', 'axis-mid', 'axis-bottom'].includes(value) ? value : 'auto';
@@ -17267,20 +17268,22 @@ def index():
                 ];
             }
             if (type === 'trendline' || type === 'channel') {
-                const options = [
+                if (type === 'channel') {
+                    return [
+                        { value: 'axis-mid', label: 'Price Axis - Midline' },
+                        { value: 'start', label: 'Start' },
+                        { value: 'middle', label: 'Middle' },
+                        { value: 'end', label: 'End' },
+                        { value: 'axis-top', label: 'Price Axis - Top' },
+                        { value: 'axis-bottom', label: 'Price Axis - Bottom' },
+                    ];
+                }
+                return [
                     { value: 'auto', label: 'Auto' },
                     { value: 'start', label: 'Start' },
                     { value: 'middle', label: 'Middle' },
                     { value: 'end', label: 'End' },
                 ];
-                if (type === 'channel') {
-                    options.push(
-                        { value: 'axis-top', label: 'Price Axis - Top' },
-                        { value: 'axis-mid', label: 'Price Axis - Midline' },
-                        { value: 'axis-bottom', label: 'Price Axis - Bottom' },
-                    );
-                }
-                return options;
             }
             if (type === 'rect') {
                 return [
