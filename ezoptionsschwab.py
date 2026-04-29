@@ -8489,6 +8489,7 @@ def index():
             align-items: stretch;
         }
         .chart-grid.gex-collapsed { --gex-col-w: 0px; }
+        .chart-grid.rail-flow-active { --rail-col-w: clamp(420px, 34vw, 520px); }
         /* Row 1: workspace toolbar shell (col 1) + GEX column header (col 2) + rail tabs (col 3). */
         .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
         .chart-grid > .gex-col-header       { grid-column: 2; grid-row: 1; }
@@ -8720,7 +8721,7 @@ def index():
             flex-basis: 100%;
         }
 
-        /* ── Right rail (GEX / Alerts / Levels) ──────────────────────── */
+        /* ── Right rail (Overview / Levels / Scenarios / Flow) ───────── */
         .right-rail-tabs {
             display: flex;
             align-items: stretch;
@@ -8786,6 +8787,163 @@ def index():
             vertical-align: middle;
         }
         .right-rail-tab .tab-badge.visible { display: inline-block; }
+
+        .rail-flow-shell {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 8px;
+            min-height: 0;
+        }
+        .rail-flow-summary-card {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 9px 10px;
+            flex: 0 0 auto;
+        }
+        .rail-flow-heading {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 5px;
+        }
+        .rail-flow-title {
+            font-size: 10px;
+            color: var(--fg-2);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .rail-flow-meta {
+            color: var(--fg-1);
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-flow-blotter {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+        }
+        .rail-flow-controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px;
+            border-bottom: 1px solid var(--border);
+            flex-wrap: wrap;
+        }
+        .rail-flow-segmented {
+            display: inline-flex;
+            gap: 2px;
+            padding: 2px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+        }
+        .rail-flow-chip {
+            border: none;
+            border-radius: 999px;
+            background: transparent;
+            color: var(--fg-1);
+            padding: 4px 8px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .rail-flow-chip.active {
+            background: var(--accent);
+            color: var(--fg-0);
+        }
+        .rail-flow-threshold {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            color: var(--fg-1);
+            font-size: 11px;
+        }
+        .rail-flow-threshold input {
+            width: 82px;
+            min-height: 26px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-0);
+            color: var(--fg-0);
+            padding: 3px 6px;
+            font: inherit;
+        }
+        .rail-flow-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px;
+            overflow-y: auto;
+            min-height: 0;
+        }
+        .rail-flow-row {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-0);
+            padding: 8px;
+        }
+        .rail-flow-row.call { border-left: 3px solid var(--call); }
+        .rail-flow-row.put { border-left: 3px solid var(--put); }
+        .rail-flow-row[hidden] { display: none; }
+        .rail-flow-row-main,
+        .rail-flow-row-sub {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            min-width: 0;
+        }
+        .rail-flow-row-main {
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 650;
+        }
+        .rail-flow-row-sub {
+            margin-top: 5px;
+            color: var(--fg-2);
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+            flex-wrap: wrap;
+        }
+        .rail-flow-contract {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+        }
+        .rail-flow-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 34px;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: var(--bg-2);
+            color: var(--fg-1);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .rail-flow-row.call .rail-flow-badge { color: var(--call); }
+        .rail-flow-row.put .rail-flow-badge { color: var(--put); }
+        .rail-flow-side.ask { color: var(--call); }
+        .rail-flow-side.bid { color: var(--put); }
+        .rail-flow-side.mid { color: var(--warn); }
+        .rail-flow-empty {
+            color: var(--fg-1);
+            font-size: 12px;
+            line-height: 1.4;
+            padding: 18px 10px;
+            text-align: center;
+        }
 
         /* Dealer Hedge Impact block (lives above the GEX chart inside the GEX rail panel) */
         .dealer-impact {
@@ -8946,6 +9104,89 @@ def index():
             flex: 0 0 auto;
         }
         .rail-card:last-child { margin-bottom: 6px; }
+        .rail-card.compact-overview {
+            padding: 9px 10px;
+        }
+        .rail-card-section + .rail-card-section {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+        }
+        .rail-card-section.tight + .rail-card-section.tight {
+            margin-top: 6px;
+            padding-top: 6px;
+        }
+        .market-state-top {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .market-state-top #rail-card-price {
+            min-width: 0;
+        }
+        .market-state-top #rail-card-profile {
+            max-width: 48%;
+            text-align: right;
+        }
+        .market-state-top .rail-profile-blurb {
+            display: none;
+        }
+        .market-state-metrics .rail-metric-pair {
+            gap: 8px;
+        }
+        .market-state-metrics .rail-metric .v {
+            font-size: 15px;
+        }
+        .market-state-metrics .rail-card-header {
+            margin-bottom: 3px;
+        }
+        .market-state-range .rail-range-caption,
+        .market-state-range .rail-range-labels {
+            display: none;
+        }
+        .market-state-range .rail-range-track {
+            margin: 6px 0;
+        }
+        .market-state-range .rail-range-live {
+            margin-top: 5px;
+            padding-top: 5px;
+        }
+        .hedge-read-card .dealer-impact {
+            padding: 0;
+            border-bottom: 0;
+            gap: 6px;
+        }
+        .hedge-read-card .dealer-impact-overview {
+            margin-bottom: 0;
+        }
+        .hedge-read-card .dealer-impact-summary {
+            display: none;
+        }
+        .hedge-read-card .rail-activity-bias,
+        .hedge-read-card .rail-sentiment-labels,
+        .hedge-read-card .rail-sentiment-track {
+            margin-top: 0;
+        }
+        .hedge-read-card .rail-bar {
+            margin-top: 6px;
+        }
+        .vol-skew-card .rail-iv-blurb {
+            margin-top: 4px;
+        }
+        .vol-skew-card .rail-iv-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            margin-top: 8px;
+        }
+        .positioning-card .rail-centroid-stats {
+            margin-top: 8px;
+        }
+        .positioning-card .rail-centroid-drift-row {
+            display: none;
+        }
+        .positioning-card .rail-centroid-reads {
+            margin-top: 8px;
+        }
         .rail-card-header-row {
             display: flex;
             align-items: baseline;
@@ -9099,6 +9340,76 @@ def index():
             color: var(--fg-1);
             font-size: 10px;
             line-height: 1.4;
+        }
+        .tv-toolbar-helper {
+            position: relative;
+            gap: 6px;
+            padding: 3px 6px;
+            background: rgba(245, 158, 11, 0.06);
+        }
+        .tv-helper-trigger {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border: none;
+            background: transparent;
+            color: var(--fg-1);
+            font-size: 11px;
+            line-height: 1.2;
+            padding: 2px 0;
+            cursor: default;
+            white-space: nowrap;
+        }
+        .tv-helper-label {
+            color: var(--fg-2);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            font-size: 10px;
+        }
+        .tv-helper-contract {
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+        .tv-helper-contract.call { color: var(--call); }
+        .tv-helper-contract.put { color: var(--put); }
+        .tv-helper-size {
+            color: var(--fg-0);
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+        .tv-helper-size.pos { color: var(--call); }
+        .tv-helper-size.neg { color: var(--put); }
+        .tv-helper-popover {
+            position: absolute;
+            top: calc(100% + 8px);
+            left: 0;
+            width: min(320px, 78vw);
+            z-index: 40;
+            display: none;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background: var(--bg-1);
+            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.36);
+        }
+        .tv-toolbar-helper:hover .tv-helper-popover,
+        .tv-toolbar-helper:focus-within .tv-helper-popover {
+            display: block;
+        }
+        .tv-helper-popover .contract-helper-grid {
+            margin-top: 6px;
+        }
+        .tv-helper-popover .contract-helper-size {
+            margin-top: 8px;
+        }
+        @media (max-width: 1280px) {
+            .tv-helper-size-label,
+            .tv-helper-sep.size { display: none; }
+        }
+        @media (max-width: 1120px) {
+            .tv-helper-contract,
+            .tv-helper-sep { display: none; }
+            .tv-toolbar-helper { padding-inline: 8px; }
         }
         .rail-range-track {
             position: relative;
@@ -11998,6 +12309,7 @@ def index():
                 <button type="button" class="right-rail-tab active" data-rail-tab="overview">Overview<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
                 <button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>
+                <button type="button" class="right-rail-tab" data-rail-tab="flow">Flow</button>
             </div>
             <div class="price-chart-container">
                 <div class="chart-container" id="price-chart"></div>
@@ -12021,92 +12333,74 @@ def index():
             </div>
             <div class="right-rail-panels" id="right-rail-panels">
                 <div class="right-rail-panel active" data-rail-panel="overview">
-                    <div class="rail-card" id="rail-card-price">
-                        <div class="rail-card-price-big" data-live-price>—</div>
-                        <div class="rail-card-price-sub">
-                            <span class="chg" data-met="price_change">—</span>
-                            <span class="rail-card-chip" data-met="expiry_chip">—</span>
-                        </div>
-                    </div>
-                    <div class="rail-card" id="rail-card-metrics">
-                        <div class="rail-metric-pair">
-                            <div class="rail-metric">
-                                <div class="rail-card-header">Net GEX</div>
-                                <div class="v" data-met="net_gex">—</div>
-                                <div class="d" data-met="net_gex_delta"></div>
-                            </div>
-                            <div class="rail-metric">
-                                <div class="rail-card-header">Net DEX</div>
-                                <div class="v" data-met="net_dex">—</div>
-                                <div class="d" data-met="net_dex_delta"></div>
-                            </div>
-                        </div>
-                        <div class="gex-scope-pill" id="gex-scope-pill">
-                            <button class="gex-scope-btn" data-scope="all">All</button>
-                            <button class="gex-scope-btn" data-scope="0dte">0DTE</button>
-                        </div>
-                    </div>
-                    <div class="rail-card" id="rail-card-contract-helper">
+                    <div class="rail-card compact-overview" id="rail-card-market-state">
                         <div class="rail-card-header-row">
-                            <div class="rail-card-header">Contract Helper</div>
-                            <div class="rail-card-note" data-met="contract_expiry">Near expiry</div>
+                            <div class="rail-card-header">Market State</div>
+                            <div class="rail-card-note" data-met="expiry_chip">—</div>
                         </div>
-                        <div class="contract-helper-grid">
-                            <div class="contract-helper-side call">
-                                <div class="contract-helper-label">Call candidate</div>
-                                <div class="contract-helper-contract" data-met="contract_call">—</div>
-                                <div class="contract-helper-meta" data-met="contract_call_meta">—</div>
+                        <div class="market-state-top rail-card-section tight">
+                            <div id="rail-card-price">
+                                <div class="rail-card-price-big" data-live-price>—</div>
+                                <div class="rail-card-price-sub">
+                                    <span class="chg" data-met="price_change">—</span>
+                                </div>
                             </div>
-                            <div class="contract-helper-side put">
-                                <div class="contract-helper-label">Put candidate</div>
-                                <div class="contract-helper-contract" data-met="contract_put">—</div>
-                                <div class="contract-helper-meta" data-met="contract_put_meta">—</div>
+                            <div id="rail-card-profile">
+                                <div class="rail-profile-headline">
+                                    <span class="rail-profile-dot" data-met="profile_dot"></span>
+                                    <span data-met="profile_headline">—</span>
+                                </div>
+                                <div class="rail-profile-blurb" data-met="profile_blurb">—</div>
                             </div>
                         </div>
-                        <div class="contract-helper-size">
-                            <span data-met="contract_size_label">Size guide</span>
-                            <strong data-met="contract_size">—</strong>
+                        <div class="market-state-metrics rail-card-section tight" id="rail-card-metrics">
+                            <div class="rail-metric-pair">
+                                <div class="rail-metric">
+                                    <div class="rail-card-header">Net GEX</div>
+                                    <div class="v" data-met="net_gex">—</div>
+                                    <div class="d" data-met="net_gex_delta"></div>
+                                </div>
+                                <div class="rail-metric">
+                                    <div class="rail-card-header">Net DEX</div>
+                                    <div class="v" data-met="net_dex">—</div>
+                                    <div class="d" data-met="net_dex_delta"></div>
+                                </div>
+                            </div>
+                            <div class="gex-scope-pill" id="gex-scope-pill">
+                                <button class="gex-scope-btn" data-scope="all">All</button>
+                                <button class="gex-scope-btn" data-scope="0dte">0DTE</button>
+                            </div>
                         </div>
-                        <div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>
+                        <div class="market-state-range rail-card-section tight" id="rail-card-range">
+                            <div class="rail-card-header-row">
+                                <div class="rail-card-header">Expected Move <span data-met="em_pct"></span></div>
+                                <div class="rail-card-note" data-met="em_type">ATM straddle</div>
+                            </div>
+                            <div class="rail-range-value" data-met="em_band_label">—</div>
+                            <div class="rail-range-track">
+                                <div class="rail-range-em" data-met="em_band"></div>
+                                <div class="rail-range-marker" data-met="price_marker"></div>
+                            </div>
+                            <div class="rail-range-labels">
+                                <span data-met="range_low">—</span>
+                                <span data-met="range_high">—</span>
+                            </div>
+                            <div class="rail-range-caption" data-met="em_context">Pinned at the 09:30 ET open ATM straddle.</div>
+                            <div class="rail-range-live">
+                                <span class="rail-range-live-label">Live ATM</span>
+                                <span class="rail-range-live-value" data-met="live_straddle">—</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="rail-card" id="rail-card-range">
+                    <div class="rail-card compact-overview hedge-read-card" id="rail-card-hedge-read">
                         <div class="rail-card-header-row">
-                            <div class="rail-card-header">Expected Move <span data-met="em_pct"></span></div>
-                            <div class="rail-card-note" data-met="em_type">ATM straddle</div>
-                        </div>
-                        <div class="rail-range-value" data-met="em_band_label">—</div>
-                        <div class="rail-range-track">
-                            <div class="rail-range-em" data-met="em_band"></div>
-                            <div class="rail-range-marker" data-met="price_marker"></div>
-                        </div>
-                        <div class="rail-range-labels">
-                            <span data-met="range_low">—</span>
-                            <span data-met="range_high">—</span>
-                        </div>
-                        <div class="rail-range-caption" data-met="em_context">Pinned at the 09:30 ET open ATM straddle.</div>
-                        <div class="rail-range-live">
-                            <span class="rail-range-live-label">Live ATM</span>
-                            <span class="rail-range-live-value" data-met="live_straddle">—</span>
-                        </div>
-                    </div>
-                    <div class="rail-card" id="rail-card-profile">
-                        <div class="rail-card-header">Gamma Profile</div>
-                        <div class="rail-profile-headline">
-                            <span class="rail-profile-dot" data-met="profile_dot"></span>
-                            <span data-met="profile_headline">—</span>
-                        </div>
-                        <div class="rail-profile-blurb" data-met="profile_blurb">—</div>
-                    </div>
-                    <div class="rail-card" id="rail-card-dealer">
-                        <div class="rail-card-header-row">
-                            <div class="rail-card-header">Dealer Impact</div>
-                            <div class="rail-card-note">Hedge response</div>
+                            <div class="rail-card-header">Dealer / Hedge Read</div>
+                            <div class="rail-card-note" data-met="dealer_conviction">—</div>
                         </div>
                         <div class="dealer-impact" id="dealer-impact">
                             <div class="dealer-impact-overview">
                                 <div class="dealer-impact-overview-head">
                                     <div class="dealer-impact-overview-label">Combined read</div>
-                                    <div class="dealer-impact-overview-chip" data-met="dealer_conviction">—</div>
                                 </div>
                                 <div class="dealer-impact-overview-title" data-met="dealer_headline">—</div>
                                 <div class="dealer-impact-overview-sub" data-met="dealer_subhead">—</div>
@@ -12152,43 +12446,34 @@ def index():
                             </div>
                             <div class="dealer-impact-summary" data-met="dealer_takeaway">Positive values indicate dealer buying to hedge; negative values indicate dealer selling to hedge.</div>
                         </div>
-                    </div>
-                    <div class="rail-card" id="rail-card-activity">
-                        <div class="rail-card-header">Chain Activity</div>
-                        <div class="rail-activity-bias">
-                            <span class="rail-activity-bias-label">Bias</span>
-                            <span class="rail-activity-bias-value" data-met="activity_bias">—</span>
-                        </div>
-                        <div class="rail-sentiment-labels"><span>bearish</span><span>bullish</span></div>
-                        <div class="rail-sentiment-track">
-                            <div class="rail-sentiment-marker" data-met="sentiment_marker"></div>
-                        </div>
-                        <div class="rail-bar rail-bar-rich">
-                            <span>OI</span>
-                            <div>
-                                <div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div>
-                                <div class="rail-bar-split" data-met="oi_split">—</div>
+                        <div class="rail-card-section tight" id="rail-card-activity">
+                            <div class="rail-activity-bias">
+                                <span class="rail-activity-bias-label">Bias</span>
+                                <span class="rail-activity-bias-value" data-met="activity_bias">—</span>
                             </div>
-                            <span class="num" data-met="oi_cp">—</span>
-                        </div>
-                        <div class="rail-bar rail-bar-rich">
-                            <span>VOL</span>
-                            <div>
-                                <div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>
-                                <div class="rail-bar-split" data-met="vol_split">—</div>
+                            <div class="rail-sentiment-labels"><span>bearish</span><span>bullish</span></div>
+                            <div class="rail-sentiment-track">
+                                <div class="rail-sentiment-marker" data-met="sentiment_marker"></div>
                             </div>
-                            <span class="num" data-met="vol_cp">—</span>
-                        </div>
-                        <div class="rail-bar rail-bar-rich">
-                            <span>V/OI</span>
-                            <div>
-                                <div class="rail-bar-track"><div class="rail-bar-fill" data-met="voi_fill"></div></div>
-                                <div class="rail-bar-split" data-met="voi_split">—</div>
+                            <div class="rail-bar rail-bar-rich">
+                                <span>VOL</span>
+                                <div>
+                                    <div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>
+                                    <div class="rail-bar-split" data-met="vol_split">—</div>
+                                </div>
+                                <span class="num" data-met="vol_cp">—</span>
                             </div>
-                            <span class="num" data-met="voi_cp">—</span>
+                            <div class="rail-bar rail-bar-rich">
+                                <span>V/OI</span>
+                                <div>
+                                    <div class="rail-bar-track"><div class="rail-bar-fill" data-met="voi_fill"></div></div>
+                                    <div class="rail-bar-split" data-met="voi_split">—</div>
+                                </div>
+                                <span class="num" data-met="voi_cp">—</span>
+                            </div>
                         </div>
                     </div>
-                    <div class="rail-card" id="rail-card-iv">
+                    <div class="rail-card compact-overview vol-skew-card" id="rail-card-iv">
                         <div class="rail-card-header-row">
                             <div class="rail-card-header">Skew / IV</div>
                             <div class="rail-card-note" data-met="iv_expiry">Near expiry</div>
@@ -12199,10 +12484,6 @@ def index():
                         </div>
                         <div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>
                         <div class="rail-iv-grid">
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Call</span><span class="rail-iv-stat-value" data-met="iv_atm_call">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">ATM Put</span><span class="rail-iv-stat-value" data-met="iv_atm_put">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put Wing</span><span class="rail-iv-stat-value" data-met="iv_put_wing">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Call Wing</span><span class="rail-iv-stat-value" data-met="iv_call_wing">—</span></div>
                             <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>
                             <div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
                         </div>
@@ -12219,7 +12500,7 @@ def index():
                             <div class="rail-vol-pressure-meta" data-met="vol_pressure_meta">0DTE move pressure loads with price candles.</div>
                         </div>
                     </div>
-                    <div class="rail-card" id="rail-card-centroid">
+                    <div class="rail-card compact-overview positioning-card" id="rail-card-centroid">
                         <div class="rail-card-header-row">
                             <div class="rail-card-header">Centroid Drift</div>
                             <div class="rail-card-note" data-met="centroid_status">Current session</div>
@@ -12270,6 +12551,17 @@ def index():
                             <tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>
                         </table>
                         </div>
+                    </div>
+                <div class="right-rail-panel" data-rail-panel="flow">
+                    <div class="rail-flow-shell" id="right-rail-flow">
+                        <div class="rail-flow-summary-card">
+                            <div class="rail-flow-heading">
+                                <div class="rail-flow-title">Flow Blotter</div>
+                                <div class="rail-flow-meta" data-rail-flow-count>Waiting</div>
+                            </div>
+                            <div class="rail-flow-meta" data-rail-flow-summary>Flow rows load with the options chain snapshot.</div>
+                        </div>
+                        <div class="rail-flow-empty">Flow blotter data loads with the next refresh.</div>
                     </div>
                 </div>
             </div>
@@ -18677,6 +18969,43 @@ def index():
             const drawGroup = makeGroup('draw');
             const actionsGroup = makeGroup('actions');
             renderStrikeOverlayControls(toolbarMain);
+            const helperGroup = document.createElement('div');
+            helperGroup.className = 'tv-toolbar-group tv-toolbar-helper';
+            helperGroup.dataset.group = 'contract-helper';
+            helperGroup.innerHTML =
+                '<button type="button" class="tv-helper-trigger" title="Contract helper details">' +
+                    '<span class="tv-helper-label">Helper</span>' +
+                    '<span class="tv-helper-contract call" data-met="contract_call">—</span>' +
+                    '<span class="tv-helper-sep">/</span>' +
+                    '<span class="tv-helper-contract put" data-met="contract_put">—</span>' +
+                    '<span class="tv-helper-sep size">Size</span>' +
+                    '<span class="tv-helper-size" data-met="contract_size">—</span>' +
+                '</button>' +
+                '<div class="tv-helper-popover">' +
+                    '<div class="rail-card-header-row">' +
+                        '<div class="rail-card-header">Contract Helper</div>' +
+                        '<div class="rail-card-note" data-met="contract_expiry">Near expiry</div>' +
+                    '</div>' +
+                    '<div class="contract-helper-grid">' +
+                        '<div class="contract-helper-side call">' +
+                            '<div class="contract-helper-label">Call candidate</div>' +
+                            '<div class="contract-helper-contract" data-met="contract_call">—</div>' +
+                            '<div class="contract-helper-meta" data-met="contract_call_meta">—</div>' +
+                        '</div>' +
+                        '<div class="contract-helper-side put">' +
+                            '<div class="contract-helper-label">Put candidate</div>' +
+                            '<div class="contract-helper-contract" data-met="contract_put">—</div>' +
+                            '<div class="contract-helper-meta" data-met="contract_put_meta">—</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="contract-helper-size">' +
+                        '<span data-met="contract_size_label">Size guide</span>' +
+                        '<strong data-met="contract_size">—</strong>' +
+                    '</div>' +
+                    '<div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>' +
+                '</div>';
+            addLeft(helperGroup);
+            renderContractHelper(getScopedStats());
             bindTVToolbarMenuDismiss();
 
             function addToGroup(group, node) {
@@ -19925,6 +20254,71 @@ def index():
             );
         }
 
+        buildAlertsPanelHtml = function() {
+            return (
+                '<div class="right-rail-panel active" data-rail-panel="overview">' +
+                    '<div class="rail-card compact-overview" id="rail-card-market-state">' +
+                        '<div class="rail-card-header-row"><div class="rail-card-header">Market State</div><div class="rail-card-note" data-met="expiry_chip">—</div></div>' +
+                        '<div class="market-state-top rail-card-section tight">' +
+                            '<div id="rail-card-price"><div class="rail-card-price-big" data-live-price>—</div><div class="rail-card-price-sub"><span class="chg" data-met="price_change">—</span></div></div>' +
+                            '<div id="rail-card-profile"><div class="rail-profile-headline"><span class="rail-profile-dot" data-met="profile_dot"></span><span data-met="profile_headline">—</span></div><div class="rail-profile-blurb" data-met="profile_blurb">—</div></div>' +
+                        '</div>' +
+                        '<div class="market-state-metrics rail-card-section tight" id="rail-card-metrics">' +
+                            '<div class="rail-metric-pair">' +
+                                '<div class="rail-metric"><div class="rail-card-header">Net GEX</div><div class="v" data-met="net_gex">—</div><div class="d" data-met="net_gex_delta"></div></div>' +
+                                '<div class="rail-metric"><div class="rail-card-header">Net DEX</div><div class="v" data-met="net_dex">—</div><div class="d" data-met="net_dex_delta"></div></div>' +
+                            '</div>' +
+                            '<div class="gex-scope-pill" id="gex-scope-pill"><button class="gex-scope-btn" data-scope="all">All</button><button class="gex-scope-btn" data-scope="0dte">0DTE</button></div>' +
+                        '</div>' +
+                        '<div class="market-state-range rail-card-section tight" id="rail-card-range">' +
+                            '<div class="rail-card-header-row"><div class="rail-card-header">Expected Move <span data-met="em_pct"></span></div><div class="rail-card-note" data-met="em_type">ATM straddle</div></div>' +
+                            '<div class="rail-range-value" data-met="em_band_label">—</div>' +
+                            '<div class="rail-range-track"><div class="rail-range-em" data-met="em_band"></div><div class="rail-range-marker" data-met="price_marker"></div></div>' +
+                            '<div class="rail-range-labels"><span data-met="range_low">—</span><span data-met="range_high">—</span></div>' +
+                            '<div class="rail-range-caption" data-met="em_context">Pinned at the 09:30 ET open ATM straddle.</div>' +
+                            '<div class="rail-range-live"><span class="rail-range-live-label">Live ATM</span><span class="rail-range-live-value" data-met="live_straddle">—</span></div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card compact-overview hedge-read-card" id="rail-card-hedge-read">' +
+                        '<div class="rail-card-header-row"><div class="rail-card-header">Dealer / Hedge Read</div><div class="rail-card-note" data-met="dealer_conviction">—</div></div>' +
+                        '<div class="dealer-impact" id="dealer-impact">' +
+                            '<div class="dealer-impact-overview"><div class="dealer-impact-overview-head"><div class="dealer-impact-overview-label">Combined read</div></div><div class="dealer-impact-overview-title" data-met="dealer_headline">—</div><div class="dealer-impact-overview-sub" data-met="dealer_subhead">—</div></div>' +
+                            '<div class="dealer-impact-legend"><span class="pos">+ buy to hedge</span><span class="neg">- sell to hedge</span></div>' +
+                            '<div class="dealer-impact-row"><div class="dealer-impact-copy"><div class="label">Spot +1%</div><div class="sub">hedge flow if spot lifts 1%</div></div><div class="dealer-impact-read"><div class="val" data-di="hedge_on_up_1pct">—</div><div class="dealer-impact-cue" data-di-cue="hedge_on_up_1pct">—</div></div></div>' +
+                            '<div class="dealer-impact-row"><div class="dealer-impact-copy"><div class="label">Spot −1%</div><div class="sub">hedge flow if spot drops 1%</div></div><div class="dealer-impact-read"><div class="val" data-di="hedge_on_down_1pct">—</div><div class="dealer-impact-cue" data-di-cue="hedge_on_down_1pct">—</div></div></div>' +
+                            '<div class="dealer-impact-row"><div class="dealer-impact-copy"><div class="label">Vol +1 pt</div><div class="sub">delta shift from a 1-point IV rise</div></div><div class="dealer-impact-read"><div class="val" data-di="vanna_up_1">—</div><div class="dealer-impact-cue" data-di-cue="vanna_up_1">—</div></div></div>' +
+                            '<div class="dealer-impact-row"><div class="dealer-impact-copy"><div class="label">Vol −1 pt</div><div class="sub">delta shift from a 1-point IV drop</div></div><div class="dealer-impact-read"><div class="val" data-di="vanna_down_1">—</div><div class="dealer-impact-cue" data-di-cue="vanna_down_1">—</div></div></div>' +
+                            '<div class="dealer-impact-row"><div class="dealer-impact-copy"><div class="label">Charm by close</div><div class="sub">delta bleed projected into 16:00 ET</div></div><div class="dealer-impact-read"><div class="val" data-di="charm_by_close">—</div><div class="dealer-impact-cue" data-di-cue="charm_by_close">—</div></div></div>' +
+                            '<div class="dealer-impact-summary" data-met="dealer_takeaway">Positive values indicate dealer buying to hedge; negative values indicate dealer selling to hedge.</div>' +
+                        '</div>' +
+                        '<div class="rail-card-section tight" id="rail-card-activity">' +
+                            '<div class="rail-activity-bias"><span class="rail-activity-bias-label">Bias</span><span class="rail-activity-bias-value" data-met="activity_bias">—</span></div>' +
+                            '<div class="rail-sentiment-labels"><span>bearish</span><span>bullish</span></div><div class="rail-sentiment-track"><div class="rail-sentiment-marker" data-met="sentiment_marker"></div></div>' +
+                            '<div class="rail-bar rail-bar-rich"><span>VOL</span><div><div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div><div class="rail-bar-split" data-met="vol_split">—</div></div><span class="num" data-met="vol_cp">—</span></div>' +
+                            '<div class="rail-bar rail-bar-rich"><span>V/OI</span><div><div class="rail-bar-track"><div class="rail-bar-fill" data-met="voi_fill"></div></div><div class="rail-bar-split" data-met="voi_split">—</div></div><span class="num" data-met="voi_cp">—</span></div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="rail-card compact-overview vol-skew-card" id="rail-card-iv">' +
+                        '<div class="rail-card-header-row"><div class="rail-card-header">Skew / IV</div><div class="rail-card-note" data-met="iv_expiry">Near expiry</div></div>' +
+                        '<div class="rail-iv-top"><div class="rail-iv-atm" data-met="iv_atm">—</div><div class="rail-iv-headline" data-met="iv_headline">IV context unavailable</div></div>' +
+                        '<div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>' +
+                        '<div class="rail-iv-grid"><div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div><div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div></div>' +
+                        '<div class="rail-iv-rv" data-met="rv_iv_line">HV20 — · ATM IV — · IV —</div>' +
+                        '<div class="rail-vol-pressure"><div class="rail-vol-pressure-row"><span class="rail-vol-pressure-headline" data-met="vol_pressure_headline">Vol pressure unavailable</span><span data-met="vol_pressure_pace">—</span></div><div class="rail-vol-pressure-track" aria-hidden="true"><div class="rail-vol-pressure-fill" data-met="vol_pressure_fill"></div><div class="rail-vol-pressure-mid"></div></div><div class="rail-vol-pressure-meta" data-met="vol_pressure_meta">0DTE move pressure loads with price candles.</div></div>' +
+                    '</div>' +
+                    '<div class="rail-card compact-overview positioning-card" id="rail-card-centroid">' +
+                        '<div class="rail-card-header-row"><div class="rail-card-header">Centroid Drift</div><div class="rail-card-note" data-met="centroid_status">Current session</div></div>' +
+                        '<div class="rail-centroid-meta"><span data-met="centroid_time">—</span><span data-met="centroid_spread">—</span></div>' +
+                        '<div class="rail-centroid-sparkline" data-centroid-sparkline><div class="rail-centroid-empty">Centroid data loads with stream data.</div></div>' +
+                        '<div class="rail-centroid-legend"><span><i class="call"></i>Call</span><span><i class="price"></i>Spot</span><span><i class="put"></i>Put</span></div>' +
+                        '<div class="rail-centroid-stats"><div class="rail-centroid-stat"><span class="label">Call centroid</span><span class="value" data-met="centroid_call_strike">—</span><span class="subvalue" data-met="centroid_call_delta">—</span></div><div class="rail-centroid-stat"><span class="label">Put centroid</span><span class="value" data-met="centroid_put_strike">—</span><span class="subvalue" data-met="centroid_put_delta">—</span></div></div>' +
+                        '<div class="rail-centroid-drift-row"><span data-met="centroid_call_drift">—</span><span data-met="centroid_put_drift">—</span></div>' +
+                        '<div class="rail-centroid-reads"><div class="rail-centroid-read" data-met="centroid_structure">—</div><div class="rail-centroid-read" data-met="centroid_drift_read">—</div></div>' +
+                    '</div>' +
+                '</div>'
+            );
+        };
+
         // Rebuild missing chart-grid children in the canonical Stage-5 order.
         // The initial HTML markup already includes all of these; this defensive
         // path only kicks in if price-chart-container was removed from the DOM.
@@ -19996,7 +20390,8 @@ def index():
                 tabs.innerHTML =
                     '<button type="button" class="right-rail-tab active" data-rail-tab="overview">Overview<span class="tab-badge" id="right-rail-alerts-badge"></span></button>' +
                     '<button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>' +
-                    '<button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>';
+                    '<button type="button" class="right-rail-tab" data-rail-tab="scenarios">Scenarios</button>' +
+                    '<button type="button" class="right-rail-tab" data-rail-tab="flow">Flow</button>';
                 grid.appendChild(tabs);
                 wireRightRailTabs();
             }
@@ -20046,6 +20441,18 @@ def index():
                                 '<thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>' +
                                 '<tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>' +
                             '</table>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="right-rail-panel" data-rail-panel="flow">' +
+                        '<div class="rail-flow-shell" id="right-rail-flow">' +
+                            '<div class="rail-flow-summary-card">' +
+                                '<div class="rail-flow-heading">' +
+                                    '<div class="rail-flow-title">Flow Blotter</div>' +
+                                    '<div class="rail-flow-meta" data-rail-flow-count>Waiting</div>' +
+                                '</div>' +
+                                '<div class="rail-flow-meta" data-rail-flow-summary>Flow rows load with the options chain snapshot.</div>' +
+                            '</div>' +
+                            '<div class="rail-flow-empty">Flow blotter data loads with the next refresh.</div>' +
                         '</div>' +
                     '</div>';
                 grid.appendChild(railPanels);
@@ -20239,12 +20646,12 @@ def index():
             }
         }
 
-        // ── Right-rail tab state (Overview / Levels / Scenarios) ─────────
+        // ── Right-rail tab state (Overview / Levels / Scenarios / Flow) ──
         const RAIL_TAB_KEY = 'gex.rightRailTab';
         let activeRailTab = 'overview';
         try {
             const saved = localStorage.getItem(RAIL_TAB_KEY);
-            if (saved === 'overview' || saved === 'levels' || saved === 'scenarios') {
+            if (saved === 'overview' || saved === 'levels' || saved === 'scenarios' || saved === 'flow') {
                 activeRailTab = saved;
             } else if (saved === 'alerts' || saved === 'gex') {
                 // Migrate older tab keys to the Overview surface.
@@ -20254,6 +20661,8 @@ def index():
         let _lastGexPanelJson = null; // retained so re-render paths (resize, uncollapse) can reuse last data
 
         function applyRightRailTab() {
+            const grid = document.getElementById('chart-grid');
+            if (grid) grid.classList.toggle('rail-flow-active', activeRailTab === 'flow');
             document.querySelectorAll('.right-rail-tab').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.railTab === activeRailTab);
             });
@@ -20267,6 +20676,9 @@ def index():
             }
             if (activeRailTab === 'scenarios') {
                 renderScenarioTable(_lastStats && _lastStats.scenarios);
+            }
+            if (activeRailTab === 'flow') {
+                initRailFlowBlotter(document.getElementById('right-rail-flow'));
             }
         }
 
@@ -21711,6 +22123,141 @@ def index():
             applyFiltersAndSort();
         }
 
+        const RAIL_FLOW_BLOTTER_STATE_KEY = 'gex.railFlowBlotterState';
+
+        function renderRailFlowBlotter(flowHtml) {
+            const host = document.getElementById('right-rail-flow');
+            if (!host) return;
+            if (!flowHtml) {
+                host.innerHTML =
+                    '<div class="rail-flow-summary-card">' +
+                        '<div class="rail-flow-heading"><div class="rail-flow-title">Flow Blotter</div><div class="rail-flow-meta" data-rail-flow-count>Waiting</div></div>' +
+                        '<div class="rail-flow-meta" data-rail-flow-summary>Flow rows load with the options chain snapshot.</div>' +
+                    '</div>' +
+                    '<div class="rail-flow-empty">Flow blotter data loads with the next refresh.</div>';
+                return;
+            }
+            const source = document.createElement('div');
+            source.innerHTML = flowHtml;
+            const sourceRoot = source.querySelector('.flow-blotter');
+            const rows = Array.from(source.querySelectorAll('tr[data-flow-row="1"]')).map(row => {
+                const cells = Array.from(row.children).map(cell => (cell.textContent || '').trim());
+                const type = row.dataset.optionType === 'put' ? 'put' : 'call';
+                const side = String(row.dataset.side || 'unknown');
+                return {
+                    type,
+                    time: cells[0] || '—',
+                    strike: cells[2] || '—',
+                    expiry: cells[3] || '—',
+                    volume: cells[6] || '—',
+                    oi: cells[7] || '—',
+                    voi: cells[8] || '—',
+                    vol1m: cells[9] || '—',
+                    pace: cells[10] || '—',
+                    premium: cells[11] || '—',
+                    side,
+                    premiumValue: parseFloat(row.dataset.premium) || 0,
+                    timeValue: parseFloat(row.dataset.time) || 0,
+                };
+            });
+            const sourceSummary = source.querySelector('[data-flow-summary]');
+            const sourceMeta = sourceRoot ? sourceRoot.querySelector('.flow-blotter__meta') : null;
+            const summaryText = sourceSummary ? sourceSummary.textContent.trim() : 'Flow rows load with the options chain snapshot.';
+            const metaText = sourceMeta ? sourceMeta.textContent.trim() : '';
+            const rowsHtml = rows.length ? rows.map(row => {
+                const typeLabel = row.type === 'put' ? 'Put' : 'Call';
+                const sideCls = ['ask', 'bid', 'mid'].includes(row.side) ? row.side : 'unknown';
+                return '<div class="rail-flow-row ' + row.type + '" data-rail-flow-row="1" data-option-type="' + row.type + '" data-premium="' + row.premiumValue + '" data-time="' + row.timeValue + '">' +
+                    '<div class="rail-flow-row-main">' +
+                        '<span class="rail-flow-contract"><span class="rail-flow-badge">' + typeLabel + '</span><span>' + _escapeHtml(row.strike) + '</span><span>' + _escapeHtml(row.expiry) + '</span></span>' +
+                        '<span>' + _escapeHtml(row.premium) + '</span>' +
+                    '</div>' +
+                    '<div class="rail-flow-row-sub">' +
+                        '<span>' + _escapeHtml(row.time) + '</span>' +
+                        '<span>Vol ' + _escapeHtml(row.volume) + '</span>' +
+                        '<span>OI ' + _escapeHtml(row.oi) + '</span>' +
+                        '<span>V/OI ' + _escapeHtml(row.voi) + '</span>' +
+                        '<span>1m ' + _escapeHtml(row.vol1m) + '</span>' +
+                        '<span>' + _escapeHtml(row.pace) + '</span>' +
+                        '<span class="rail-flow-side ' + sideCls + '">' + _escapeHtml(sideCls === 'unknown' ? 'Unknown' : sideCls.charAt(0).toUpperCase() + sideCls.slice(1)) + '</span>' +
+                    '</div>' +
+                '</div>';
+            }).join('') : '<div class="rail-flow-empty">No in-range contracts with non-zero day volume are available for this snapshot.</div>';
+            host.innerHTML =
+                '<div class="rail-flow-summary-card">' +
+                    '<div class="rail-flow-heading"><div class="rail-flow-title">Flow Blotter</div><div class="rail-flow-meta" data-rail-flow-count>' + rows.length.toLocaleString() + ' rows</div></div>' +
+                    '<div class="rail-flow-meta" data-rail-flow-summary>' + _escapeHtml(summaryText || metaText) + '</div>' +
+                '</div>' +
+                '<div class="rail-flow-blotter">' +
+                    '<div class="rail-flow-controls">' +
+                        '<div class="rail-flow-segmented" role="tablist" aria-label="Rail flow contract type filter">' +
+                            '<button type="button" class="rail-flow-chip active" data-rail-flow-type="all" aria-pressed="true">All</button>' +
+                            '<button type="button" class="rail-flow-chip" data-rail-flow-type="call" aria-pressed="false">Calls</button>' +
+                            '<button type="button" class="rail-flow-chip" data-rail-flow-type="put" aria-pressed="false">Puts</button>' +
+                        '</div>' +
+                        '<label class="rail-flow-threshold"><span>Min prem</span><input type="number" min="0" step="25000" value="0" data-rail-flow-min-premium></label>' +
+                    '</div>' +
+                    '<div class="rail-flow-list" data-rail-flow-list>' + rowsHtml + '</div>' +
+                '</div>';
+            initRailFlowBlotter(host);
+        }
+
+        function initRailFlowBlotter(container) {
+            if (!container) return;
+            const rows = Array.from(container.querySelectorAll('[data-rail-flow-row="1"]'));
+            const buttons = Array.from(container.querySelectorAll('[data-rail-flow-type]'));
+            const input = container.querySelector('[data-rail-flow-min-premium]');
+            const countEl = container.querySelector('[data-rail-flow-count]');
+            let saved = {};
+            try {
+                saved = JSON.parse(localStorage.getItem(RAIL_FLOW_BLOTTER_STATE_KEY) || '{}') || {};
+            } catch (e) {
+                saved = {};
+            }
+            let activeType = saved.activeType || 'all';
+            if (input) input.value = String(Math.max(0, Number(saved.minPremium) || 0));
+            const save = () => {
+                try {
+                    localStorage.setItem(RAIL_FLOW_BLOTTER_STATE_KEY, JSON.stringify({
+                        activeType,
+                        minPremium: input ? (parseFloat(input.value) || 0) : 0,
+                    }));
+                } catch (e) {}
+            };
+            const apply = () => {
+                const minPremium = input ? Math.max(0, parseFloat(input.value) || 0) : 0;
+                let visible = 0;
+                rows.forEach(row => {
+                    const matchesType = activeType === 'all' || row.dataset.optionType === activeType;
+                    const matchesPremium = (parseFloat(row.dataset.premium) || 0) >= minPremium;
+                    const show = matchesType && matchesPremium;
+                    row.hidden = !show;
+                    if (show) visible += 1;
+                });
+                buttons.forEach(btn => {
+                    const active = btn.dataset.railFlowType === activeType;
+                    btn.classList.toggle('active', active);
+                    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+                });
+                if (countEl) countEl.textContent = visible.toLocaleString() + ' shown';
+                save();
+            };
+            buttons.forEach(btn => {
+                if (btn.__railFlowBound) return;
+                btn.__railFlowBound = true;
+                btn.addEventListener('click', () => {
+                    activeType = btn.dataset.railFlowType || 'all';
+                    apply();
+                });
+            });
+            if (input && !input.__railFlowBound) {
+                input.__railFlowBound = true;
+                input.addEventListener('input', apply);
+                input.addEventListener('change', apply);
+            }
+            apply();
+        }
+
         // ── Key levels (Call Wall / Put Wall / Gamma Flip / ±1σ EM) ──────────
         function clearKeyLevels() {
             tvKeyLevelPrices = [];
@@ -22046,6 +22593,7 @@ def index():
                 _lastTopOIContextKey = topOiContextKey;
                 if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
             }
+            renderRailFlowBlotter(data.large_trades || null);
             
             const selectedCharts = getChartVisibility();
             applyStrikeRailTabs(selectedCharts);
@@ -22380,12 +22928,12 @@ def index():
 
         function renderContractHelper(stats) {
             const helper = stats && stats.contract_helper;
-            const sizeEl = document.querySelector('#rail-card-contract-helper [data-met="contract_size"]');
             const setSizeTone = risk => {
-                if (!sizeEl) return;
-                sizeEl.classList.remove('pos', 'neg');
-                if (risk === 'low') sizeEl.classList.add('pos');
-                if (risk === 'high') sizeEl.classList.add('neg');
+                document.querySelectorAll('[data-met="contract_size"]').forEach(sizeEl => {
+                    sizeEl.classList.remove('pos', 'neg');
+                    if (risk === 'low') sizeEl.classList.add('pos');
+                    if (risk === 'high') sizeEl.classList.add('neg');
+                });
             };
             const fmtCandidateMeta = row => {
                 if (!row) return '—';
