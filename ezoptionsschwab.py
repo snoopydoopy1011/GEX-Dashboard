@@ -9519,7 +9519,7 @@ def index():
             font-size: 11px;
             line-height: 1.2;
             padding: 2px 0;
-            cursor: default;
+            cursor: pointer;
             white-space: nowrap;
         }
         .tv-helper-label {
@@ -9542,8 +9542,8 @@ def index():
         .tv-helper-size.pos { color: var(--call); }
         .tv-helper-size.neg { color: var(--put); }
         .tv-helper-popover {
-            position: absolute;
-            top: calc(100% + 8px);
+            position: fixed;
+            top: 0;
             left: 0;
             width: min(320px, 78vw);
             z-index: 40;
@@ -9554,8 +9554,7 @@ def index():
             background: var(--bg-1);
             box-shadow: 0 16px 36px rgba(0, 0, 0, 0.36);
         }
-        .tv-toolbar-helper:hover .tv-helper-popover,
-        .tv-toolbar-helper:focus-within .tv-helper-popover {
+        .tv-toolbar-helper.open .tv-helper-popover {
             display: block;
         }
         .tv-helper-popover .contract-helper-grid {
@@ -12906,6 +12905,9 @@ def index():
         let tvOpenDrawMenuRoot = null;
         let tvOpenDrawMenuAnchor = null;
         let tvOpenDrawMenuPanel = null;
+        let tvOpenHelperRoot = null;
+        let tvOpenHelperAnchor = null;
+        let tvOpenHelperPanel = null;
         let tvToolbarMenuDismissBound = false;
         let tvLastCandles = [];         // current-day display candles (for streaming OHLCV updates)
         let tvIndicatorCandles = [];    // multi-day candles for indicator warmup (SMA200, EMA, etc.)
@@ -18645,6 +18647,52 @@ def index():
             tvOpenDrawMenuRoot = null;
             tvOpenDrawMenuAnchor = null;
             tvOpenDrawMenuPanel = null;
+            closeTVHelperPopover();
+        }
+
+        function closeTVHelperPopover() {
+            if (tvOpenHelperRoot) {
+                tvOpenHelperRoot.classList.remove('open');
+            }
+            if (tvOpenHelperAnchor) {
+                tvOpenHelperAnchor.setAttribute('aria-expanded', 'false');
+            }
+            if (tvOpenHelperPanel) {
+                tvOpenHelperPanel.style.left = '0px';
+                tvOpenHelperPanel.style.top = '0px';
+            }
+            tvOpenHelperRoot = null;
+            tvOpenHelperAnchor = null;
+            tvOpenHelperPanel = null;
+        }
+
+        function positionTVHelperPopover() {
+            if (!tvOpenHelperRoot || !tvOpenHelperAnchor || !tvOpenHelperPanel) return;
+            const anchorRect = tvOpenHelperAnchor.getBoundingClientRect();
+            const panel = tvOpenHelperPanel;
+            const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+            const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+            const panelRect = panel.getBoundingClientRect();
+            const panelWidth = panelRect.width || 320;
+            const panelHeight = panelRect.height || 0;
+            const left = Math.max(8, Math.min(viewportWidth - panelWidth - 8, anchorRect.left));
+            const preferredTop = anchorRect.bottom + 8;
+            const top = (preferredTop + panelHeight + 8 <= viewportHeight)
+                ? preferredTop
+                : Math.max(8, anchorRect.top - panelHeight - 8);
+            panel.style.left = `${Math.round(left)}px`;
+            panel.style.top = `${Math.round(top)}px`;
+        }
+
+        function openTVHelperPopover(root, anchor, panel) {
+            if (!root || !anchor || !panel) return;
+            closeTVToolbarMenus();
+            root.classList.add('open');
+            anchor.setAttribute('aria-expanded', 'true');
+            tvOpenHelperRoot = root;
+            tvOpenHelperAnchor = anchor;
+            tvOpenHelperPanel = panel;
+            positionTVHelperPopover();
         }
 
         function positionTVOpenDrawMenu() {
@@ -18682,6 +18730,9 @@ def index():
                 document.querySelectorAll('.strike-overlay-settings.open').forEach(el => {
                     if (!el.contains(event.target)) el.classList.remove('open');
                 });
+                if (tvOpenHelperRoot && !tvOpenHelperRoot.contains(event.target)) {
+                    closeTVHelperPopover();
+                }
                 if (!tvOpenDrawMenuRoot) return;
                 if (tvOpenDrawMenuRoot.contains(event.target)) return;
                 closeTVToolbarMenus();
@@ -18690,15 +18741,16 @@ def index():
                 if (event.key === 'Escape') {
                     document.querySelectorAll('.strike-overlay-settings.open').forEach(el => el.classList.remove('open'));
                     closeTVToolbarMenus();
+                    closeTVHelperPopover();
                 }
             });
             window.addEventListener('resize', () => {
-                if (!tvOpenDrawMenuRoot) return;
-                positionTVOpenDrawMenu();
+                if (tvOpenDrawMenuRoot) positionTVOpenDrawMenu();
+                if (tvOpenHelperRoot) positionTVHelperPopover();
             });
             document.addEventListener('scroll', () => {
-                if (!tvOpenDrawMenuRoot) return;
-                positionTVOpenDrawMenu();
+                if (tvOpenDrawMenuRoot) positionTVOpenDrawMenu();
+                if (tvOpenHelperRoot) positionTVHelperPopover();
             }, true);
         }
 
@@ -19147,7 +19199,7 @@ def index():
             helperGroup.className = 'tv-toolbar-group tv-toolbar-helper';
             helperGroup.dataset.group = 'contract-helper';
             helperGroup.innerHTML =
-                '<button type="button" class="tv-helper-trigger" title="Contract helper details">' +
+                '<button type="button" class="tv-helper-trigger" title="Contract helper details" aria-label="Open contract helper details" aria-expanded="false" aria-controls="tv-helper-popover">' +
                     '<span class="tv-helper-label">Helper</span>' +
                     '<span class="tv-helper-contract call" data-met="contract_call">—</span>' +
                     '<span class="tv-helper-sep">/</span>' +
@@ -19155,7 +19207,7 @@ def index():
                     '<span class="tv-helper-sep size">Size</span>' +
                     '<span class="tv-helper-size" data-met="contract_size">—</span>' +
                 '</button>' +
-                '<div class="tv-helper-popover">' +
+                '<div class="tv-helper-popover" id="tv-helper-popover" role="tooltip">' +
                     '<div class="rail-card-header-row">' +
                         '<div class="rail-card-header">Contract Helper</div>' +
                         '<div class="rail-card-note" data-met="contract_expiry">Near expiry</div>' +
@@ -19179,6 +19231,19 @@ def index():
                     '<div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>' +
                 '</div>';
             addLeft(helperGroup);
+            const helperTrigger = helperGroup.querySelector('.tv-helper-trigger');
+            const helperPopover = helperGroup.querySelector('.tv-helper-popover');
+            if (helperTrigger && helperPopover) {
+                helperTrigger.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (helperGroup.classList.contains('open')) {
+                        closeTVHelperPopover();
+                    } else {
+                        openTVHelperPopover(helperGroup, helperTrigger, helperPopover);
+                    }
+                });
+            }
             renderContractHelper(getScopedStats());
             bindTVToolbarMenuDismiss();
 
