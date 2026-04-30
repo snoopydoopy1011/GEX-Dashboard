@@ -18767,6 +18767,10 @@ def index():
                         '<label for="tv-selected-draw-midline-color">Midline Color</label>' +
                         '<input type="color" id="tv-selected-draw-midline-color" />' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row">' +
+                        '<label for="tv-selected-draw-hidden">Hide Drawing</label>' +
+                        '<input type="checkbox" id="tv-selected-draw-hidden" />' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-actions">' +
                         '<button type="button" class="tv-tb-btn danger" data-action="delete">Delete</button>' +
                     '</div>';
@@ -18908,6 +18912,11 @@ def index():
                     updateTVDrawingEditor();
                     scheduleTVDrawingOverlayDraw();
                 });
+                editor.querySelector('#tv-selected-draw-hidden').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def) return;
+                    setTVDrawingVisibility(def.id, !!event.target.checked, { keepSelected: true });
+                });
             }
             return editor;
         }
@@ -18992,6 +19001,7 @@ def index():
             const fillColorInput = editor.querySelector('#tv-selected-draw-fill-color');
             const midlineColorRow = editor.querySelector('#tv-drawing-midline-color-row');
             const midlineColorInput = editor.querySelector('#tv-selected-draw-midline-color');
+            const hiddenInput = editor.querySelector('#tv-selected-draw-hidden');
             if (fillColorRow && fillColorInput) {
                 const isChannel = def.type === 'channel';
                 fillColorRow.style.display = isChannel ? 'flex' : 'none';
@@ -19003,6 +19013,10 @@ def index():
                 midlineColorRow.style.display = isChannel ? 'flex' : 'none';
                 midlineColorInput.value = isChannel ? (def.midlineColor || def.color || '#FFD700') : '#FFD700';
                 midlineColorInput.disabled = !isChannel;
+            }
+            if (hiddenInput) {
+                hiddenInput.checked = !!def.hidden;
+                hiddenInput.disabled = false;
             }
             editor.classList.add('visible');
         }
@@ -20069,18 +20083,30 @@ def index():
             syncTVDrawingToolbarControls();
         }
 
-        function toggleTVDrawingVisibility(id) {
+        function setTVDrawingVisibility(id, hidden, options = {}) {
             const def = tvFindDrawingById(id);
             if (!def) return;
+            const nextHidden = !!hidden;
+            if (!!def.hidden === nextHidden) {
+                updateTVDrawingEditor();
+                syncTVDrawingToolbarControls();
+                return;
+            }
             pushTVDrawingUndoSnapshot();
-            def.hidden = !def.hidden;
-            if (def.hidden && tvSelectedDrawingId === def.id) {
+            def.hidden = nextHidden;
+            if (def.hidden && tvSelectedDrawingId === def.id && options.keepSelected !== true) {
                 tvSelectedDrawingId = null;
             }
             persistTVDrawings();
             tvRestoreDrawings();
             updateTVDrawingEditor();
             syncTVDrawingToolbarControls();
+        }
+
+        function toggleTVDrawingVisibility(id) {
+            const def = tvFindDrawingById(id);
+            if (!def) return;
+            setTVDrawingVisibility(id, !def.hidden);
         }
 
         function renderTVDrawingVisibilityMenu(panel) {
