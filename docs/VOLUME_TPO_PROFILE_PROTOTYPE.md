@@ -22,9 +22,12 @@ The important modeling caveat is that Schwab historical candles provide OHLCV bu
 - Preserved candle volume inside the Lightweight Charts candle payload so client-side visible-range and fixed-range profiles can rebuild without another server call.
 - Added drawer controls under `Volume / Market Profile`:
   - Right-axis volume profile toggle
-  - Range mode: composite days, current session, visible range
+  - Range mode: composite days, current session, visible range, custom date range
   - Composite day count
+  - Custom start/end dates for right-axis VP
+  - Right-axis VP color
   - Volume profile bin size
+  - Fixed-range VP default side: left or right
   - Allocation method
   - TPO toggle and bin size
 - Added an SVG profile overlay layer that draws:
@@ -43,6 +46,30 @@ The important modeling caveat is that Schwab historical candles provide OHLCV bu
 - This is visually functional prototype code, not polished chart architecture. It deliberately stays inside the single-file app and vanilla JS/SVG constraints.
 - Follow-up browser testing found that fixed-range VP could draw the selection box without visible profile bars. The SVG rows were being created, but their coordinates could land offscreen because fixed VP normalization discarded the clicked logical candle anchors after storing timestamps. Fixed VP now preserves `l1`/`l2` so the histogram rebuild uses the selected candle slice directly.
 - The first pass also wired redraw/update listeners for the VP/TPO inputs, but not the enable checkboxes. The `vp_enabled` and `tpo_enabled` controls now trigger the same refresh path as the other profile settings.
+
+## Latest Follow-Up
+
+Implemented after initial prototype review:
+
+- Added a `Custom Date Range` option to the right-axis volume profile range selector.
+  - The drawer now shows start/end date inputs only when custom mode is selected.
+  - The server-side profile filter supports `mode: custom` and swaps reversed start/end dates defensively.
+  - Custom range settings persist through the existing settings save/load path.
+- Added a right-axis VP color picker.
+  - The selected color drives the right-edge VP bars and the VP POC line.
+  - It persists as part of `volume_profile`.
+- Added fixed-range VP side controls.
+  - The drawer-level `Fixed VP Side` setting controls the default side for newly drawn VP ranges.
+  - Each selected fixed VP drawing also gets a `Profile Side` override in the drawing editor with `Use Setting`, `Right`, and `Left`.
+  - Existing drawings without an override continue to follow the global setting.
+- Fixed the drawing editor title for selected fixed VP drawings so it shows `Fixed VP` instead of falling through to `Text Label`.
+
+Tricky parts:
+
+- The fixed VP bars live in the separate profile SVG overlay, while the selected drawing box and editor live in the drawing overlay path. Side changes therefore need to schedule both overlay redraw paths in a few places.
+- The global side selector should not rewrite older saved drawings, so the drawing definition keeps an empty `profileSide` as "inherit from setting".
+- The local `5002` Flask server may keep serving an old in-memory template after file edits. Restart the listener if new drawer/editor controls do not appear after refresh.
+- SVG-native hover titles were considered, but the profile overlay intentionally uses `pointer-events: none` so chart interactions pass through. A real tooltip should be implemented as an app-native hover layer rather than relying on SVG `<title>`.
 
 ## Validation Done
 
@@ -63,8 +90,8 @@ The important modeling caveat is that Schwab historical candles provide OHLCV bu
 - Add hover tooltip details for VP/TPO rows: price, modeled volume, percent of max, TPO letters/count.
 - Improve fixed-range VP editing:
   - draggable start/end anchors
-  - optional profile side selection
   - per-drawing bin size and allocation controls in the drawing editor
 - Add value area calculations, e.g. VAH/VAL/POC for volume profile and TPO.
+- Consider exposing TPO color/opacity separately from VP once the overlay spacing is settled.
 - Consider session segmentation for TPO instead of only the latest/current RTH session.
 - Decide whether these should remain chart overlays, become formal indicators, or move into a dedicated chart settings menu once the interaction model is settled.

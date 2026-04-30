@@ -6831,6 +6831,31 @@ def _filter_profile_candles(candles, settings, tz):
         # Visible-range mode is recomputed in JS from the currently displayed
         # candles. Server still returns a sane seed for first paint.
         mode = 'days'
+    if mode == 'custom':
+        start_raw = str((settings or {}).get('start_date') or '').strip()
+        end_raw = str((settings or {}).get('end_date') or '').strip()
+        try:
+            start_date = datetime.strptime(start_raw, '%Y-%m-%d').date() if start_raw else None
+            end_date = datetime.strptime(end_raw, '%Y-%m-%d').date() if end_raw else None
+        except Exception:
+            start_date = None
+            end_date = None
+        if start_date and end_date and end_date < start_date:
+            start_date, end_date = end_date, start_date
+        if start_date or end_date:
+            selected = []
+            for c in candles:
+                try:
+                    candle_date = datetime.fromtimestamp(c['datetime'] / 1000, tz).date()
+                except Exception:
+                    continue
+                if start_date and candle_date < start_date:
+                    continue
+                if end_date and candle_date > end_date:
+                    continue
+                selected.append(c)
+            return selected
+        mode = 'days'
     if mode == 'session':
         days = 1
     else:
@@ -6912,6 +6937,8 @@ def build_volume_profile_payload(candles, settings=None, tz=None, current_price=
         'enabled': True,
         'mode': settings.get('mode') or 'days',
         'days': int(settings.get('days') or 5),
+        'start_date': settings.get('start_date') or '',
+        'end_date': settings.get('end_date') or '',
         'bin_size': bin_size,
         'method': settings.get('method') or 'triangular',
         'total_volume': total_volume,
@@ -8908,7 +8935,16 @@ def index():
         }
         .drawer-content .control-group label { font-size: 12px; color: var(--fg-1); }
         .drawer-content input[type="text"],
+        .drawer-content input[type="date"],
+        .drawer-content input[type="color"],
         .drawer-content select { width: 100%; min-width: 0; }
+        .drawer-content input[type="color"] {
+            height: 26px;
+            padding: 0;
+            border: 1px solid var(--border);
+            background: var(--bg-1);
+            border-radius: 4px;
+        }
         .drawer-content .expiry-dropdown,
         .drawer-content .levels-dropdown { width: 100%; min-width: 0; }
         .drawer-brand {
@@ -13267,15 +13303,35 @@ def index():
                                 <option value="days" selected>Composite Days</option>
                                 <option value="session">Current Session</option>
                                 <option value="visible">Visible Range</option>
+                                <option value="custom">Custom Date Range</option>
                             </select>
                         </div>
-                        <div class="control-group">
+                        <div class="control-group" id="vp_days_row">
                             <label for="vp_days">Composite Days:</label>
                             <input type="number" id="vp_days" min="1" max="20" value="5" style="width: 72px;">
+                        </div>
+                        <div class="control-group" id="vp_custom_start_row">
+                            <label for="vp_start_date">Start Date:</label>
+                            <input type="date" id="vp_start_date">
+                        </div>
+                        <div class="control-group" id="vp_custom_end_row">
+                            <label for="vp_end_date">End Date:</label>
+                            <input type="date" id="vp_end_date">
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_color">VP Color:</label>
+                            <input type="color" id="vp_color" value="#3B82F6">
                         </div>
                         <div class="control-group">
                             <label for="vp_bin_size">VP Bin:</label>
                             <input type="number" id="vp_bin_size" min="0.01" max="10" value="0.10" step="0.01" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <label for="fixed_vp_side">Fixed VP Side:</label>
+                            <select id="fixed_vp_side">
+                                <option value="right" selected>Right</option>
+                                <option value="left">Left</option>
+                            </select>
                         </div>
                         <div class="control-group">
                             <label for="vp_method">Allocation:</label>
@@ -15793,15 +15849,18 @@ def index():
             normalizeTopOICountInput();
             updateData();
         });
-        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_bin_size', 'vp_method', 'tpo_enabled', 'tpo_bin_size'].forEach(id => {
+        syncVolumeProfileSettingsVisibility();
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             el.addEventListener('input', () => {
+                syncVolumeProfileSettingsVisibility();
                 scheduleTVProfileOverlayDraw();
                 _priceHistoryLastKey = '';
                 updateData();
             });
             el.addEventListener('change', () => {
+                syncVolumeProfileSettingsVisibility();
                 scheduleTVProfileOverlayDraw();
                 _priceHistoryLastKey = '';
                 updateData();
@@ -17505,7 +17564,10 @@ def index():
             if (normalized.type === 'fixed_vp') {
                 normalized.binSize = Math.max(0.01, Math.min(10, Number(normalized.binSize) || 0.10));
                 normalized.method = ['uniform', 'triangular'].includes(normalized.method) ? normalized.method : 'triangular';
+                normalized.profileSide = normalized.profileSide === 'left' ? 'left' : (normalized.profileSide === 'right' ? 'right' : '');
                 normalized.label = normalized.label || 'Fixed VP';
+            } else {
+                delete normalized.profileSide;
             }
             if (normalized.type === 'avwap') {
                 const rawAnchor = Number(normalized.anchorTime);
@@ -19135,6 +19197,14 @@ def index():
                         '<label for="tv-selected-draw-extend-right">Extend Right</label>' +
                         '<input type="checkbox" id="tv-selected-draw-extend-right" />' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-profile-side-row">' +
+                        '<label for="tv-selected-draw-profile-side">Profile Side</label>' +
+                        '<select id="tv-selected-draw-profile-side">' +
+                            '<option value="">Use Setting</option>' +
+                            '<option value="right">Right</option>' +
+                            '<option value="left">Left</option>' +
+                        '</select>' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-row" id="tv-drawing-fill-color-row">' +
                         '<label for="tv-selected-draw-fill-color">Fill</label>' +
                         '<input type="color" id="tv-selected-draw-fill-color" />' +
@@ -19186,6 +19256,7 @@ def index():
                     }
                     syncTVUserDrawingAxisLabelLines();
                     if (def.type === 'avwap') applyTVAvwapDrawings();
+                    if (def.type === 'fixed_vp') scheduleTVProfileOverlayDraw();
                     if (def.type === 'hline' || def.type === 'channel') {
                         updateTVDrawingEditor();
                     }
@@ -19264,6 +19335,14 @@ def index():
                     persistTVDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
+                editor.querySelector('#tv-selected-draw-profile-side').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || def.type !== 'fixed_vp') return;
+                    def.profileSide = event.target.value === 'left' || event.target.value === 'right' ? event.target.value : '';
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                    scheduleTVDrawingOverlayDraw();
+                });
                 editor.querySelector('#tv-selected-draw-fill-color').addEventListener('input', event => {
                     const def = tvFindDrawingById();
                     if (!def || def.type !== 'channel') return;
@@ -19318,12 +19397,15 @@ def index():
             const midlineInput = editor.querySelector('#tv-selected-draw-midline');
             const extendRightRow = editor.querySelector('#tv-drawing-extend-right-row');
             const extendRightInput = editor.querySelector('#tv-selected-draw-extend-right');
+            const profileSideRow = editor.querySelector('#tv-drawing-profile-side-row');
+            const profileSideSelect = editor.querySelector('#tv-selected-draw-profile-side');
             if (titleEl) {
                 const typeLabel = def.type === 'hline' ? 'H-Line'
                     : def.type === 'trendline' ? 'Trend Line'
                     : def.type === 'channel' ? 'Channel'
                     : def.type === 'rect' ? 'Box'
                     : def.type === 'avwap' ? 'Anchored VWAP'
+                    : def.type === 'fixed_vp' ? 'Fixed VP'
                     : 'Text Label';
                 titleEl.textContent = typeLabel;
             }
@@ -19372,6 +19454,12 @@ def index():
                 extendRightRow.style.display = isChannel ? 'flex' : 'none';
                 extendRightInput.checked = isChannel ? normalizeTVDrawingExtendRight(def.extendRight) : false;
                 extendRightInput.disabled = !isChannel;
+            }
+            if (profileSideRow && profileSideSelect) {
+                const isFixedVp = def.type === 'fixed_vp';
+                profileSideRow.style.display = isFixedVp ? 'flex' : 'none';
+                profileSideSelect.value = isFixedVp ? (def.profileSide || '') : '';
+                profileSideSelect.disabled = !isFixedVp;
             }
             const fillColorRow = editor.querySelector('#tv-drawing-fill-color-row');
             const fillColorInput = editor.querySelector('#tv-selected-draw-fill-color');
@@ -19453,15 +19541,35 @@ def index():
         function getVolumeProfileSettingsFromDom() {
             const modeEl = document.getElementById('vp_mode');
             const daysEl = document.getElementById('vp_days');
+            const startEl = document.getElementById('vp_start_date');
+            const endEl = document.getElementById('vp_end_date');
             const binEl = document.getElementById('vp_bin_size');
             const methodEl = document.getElementById('vp_method');
+            const colorEl = document.getElementById('vp_color');
+            const fixedSideEl = document.getElementById('fixed_vp_side');
+            const colorFallback = resolveCssColor('var(--info)') || '#3B82F6';
+            const fixedSide = fixedSideEl && fixedSideEl.value === 'left' ? 'left' : 'right';
             return {
                 enabled: !!(document.getElementById('vp_enabled') && document.getElementById('vp_enabled').checked),
                 mode: modeEl ? modeEl.value : 'days',
                 days: daysEl ? Math.max(1, Math.min(20, parseInt(daysEl.value) || 5)) : 5,
+                start_date: startEl ? String(startEl.value || '') : '',
+                end_date: endEl ? String(endEl.value || '') : '',
                 bin_size: binEl ? Math.max(0.01, Math.min(10, parseFloat(binEl.value) || 0.10)) : 0.10,
                 method: methodEl ? methodEl.value : 'triangular',
+                color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
+                fixed_vp_side: fixedSide,
             };
+        }
+
+        function syncVolumeProfileSettingsVisibility() {
+            const mode = (document.getElementById('vp_mode') || {}).value || 'days';
+            const daysRow = document.getElementById('vp_days_row');
+            const startRow = document.getElementById('vp_custom_start_row');
+            const endRow = document.getElementById('vp_custom_end_row');
+            if (daysRow) daysRow.style.display = mode === 'days' ? 'flex' : 'none';
+            if (startRow) startRow.style.display = mode === 'custom' ? 'flex' : 'none';
+            if (endRow) endRow.style.display = mode === 'custom' ? 'flex' : 'none';
         }
 
         function getTpoProfileSettingsFromDom() {
@@ -19521,7 +19629,9 @@ def index():
             const maxValue = Math.max(1, Number(options.maxValue) || 1);
             const maxBarWidth = options.maxBarWidth || 120;
             const rightPad = options.rightPad || 64;
-            const xRight = width - rightPad;
+            const side = options.side === 'left' ? 'left' : 'right';
+            const xRight = Number.isFinite(Number(options.xRight)) ? Number(options.xRight) : width - rightPad;
+            const xLeft = Number.isFinite(Number(options.xLeft)) ? Number(options.xLeft) : Math.max(0, width - rightPad - maxBarWidth);
             const fill = options.fill || 'var(--info)';
             const opacity = options.opacity == null ? 0.24 : options.opacity;
             rows.forEach(row => {
@@ -19534,7 +19644,7 @@ def index():
                 const h = Math.max(2, Math.min(18, Math.abs((y2 == null || Number.isNaN(y2)) ? 8 : y2 - y)));
                 const w = Math.max(2, (value / maxValue) * maxBarWidth);
                 group.appendChild(createSvgEl('rect', {
-                    x: xRight - w,
+                    x: side === 'left' ? xLeft : xRight - w,
                     y: Math.max(0, y - h / 2),
                     width: w,
                     height: h,
@@ -19568,7 +19678,7 @@ def index():
                     maxValue: vp.max_volume,
                     maxBarWidth: Math.min(150, Math.max(70, width * 0.14)),
                     rightPad: 72,
-                    fill: 'var(--info)',
+                    fill: vpSettings.color || 'var(--info)',
                     opacity: 0.24,
                     binSize: vp.bin_size || vpSettings.bin_size,
                 });
@@ -19581,6 +19691,7 @@ def index():
                             y1: y,
                             x2: width - 58,
                             y2: y,
+                            style: vpSettings.color ? `stroke:${vpSettings.color}` : null,
                         }));
                         const label = createSvgEl('text', { class: 'tv-profile-label', x: width - 56, y });
                         label.textContent = 'VP POC';
@@ -19618,12 +19729,18 @@ def index():
                 const screen = tvDrawingToScreen(def, width);
                 if (!screen || !screen.profile || !screen.profile.bins.length) return;
                 const group = createSvgEl('g', {});
+                const boxX = Math.min(screen.x1, screen.x2);
+                const boxRight = Math.max(screen.x1, screen.x2);
+                const profileSide = def.profileSide || vpSettings.fixed_vp_side || 'right';
+                const profileMaxWidth = Math.max(36, Math.min(130, Math.abs(screen.x2 - screen.x1) * 0.72));
                 appendProfileRows(group, screen.profile.bins, {
                     width,
                     height,
                     maxValue: screen.profile.max_volume,
-                    maxBarWidth: Math.max(36, Math.min(130, Math.abs(screen.x2 - screen.x1) * 0.72)),
-                    rightPad: width - Math.max(screen.x1, screen.x2),
+                    maxBarWidth: profileMaxWidth,
+                    side: profileSide,
+                    xLeft: boxX,
+                    xRight: boxRight,
                     fill: def.color || 'var(--warn)',
                     opacity: 0.28,
                     binSize: def.binSize || vpSettings.bin_size,
@@ -20451,6 +20568,7 @@ def index():
                         lineStyle: 'dashed',
                         binSize: getVolumeProfileSettingsFromDom().bin_size,
                         method: getVolumeProfileSettingsFromDom().method,
+                        profileSide: getVolumeProfileSettingsFromDom().fixed_vp_side,
                         label: 'Fixed VP',
                     });
                 } else if (tvDrawMode === 'rect' && drawPoints.length === 1) {
@@ -20959,6 +21077,7 @@ def index():
                             lineStyle: 'dashed',
                             binSize: getVolumeProfileSettingsFromDom().bin_size,
                             method: getVolumeProfileSettingsFromDom().method,
+                            profileSide: getVolumeProfileSettingsFromDom().fixed_vp_side,
                             label: 'Fixed VP',
                         });
                     }
@@ -26008,8 +26127,13 @@ def index():
                 if (document.getElementById('vp_enabled')) document.getElementById('vp_enabled').checked = !!vp.enabled;
                 if (document.getElementById('vp_mode')) document.getElementById('vp_mode').value = vp.mode || 'days';
                 if (document.getElementById('vp_days')) document.getElementById('vp_days').value = vp.days || 5;
+                if (document.getElementById('vp_start_date')) document.getElementById('vp_start_date').value = vp.start_date || '';
+                if (document.getElementById('vp_end_date')) document.getElementById('vp_end_date').value = vp.end_date || '';
+                if (document.getElementById('vp_color')) document.getElementById('vp_color').value = normalizeTVIndicatorColor(vp.color, resolveCssColor('var(--info)') || '#3B82F6');
                 if (document.getElementById('vp_bin_size')) document.getElementById('vp_bin_size').value = vp.bin_size || 0.10;
+                if (document.getElementById('fixed_vp_side')) document.getElementById('fixed_vp_side').value = vp.fixed_vp_side === 'left' ? 'left' : 'right';
                 if (document.getElementById('vp_method')) document.getElementById('vp_method').value = vp.method || 'triangular';
+                syncVolumeProfileSettingsVisibility();
             }
             if (settings.tpo_profile) {
                 const tpo = settings.tpo_profile;
