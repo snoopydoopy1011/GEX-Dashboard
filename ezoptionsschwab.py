@@ -17875,6 +17875,41 @@ def index():
             return { x: screen.x + inset, y: screen.y + inset, anchor: 'left', boundWidth: width, boundHeight: height };
         }
 
+        function getTVDrawingAxisBadgeMetrics(def, price, width) {
+            if (!def || !Number.isFinite(Number(price))) return null;
+            const labelText = String(def.label || '').trim();
+            const valueText = Number(price).toFixed(2);
+            const labelWidth = labelText ? Math.max(38, Math.min(150, 14 + (labelText.length * 7))) : 0;
+            const valueWidth = Math.max(50, Math.min(78, 14 + (valueText.length * 7)));
+            const totalWidth = labelWidth + valueWidth;
+            const x = Math.max(4, Math.min(width - totalWidth - 4, width - totalWidth - 8));
+            return { x, width: totalWidth, height: 18 };
+        }
+
+        function getTVDrawingAxisLabelClipX(def, price, width) {
+            const metrics = getTVDrawingAxisBadgeMetrics(def, price, width);
+            if (!metrics) return null;
+            return Math.max(0, metrics.x - 3);
+        }
+
+        function clipTVDrawingLineRight(line, maxX) {
+            if (!line || !Number.isFinite(maxX)) return line;
+            const x1 = Number(line.x1);
+            const y1 = Number(line.y1);
+            const x2 = Number(line.x2);
+            const y2 = Number(line.y2);
+            if (![x1, y1, x2, y2].every(Number.isFinite)) return line;
+            if (x1 <= maxX && x2 <= maxX) return line;
+            if (x1 > maxX && x2 > maxX) return null;
+            if (Math.abs(x2 - x1) < 1e-6) return null;
+            const t = (maxX - x1) / (x2 - x1);
+            const clippedY = y1 + ((y2 - y1) * t);
+            if (x1 <= maxX) {
+                return Object.assign({}, line, { x2: maxX, y2: clippedY });
+            }
+            return Object.assign({}, line, { x1: maxX, y1: clippedY });
+        }
+
         function appendTVDrawingAxisBadge(group, def, price, width, height) {
             if (!group || !def || !Number.isFinite(Number(price))) return null;
             const y = tvCandleSeries ? tvCandleSeries.priceToCoordinate(Number(price)) : null;
@@ -17882,10 +17917,12 @@ def index():
             const labelText = String(def.label || '').trim();
             const valueText = Number(price).toFixed(2);
             const badgeHeight = 18;
+            const metrics = getTVDrawingAxisBadgeMetrics(def, price, width);
+            if (!metrics) return null;
             const labelWidth = labelText ? Math.max(38, Math.min(150, 14 + (labelText.length * 7))) : 0;
-            const valueWidth = Math.max(50, Math.min(78, 14 + (valueText.length * 7)));
-            const totalWidth = labelWidth + valueWidth;
-            const x = Math.max(4, Math.min(width - totalWidth - 4, width - totalWidth - 8));
+            const valueWidth = metrics.width - labelWidth;
+            const totalWidth = metrics.width;
+            const x = metrics.x;
             const top = height > badgeHeight
                 ? Math.max(4, Math.min(height - badgeHeight - 4, y - (badgeHeight / 2)))
                 : 0;
@@ -19302,6 +19339,28 @@ def index():
             } else if (screen.type === 'channel') {
                 const fillColor = def.fillColor || def.color;
                 const midlineColor = def.midlineColor || def.color;
+                const channelAxisLabelPrice = isTVDrawingAxisLabelPosition(def.labelPosition)
+                    ? getTVChannelAxisLabelPrice(def, width)
+                    : null;
+                const channelAxisLabelClipX = (!isPreview && labelText && Number.isFinite(channelAxisLabelPrice))
+                    ? getTVDrawingAxisLabelClipX(def, channelAxisLabelPrice, width)
+                    : null;
+                const drawChannelLine = (line, attrs = {}) => {
+                    const clipped = clipTVDrawingLineRight(line, channelAxisLabelClipX);
+                    if (!clipped) return;
+                    group.appendChild(createSvgEl('line', Object.assign({
+                        class: 'tv-drawing-shape',
+                        x1: clipped.x1,
+                        y1: clipped.y1,
+                        x2: clipped.x2,
+                        y2: clipped.y2,
+                        stroke: def.color,
+                        'stroke-width': strokeWidth,
+                        'stroke-dasharray': dashArray || null,
+                        'stroke-linecap': 'round',
+                        opacity: isPreview ? 0.8 : 1,
+                    }, attrs)));
+                };
                 group.appendChild(createSvgEl('polygon', {
                     class: 'tv-drawing-shape',
                     points: screen.extendRight
@@ -19316,80 +19375,57 @@ def index():
                         { x1: screen.x1, y1: screen.y1, x2: screen.x2, y2: screen.y2 },
                         { x1: screen.px1, y1: screen.py1, x2: screen.px2, y2: screen.py2 },
                     ].forEach(line => {
-                        group.appendChild(createSvgEl('line', {
-                            class: 'tv-drawing-shape',
-                            x1: line.x1,
-                            y1: line.y1,
-                            x2: line.x2,
-                            y2: line.y2,
+                        drawChannelLine(line, {
                             stroke: 'rgba(255,255,255,0.42)',
                             'stroke-width': Math.max(strokeWidth + 1, 3),
                             'stroke-linecap': 'round',
-                        }));
+                            'stroke-dasharray': null,
+                            opacity: 1,
+                        });
                     });
                 }
                 [
                     { x1: screen.x1, y1: screen.y1, x2: screen.x2, y2: screen.y2 },
                     { x1: screen.px1, y1: screen.py1, x2: screen.px2, y2: screen.py2 },
                 ].forEach(line => {
-                    group.appendChild(createSvgEl('line', {
-                        class: 'tv-drawing-shape',
-                        x1: line.x1,
-                        y1: line.y1,
-                        x2: line.x2,
-                        y2: line.y2,
-                        stroke: def.color,
-                        'stroke-width': strokeWidth,
-                        'stroke-dasharray': dashArray || null,
-                        'stroke-linecap': 'round',
-                        opacity: isPreview ? 0.8 : 1,
-                    }));
+                    drawChannelLine(line);
                 });
                 if (screen.extendRight) {
                     [
                         { x1: screen.extendRight.baseFromX, y1: screen.extendRight.baseFromY, x2: screen.extendRight.toX, y2: screen.extendRight.baseToY },
                         { x1: screen.extendRight.parallelFromX, y1: screen.extendRight.parallelFromY, x2: screen.extendRight.toX, y2: screen.extendRight.parallelToY },
                     ].forEach(line => {
-                        group.appendChild(createSvgEl('line', {
-                            class: 'tv-drawing-shape',
-                            x1: line.x1,
-                            y1: line.y1,
-                            x2: line.x2,
-                            y2: line.y2,
-                            stroke: def.color,
-                            'stroke-width': strokeWidth,
-                            'stroke-dasharray': dashArray || null,
-                            'stroke-linecap': 'round',
+                        drawChannelLine(line, {
                             opacity: isPreview ? 0.7 : 0.94,
-                        }));
+                        });
                     });
                 }
                 if (def.showMidline !== false) {
-                    group.appendChild(createSvgEl('line', {
-                        class: 'tv-drawing-shape',
+                    drawChannelLine({
                         x1: screen.mx1,
                         y1: screen.my1,
                         x2: screen.mx2,
                         y2: screen.my2,
+                    }, {
                         stroke: midlineColor,
                         'stroke-width': Math.max(1, strokeWidth - 1),
                         'stroke-dasharray': '7 6',
                         'stroke-linecap': 'round',
                         opacity: 0.72,
-                    }));
+                    });
                     if (screen.extendRight) {
-                        group.appendChild(createSvgEl('line', {
-                            class: 'tv-drawing-shape',
+                        drawChannelLine({
                             x1: screen.extendRight.midFromX,
                             y1: screen.extendRight.midFromY,
                             x2: screen.extendRight.toX,
                             y2: screen.extendRight.midToY,
+                        }, {
                             stroke: midlineColor,
                             'stroke-width': Math.max(1, strokeWidth - 1),
                             'stroke-dasharray': '7 6',
                             'stroke-linecap': 'round',
                             opacity: 0.68,
-                        }));
+                        });
                     }
                 }
                 if (labelText && !isTVDrawingAxisLabelPosition(def.labelPosition)) {
@@ -19397,8 +19433,8 @@ def index():
                         label: labelText,
                         color: def.color,
                     }, getTVChannelLabelPlacement(screen, def.labelPosition, width, height)));
-                } else if (labelText && isTVDrawingAxisLabelPosition(def.labelPosition)) {
-                    appendTVDrawingAxisBadge(group, def, getTVChannelAxisLabelPrice(def, width), width, height);
+                } else if (isPreview && labelText && isTVDrawingAxisLabelPosition(def.labelPosition)) {
+                    appendTVDrawingAxisBadge(group, def, channelAxisLabelPrice, width, height);
                 }
                 if (interactive) {
                     const hitSegments = [
@@ -19486,7 +19522,7 @@ def index():
                         label: labelText,
                         color: def.color,
                     }, getTVRectLabelPlacement(screen, def.labelPosition, width, height)));
-                } else if (labelText && isTVDrawingAxisLabelPosition(def.labelPosition)) {
+                } else if (isPreview && labelText && isTVDrawingAxisLabelPosition(def.labelPosition)) {
                     appendTVDrawingAxisBadge(group, def, getTVRectAxisLabelPrice(def), width, height);
                 }
                 if (interactive) {
