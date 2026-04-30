@@ -3041,13 +3041,28 @@ RVOL_LOOKBACK_MIN = 3
 RVOL_LOOKBACK_MAX = 30
 
 
+def _robust_volume_baseline(values):
+    """Return a small-sample robust baseline for prior-session volumes."""
+    vals = sorted(float(v or 0) for v in values if v is not None)
+    if not vals:
+        return 0.0
+    n = len(vals)
+    if n < 5:
+        mid = n // 2
+        return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+    trim = max(1, int(n * 0.10))
+    trimmed = vals[trim:n - trim] if n - (2 * trim) >= 3 else vals
+    return sum(trimmed) / len(trimmed)
+
+
 def compute_rvol_at_time_buckets(ticker, timeframe, lookback_days):
     """Average RTH per-bar volume by time-of-day across prior sessions.
 
-    Returns {'baseline': {HH:MM -> avg_volume}, 'sessions_used': int,
+    Returns {'baseline': {HH:MM -> robust_avg_volume}, 'cumulative_baseline':
+    {HH:MM -> robust_avg_cumulative_volume}, 'sessions_used': int,
     'lookback_days': int}. RTH window is 9:30-16:00 ET. Today and half-days
-    (last RTH bar < 15:30 ET) are excluded so the baseline isn't skewed by
-    the in-progress session or shortened holiday closes."""
+    (last RTH bar < 15:30 ET) are excluded so the baseline isn't skewed by the
+    in-progress session or shortened holiday closes."""
     if ticker == "MARKET":
         sym = "$SPX"
     elif ticker == "MARKET2":
@@ -3121,9 +3136,11 @@ def compute_rvol_at_time_buckets(ticker, timeframe, lookback_days):
     eligible = eligible[:lb]
 
     bucket_volumes = {}
+    cumulative_volumes = {}
     for d in eligible:
         day_candles = sorted(by_date[d], key=lambda x: x['datetime'])
         bucketed = aggregate_candles_to_timeframe(day_candles, tf) if tf > 1 else day_candles
+        day_bucket_volumes = {}
         for b in bucketed:
             try:
                 dt = datetime.fromtimestamp(b['datetime'] / 1000, est)
@@ -3133,15 +3150,28 @@ def compute_rvol_at_time_buckets(ticker, timeframe, lookback_days):
             if mins < 570 or mins >= 960:
                 continue
             key = f"{dt.hour:02d}:{dt.minute:02d}"
-            bucket_volumes.setdefault(key, []).append(float(b.get('volume') or 0))
+            vol = float(b.get('volume') or 0)
+            bucket_volumes.setdefault(key, []).append(vol)
+            day_bucket_volumes[key] = vol
+
+        running = 0.0
+        for key in sorted(day_bucket_volumes.keys()):
+            running += day_bucket_volumes[key]
+            cumulative_volumes.setdefault(key, []).append(running)
 
     avg_by_key = {}
     for key, vols in bucket_volumes.items():
         if vols:
-            avg_by_key[key] = sum(vols) / len(vols)
+            avg_by_key[key] = _robust_volume_baseline(vols)
+
+    cumulative_by_key = {}
+    for key, vols in cumulative_volumes.items():
+        if vols:
+            cumulative_by_key[key] = _robust_volume_baseline(vols)
 
     result = {
         'baseline': avg_by_key,
+        'cumulative_baseline': cumulative_by_key,
         'lookback_days': lb,
         'sessions_used': len(eligible),
     }
@@ -6844,6 +6874,7 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     # RVOL-at-time baseline (RTH-only, prior sessions). Empty if disabled or
     # if the historical fetch fails — JS gracefully falls back to up/down hue.
     rvol_payload = {'baseline': {}, 'sessions_used': 0,
+                    'cumulative_baseline': {},
                     'lookback_days': rvol_lookback_days or RVOL_LOOKBACK_DEFAULT,
                     'enabled': bool(rvol_lookback_days) and ticker is not None}
     if ticker and rvol_lookback_days:
@@ -6853,10 +6884,13 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         except Exception as exc:
             print(f'[prepare_price_chart_data] rvol baseline failed: {exc}')
     rvol_baseline = rvol_payload.get('baseline') or {}
+    rvol_cumulative_baseline = rvol_payload.get('cumulative_baseline') or {}
 
     # Build Lightweight Charts candle data (time in seconds UTC)
     lc_candles = []
     lc_volume = []
+    lc_volume_baseline = []
+    running_session_volume = {}
     for i, c in enumerate(display_candles):
         ts = int(c['datetime'] / 1000)
         lc_candles.append({'time': ts, 'open': c['open'], 'high': c['high'],
@@ -6867,13 +6901,21 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
                'is_up': bool(is_up)}
         if rvol_baseline:
             dt_et = datetime.fromtimestamp(ts, est)
+            date_key = dt_et.date().isoformat()
             mins = dt_et.hour * 60 + dt_et.minute
             if 570 <= mins < 960:
                 key = f"{dt_et.hour:02d}:{dt_et.minute:02d}"
+                running_session_volume[date_key] = running_session_volume.get(date_key, 0.0) + float(c.get('volume') or 0)
                 avg = rvol_baseline.get(key)
                 if avg and avg > 0:
                     bar['baseline'] = avg
                     bar['rvol'] = (c['volume'] or 0) / avg
+                    lc_volume_baseline.append({'time': ts, 'value': avg})
+                cum_avg = rvol_cumulative_baseline.get(key)
+                if cum_avg and cum_avg > 0:
+                    bar['cum_baseline'] = cum_avg
+                    bar['cum_volume'] = running_session_volume[date_key]
+                    bar['cum_rvol'] = running_session_volume[date_key] / cum_avg
         lc_volume.append(bar)
 
     # Multi-day raw candles for indicator warmup (SMA200, EMA, etc. need prior-day history)
@@ -7020,6 +7062,7 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     return _json.dumps({
         'candles': lc_candles,
         'volume': lc_volume,
+        'volume_baseline': lc_volume_baseline,
         'previous_day_close': previous_day_close,
         'current_price': current_price,
         'call_color': call_color,
@@ -7035,6 +7078,7 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         'current_day_start_time': current_day_start_time,
         'rvol': {
             'baseline': rvol_payload.get('baseline') or {},
+            'cumulative_baseline': rvol_payload.get('cumulative_baseline') or {},
             'sessions_used': rvol_payload.get('sessions_used', 0),
             'lookback_days': rvol_payload.get('lookback_days', 0),
             'enabled': bool(rvol_payload.get('baseline')),
@@ -8587,7 +8631,7 @@ def index():
             --border:#2A313B; --border-strong:#3A424F;
             --fg-0:#E5E7EB; --fg-1:#9CA3AF; --fg-2:#6B7280;
             --call:#10B981; --put:#EF4444; --accent:#3B82F6;
-            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37;
+            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37; --rvol-hot:#EC4899;
             --radius:6px; --radius-lg:10px;
             --font-ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
             --font-mono:"SF Mono","JetBrains Mono",Menlo,monospace;
@@ -11858,6 +11902,32 @@ def index():
         .tv-ohlc-tooltip .tt-time { color: #aaa; font-size: 10px; margin-bottom: 2px; }
         .tv-ohlc-tooltip .tt-up   { color: var(--call); }
         .tv-ohlc-tooltip .tt-dn   { color: var(--put); }
+        .tv-rvol-marker-layer {
+            position: absolute;
+            inset: 0;
+            z-index: 7;
+            pointer-events: none;
+            overflow: hidden;
+        }
+        .tv-rvol-marker {
+            position: absolute;
+            width: 0;
+            height: 0;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-bottom: 9px solid var(--warn);
+            transform: translateX(-50%);
+            filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55));
+            opacity: 0.95;
+        }
+        .tv-rvol-marker.tier-2,
+        .tv-rvol-marker.tier-3 { transform: translateX(-50%) scale(1.12); }
+        .tv-rvol-marker.tier-3 { transform: translateX(-50%) scale(1.25); }
+        .tv-rvol-marker.color-tier-1 { border-bottom-color: var(--accent); }
+        .tv-rvol-marker.color-tier-2 { border-bottom-color: var(--warn); }
+        .tv-rvol-marker.color-tier-3 { border-bottom-color: var(--rvol-hot); }
+        .tv-rvol-marker.call { border-bottom-color: var(--call); }
+        .tv-rvol-marker.put { border-bottom-color: var(--put); }
         /* Candle close timer */
         .candle-close-timer {
             font-size: 11px;
@@ -12645,16 +12715,66 @@ def index():
                 <details class="drawer-section">
                     <summary>Volume Coloring (RVOL)</summary>
                     <div class="drawer-content">
-                        <p class="chart-history-help">Compare each bar's volume to the average for that time-of-day across the last N RTH sessions (half-days excluded). Bars at &ge;1.5&times; tint yellow, &ge;2&times; orange, &ge;3&times; red. Below 1.5&times; the normal up/down color is preserved.</p>
+                        <p class="chart-history-help">Compare each bar's volume to a robust average for that time-of-day across prior RTH sessions (half-days excluded). Volume bars keep up/down direction; stronger RVOL increases opacity and the dotted line shows expected volume.</p>
                         <div class="control-group">
                             <label for="rvol_enabled" style="display:flex;align-items:center;gap:8px;">
                                 <input type="checkbox" id="rvol_enabled" checked>
-                                <span>Color volume bars by RVOL-at-time</span>
+                                <span>Show RVOL intensity + baseline</span>
                             </label>
                         </div>
                         <div class="control-group">
                             <label for="rvol_lookback_days">Lookback days:</label>
                             <input type="number" id="rvol_lookback_days" min="3" max="30" step="1" value="10" style="width:80px;">
+                        </div>
+                        <div class="control-group">
+                            <label for="rvol_live_mode">Live bar:</label>
+                            <select id="rvol_live_mode">
+                                <option value="completed">Color completed bars only</option>
+                                <option value="projected">Project in-progress volume</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="rvol_bar_mode">Bar coloring:</label>
+                            <select id="rvol_bar_mode">
+                                <option value="intensity">Direction + RVOL intensity</option>
+                                <option value="threshold">Gray until threshold</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="rvol_threshold">Marker threshold:</label>
+                            <input type="number" id="rvol_threshold" min="1" max="10" step="0.1" value="1.5" style="width:80px;">
+                        </div>
+                        <div class="control-group">
+                            <label for="rvol_markers_enabled" style="display:flex;align-items:center;gap:8px;">
+                                <input type="checkbox" id="rvol_markers_enabled" checked>
+                                <span>Show threshold triangles</span>
+                            </label>
+                        </div>
+                        <div class="control-group">
+                            <label for="rvol_marker_color_mode">Triangle color:</label>
+                            <select id="rvol_marker_color_mode">
+                                <option value="single">Single color</option>
+                                <option value="tier">RVOL tier</option>
+                                <option value="direction">Up/down direction</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="rvol_line_tone">Baseline tone:</label>
+                            <select id="rvol_line_tone">
+                                <option value="var(--fg-2)">Muted</option>
+                                <option value="var(--warn)">Warn</option>
+                                <option value="var(--accent)">Accent</option>
+                                <option value="var(--call)">Call</option>
+                                <option value="var(--put)">Put</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="rvol_line_style">Baseline style:</label>
+                            <select id="rvol_line_style">
+                                <option value="dotted">Dotted</option>
+                                <option value="dashed">Dashed</option>
+                                <option value="solid">Solid</option>
+                            </select>
                         </div>
                     </div>
                 </details>
@@ -13285,16 +13405,23 @@ def index():
         let tvPriceChart = null;
         let tvCandleSeries = null;
         let tvVolumeSeries = null;
+        let tvVolumeBaselineSeries = null;
         let tvResizeObserver = null;
         // RVOL-at-time state. Baseline is {HH:MM -> avg_volume} for the
         // selected timeframe; tvRvolEnabled gates volume-bar recoloring.
         let tvRvolBaseline = {};
+        let tvRvolCumulativeBaseline = {};
         let tvRvolEnabled = true;
-        const RVOL_TIER_COLORS = {
-            t150: '#facc15', // 1.5x  yellow
-            t200: '#fb923c', // 2.0x  orange
-            t300: '#ec4899', // 3.0x+ magenta (red is already the down-bar hue)
-        };
+        let tvRvolLiveMode = 'completed';
+        let tvRvolBarMode = 'intensity';
+        let tvRvolMarkersEnabled = true;
+        let tvRvolMarkerColorMode = 'single';
+        let tvRvolThreshold = 1.5;
+        let tvRvolLineTone = 'var(--fg-2)';
+        let tvRvolLineStyle = 'dotted';
+        let tvRvolMarkerLayer = null;
+        let tvRvolMarkerDrawPending = false;
+        let tvVolumeMetaByTime = {};
         function rvolKeyFromTime(tsSeconds) {
             // Lightweight Charts time is UTC seconds; convert to ET HH:MM.
             const d = new Date(tsSeconds * 1000);
@@ -13311,32 +13438,133 @@ def index():
             if (hh === '24') hh = '00';
             return hh + ':' + mm;
         }
-        function rvolTierColor(rvol, isUp, callColor, putColor) {
-            // <1.5x: preserve up/down hue (the volume signal isn't notable yet).
-            // >=1.5x: tier-color the bar regardless of direction — the volume
-            // anomaly is the story, and tier color is what the user is scanning for.
-            if (!Number.isFinite(rvol) || rvol < 1.5) {
-                return isUp ? callColor : putColor;
+        function colorWithAlpha(color, alpha) {
+            const resolved = resolveCssColor(color) || color || '#9CA3AF';
+            const a = Math.max(0.18, Math.min(1, Number(alpha) || 0.55));
+            if (/^#([0-9a-f]{6})$/i.test(resolved)) {
+                const r = parseInt(resolved.slice(1, 3), 16);
+                const g = parseInt(resolved.slice(3, 5), 16);
+                const b = parseInt(resolved.slice(5, 7), 16);
+                return `rgba(${r},${g},${b},${a.toFixed(2)})`;
             }
-            if (rvol >= 3.0) return RVOL_TIER_COLORS.t300;
-            if (rvol >= 2.0) return RVOL_TIER_COLORS.t200;
-            return RVOL_TIER_COLORS.t150;
+            if (/^rgb\(/i.test(resolved)) {
+                return resolved.replace(/^rgb\((.*)\)$/i, `rgba($1,${a.toFixed(2)})`);
+            }
+            return resolved;
+        }
+        function rvolOpacity(rvol) {
+            if (!Number.isFinite(rvol)) return 0.62;
+            if (rvol >= 3.0) return 1.0;
+            if (rvol >= 2.0) return 0.86;
+            if (rvol >= 1.5) return 0.72;
+            if (rvol >= 1.0) return 0.55;
+            return 0.36;
+        }
+        function isCurrentRvolBucket(tsSeconds) {
+            const nowBucket = tvBucketStartForUnixSec(Math.floor(Date.now() / 1000));
+            return Number.isFinite(nowBucket) && Number(tsSeconds) === Number(nowBucket);
+        }
+        function projectedRvolForLiveBar(tsSeconds, value) {
+            const baseline = tvRvolBaseline[rvolKeyFromTime(tsSeconds)];
+            if (!baseline || baseline <= 0) return null;
+            if (!isCurrentRvolBucket(tsSeconds)) return (value || 0) / baseline;
+            if (tvRvolLiveMode !== 'projected') return null;
+            const elapsed = Math.max(1, Math.floor(Date.now() / 1000) - Number(tsSeconds));
+            const bucketSec = Math.max(60, tvBucketSec());
+            const fraction = Math.max(0.08, Math.min(1, elapsed / bucketSec));
+            return ((value || 0) / fraction) / baseline;
+        }
+        function rvolDirectionalColor(rvol, isUp, callColor, putColor) {
+            const base = isUp ? callColor : putColor;
+            if (!tvRvolEnabled) return base;
+            if (tvRvolBarMode === 'threshold' && (!Number.isFinite(rvol) || rvol < tvRvolThreshold)) {
+                return colorWithAlpha('var(--fg-2)', 0.32);
+            }
+            return colorWithAlpha(base, rvolOpacity(rvol));
         }
         function applyRvolColors(volumeBars, callColor, putColor) {
             // Mutates the bar entries in-place. Bars without rvol fall back to
             // the up/down color the server already assigned.
-            if (!tvRvolEnabled || !Array.isArray(volumeBars)) return volumeBars;
+            if (!Array.isArray(volumeBars)) return volumeBars;
             for (const bar of volumeBars) {
-                if (!bar || typeof bar.rvol !== 'number') continue;
-                bar.color = rvolTierColor(bar.rvol, bar.is_up !== false, callColor, putColor);
+                if (!bar) continue;
+                const isUp = bar.is_up !== false;
+                const liveRvol = projectedRvolForLiveBar(Number(bar.time), Number(bar.value || 0));
+                const effectiveRvol = (liveRvol != null) ? liveRvol : (tvRvolLiveMode === 'completed' && isCurrentRvolBucket(Number(bar.time)) ? null : bar.rvol);
+                bar.display_rvol = effectiveRvol;
+                bar.color = rvolDirectionalColor(effectiveRvol, isUp, callColor, putColor);
             }
             return volumeBars;
         }
         function rvolColorForLiveBar(tsSeconds, value, isUp, callColor, putColor) {
-            if (!tvRvolEnabled) return isUp ? callColor : putColor;
-            const baseline = tvRvolBaseline[rvolKeyFromTime(tsSeconds)];
-            if (!baseline || baseline <= 0) return isUp ? callColor : putColor;
-            return rvolTierColor((value || 0) / baseline, isUp, callColor, putColor);
+            return rvolDirectionalColor(projectedRvolForLiveBar(tsSeconds, value), isUp, callColor, putColor);
+        }
+        function indexVolumeMeta(volumeBars) {
+            tvVolumeMetaByTime = {};
+            if (!Array.isArray(volumeBars)) return;
+            volumeBars.forEach(bar => {
+                if (bar && bar.time != null) tvVolumeMetaByTime[String(bar.time)] = bar;
+            });
+        }
+        function ensureRvolMarkerLayer() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let layer = container.querySelector('.tv-rvol-marker-layer');
+            if (!layer) {
+                layer = document.createElement('div');
+                layer.className = 'tv-rvol-marker-layer';
+                container.appendChild(layer);
+            }
+            tvRvolMarkerLayer = layer;
+            return layer;
+        }
+        function rvolMarkerClass(meta) {
+            const r = Number(meta && meta.display_rvol);
+            const sizeClass = r >= 3.0 ? 'tier-3' : (r >= 2.0 ? 'tier-2' : 'tier-1');
+            if (tvRvolMarkerColorMode === 'direction') {
+                return `${sizeClass} ${meta && meta.is_up !== false ? 'call' : 'put'}`;
+            }
+            if (tvRvolMarkerColorMode === 'tier') {
+                return `${sizeClass} ${r >= 3.0 ? 'color-tier-3' : (r >= 2.0 ? 'color-tier-2' : 'color-tier-1')}`;
+            }
+            return sizeClass;
+        }
+        function drawRvolMarkers() {
+            tvRvolMarkerDrawPending = false;
+            const layer = ensureRvolMarkerLayer();
+            if (!layer || !tvPriceChart || !tvVolumeSeries || !tvRvolEnabled || !tvRvolMarkersEnabled) {
+                if (layer) layer.innerHTML = '';
+                return;
+            }
+            const ts = tvPriceChart.timeScale();
+            const rows = Object.values(tvVolumeMetaByTime)
+                .filter(meta => meta && Number.isFinite(meta.display_rvol) && meta.display_rvol >= tvRvolThreshold);
+            if (!rows.length) {
+                layer.innerHTML = '';
+                return;
+            }
+            const parts = [];
+            rows.forEach(meta => {
+                const x = ts.timeToCoordinate(meta.time);
+                const yRaw = tvVolumeSeries.priceToCoordinate(meta.value || 0);
+                if (x == null || yRaw == null) return;
+                const y = Math.max(8, yRaw - 24);
+                const title = `RVOL ${Number(meta.display_rvol).toFixed(2)}x`;
+                parts.push(`<span class="tv-rvol-marker ${rvolMarkerClass(meta)}" style="left:${x.toFixed(1)}px;top:${y.toFixed(1)}px;" title="${title}"></span>`);
+            });
+            layer.innerHTML = parts.join('');
+        }
+        function scheduleRvolMarkerDraw() {
+            if (tvRvolMarkerDrawPending) return;
+            tvRvolMarkerDrawPending = true;
+            requestAnimationFrame(drawRvolMarkers);
+        }
+        function applyRvolBaselineStyle() {
+            if (!tvVolumeBaselineSeries || !window.LightweightCharts) return;
+            tvVolumeBaselineSeries.applyOptions({
+                color: resolveCssColor(tvRvolLineTone) || resolveCssColor('var(--fg-2)') || '#6B7280',
+                lineStyle: tvIndicatorLineStyleValue(tvRvolLineStyle),
+            });
         }
         // Indicator series references
         let tvIndicatorSeries = {};
@@ -14370,11 +14598,33 @@ def index():
             try { tvCandleSeries.update(tvToSeriesBar(displayBar)); } catch(e) {}
             try {
                 const _isUp = displayBar.close >= displayBar.open;
+                const rvolKey = rvolKeyFromTime(displayBar.time);
+                const baseline = tvRvolBaseline[rvolKey];
+                const cumBaseline = tvRvolCumulativeBaseline[rvolKey];
+                const cumVolume = tvLastCandles
+                    .filter(b => (!tvCurrentDayStartTime || b.time >= tvCurrentDayStartTime) && b.time <= displayBar.time)
+                    .reduce((sum, b) => sum + Number(b.volume || 0), 0);
+                const displayRvol = projectedRvolForLiveBar(displayBar.time, displayBar.volume || 0);
+                tvVolumeMetaByTime[String(displayBar.time)] = {
+                    time: displayBar.time,
+                    value: displayBar.volume || 0,
+                    is_up: _isUp,
+                    baseline: baseline || null,
+                    rvol: baseline ? (displayBar.volume || 0) / baseline : null,
+                    display_rvol: displayRvol,
+                    cum_baseline: cumBaseline || null,
+                    cum_volume: cumVolume,
+                    cum_rvol: cumBaseline ? cumVolume / cumBaseline : null,
+                };
                 tvVolumeSeries.update({
                     time:  displayBar.time,
                     value: displayBar.volume || 0,
                     color: rvolColorForLiveBar(displayBar.time, displayBar.volume || 0, _isUp, callColor, putColor),
                 });
+                if (tvVolumeBaselineSeries && tvRvolEnabled && baseline) {
+                    tvVolumeBaselineSeries.update({ time: displayBar.time, value: baseline });
+                }
+                scheduleRvolMarkerDraw();
             } catch(e) {}
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             scheduleTVStrikeOverlayDraw();
@@ -14565,7 +14815,6 @@ def index():
   // RVOL-at-time state (popout). Mirrors main-chart logic — see rvolColorForLiveBar / applyRvolColors.
   var popoutRvolBaseline={};
   var popoutRvolEnabled=true;
-  var POPOUT_RVOL_TIER={t150:'#facc15',t200:'#fb923c',t300:'#ec4899'};
   function popoutRvolKey(tsSec){
     var d=new Date(tsSec*1000);
     var parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour12:false,hour:'2-digit',minute:'2-digit'}).formatToParts(d);
@@ -14574,22 +14823,35 @@ def index():
     if(hh==='24')hh='00';
     return hh+':'+mm;
   }
-  function popoutRvolTierColor(rvol,isUp){
-    if(!isFinite(rvol)||rvol<1.5)return isUp?popoutUpColor:popoutDownColor;
-    if(rvol>=3.0)return POPOUT_RVOL_TIER.t300;
-    if(rvol>=2.0)return POPOUT_RVOL_TIER.t200;
-    return POPOUT_RVOL_TIER.t150;
+  function popoutRgba(color,alpha){
+    var a=Math.max(0.18,Math.min(1,Number(alpha)||0.55));
+    if(/^#([0-9a-f]{6})$/i.test(color||'')){
+      var r=parseInt(color.slice(1,3),16),g=parseInt(color.slice(3,5),16),b=parseInt(color.slice(5,7),16);
+      return 'rgba('+r+','+g+','+b+','+a.toFixed(2)+')';
+    }
+    return color;
+  }
+  function popoutRvolOpacity(rvol){
+    if(typeof rvol!=='number'||!isFinite(rvol))return 0.62;
+    if(rvol>=3.0)return 1.0;
+    if(rvol>=2.0)return 0.86;
+    if(rvol>=1.5)return 0.72;
+    if(rvol>=1.0)return 0.55;
+    return 0.36;
+  }
+  function popoutRvolColor(rvol,isUp){
+    var base=isUp?popoutUpColor:popoutDownColor;
+    if(!popoutRvolEnabled)return base;
+    return popoutRgba(base,popoutRvolOpacity(rvol));
   }
   function popoutApplyRvolColors(bars){
-    if(!popoutRvolEnabled||!Array.isArray(bars))return bars;
-    for(var i=0;i<bars.length;i++){var b=bars[i];if(!b||typeof b.rvol!=='number')continue;b.color=popoutRvolTierColor(b.rvol,b.is_up!==false);}
+    if(!Array.isArray(bars))return bars;
+    for(var i=0;i<bars.length;i++){var b=bars[i];if(!b)continue;b.color=popoutRvolColor(b.rvol,b.is_up!==false);}
     return bars;
   }
   function popoutRvolColorForLive(tsSec,value,isUp){
-    if(!popoutRvolEnabled)return isUp?popoutUpColor:popoutDownColor;
     var avg=popoutRvolBaseline[popoutRvolKey(tsSec)];
-    if(!avg||avg<=0)return isUp?popoutUpColor:popoutDownColor;
-    return popoutRvolTierColor((value||0)/avg,isUp);
+    return popoutRvolColor((avg&&avg>0)?((value||0)/avg):null,isUp);
   }
     var historicalDomBound=false;
     var tvHistoricalRenderedPoints=[];
@@ -20945,6 +21207,17 @@ def index():
                     lastValueVisible: false,
                     priceLineVisible: false,
                 });
+                tvVolumeBaselineSeries = tvPriceChart.addLineSeries({
+                    color: resolveCssColor('var(--fg-2)') || '#6B7280',
+                    lineWidth: 1,
+                    lineStyle: LightweightCharts.LineStyle.Dotted,
+                    priceScaleId: 'volume',
+                    lastValueVisible: false,
+                    priceLineVisible: false,
+                    crosshairMarkerVisible: false,
+                    title: 'Avg Vol',
+                });
+                applyRvolBaselineStyle();
                 tvPriceChart.priceScale('volume').applyOptions({
                     scaleMargins: { top: 0.88, bottom: 0 },
                 });
@@ -20962,6 +21235,7 @@ def index():
                     scheduleTVStrikeOverlayDraw();
                     scheduleTVDrawingOverlayDraw();
                     scheduleTVHistoricalOverlayDraw();
+                    scheduleRvolMarkerDraw();
                     scheduleGexPanelSync();
                 });
                 if (!tvHistoricalOverlayDomEventsBound) {
@@ -20971,6 +21245,7 @@ def index():
                         scheduleTVStrikeOverlayDraw();
                         scheduleTVDrawingOverlayDraw();
                         scheduleTVHistoricalOverlayDraw();
+                        scheduleRvolMarkerDraw();
                         scheduleGexPanelSync();
                         requestTVDrawingOverlayActiveRedraw(activeDuration);
                     };
@@ -21051,6 +21326,14 @@ def index():
                     const chg = bar.open !== 0 ? ((bar.close - bar.open) / bar.open * 100).toFixed(2) : '0.00';
                     const fmt = v => v != null ? v.toFixed(2) : '--';
                     const fmtVol = v => v >= 1e6 ? (v/1e6).toFixed(2)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'K' : (v||0).toString();
+                    const volMeta = tvVolumeMetaByTime[String(param.time)] || {};
+                    const shownRvol = Number.isFinite(volMeta.display_rvol) ? volMeta.display_rvol : volMeta.rvol;
+                    const rvolLine = (Number.isFinite(shownRvol) && volMeta.baseline)
+                        ? '<br><span style="color:#888">Avg <b>'+fmtVol(volMeta.baseline)+'</b>  RVOL <b>'+shownRvol.toFixed(2)+'x</b></span>'
+                        : '';
+                    const cumLine = (Number.isFinite(volMeta.cum_rvol) && volMeta.cum_baseline)
+                        ? '<br><span style="color:#888">Cum <b>'+fmtVol(volMeta.cum_volume || 0)+'</b> / <b>'+fmtVol(volMeta.cum_baseline)+'</b>  <b>'+volMeta.cum_rvol.toFixed(2)+'x</b></span>'
+                        : '';
                     tip.innerHTML =
                         '<div class="tt-time">'+timeStr+'</div>'
                         +'<span class="'+cls+'">'
@@ -21060,7 +21343,9 @@ def index():
                         +'C <b>'+fmt(bar.close)+'</b>  '
                         +(chg>=0?'+':'')+chg+'%'
                         +'</span>'
-                        +'<br><span style="color:#888">Vol <b>'+fmtVol(bar.volume)+'</b></span>';
+                        +'<br><span style="color:#888">Vol <b>'+fmtVol(bar.volume)+'</b></span>'
+                        + rvolLine
+                        + cumLine;
                     tip.style.display = 'block';
                 });
             }
@@ -21108,9 +21393,17 @@ def index():
             // Refresh RVOL baseline for live-bar coloring, then recolor the
             // historical bars before handing them to the series.
             tvRvolBaseline = (priceData.rvol && priceData.rvol.baseline) || {};
+            tvRvolCumulativeBaseline = (priceData.rvol && priceData.rvol.cumulative_baseline) || {};
+            tvCurrentDayStartTime = priceData.current_day_start_time || 0;
             const volumeBars = priceData.volume || [];
             applyRvolColors(volumeBars, callColor, putColor);
+            indexVolumeMeta(volumeBars);
             tvVolumeSeries.setData(volumeBars);
+            if (tvVolumeBaselineSeries) {
+                applyRvolBaselineStyle();
+                tvVolumeBaselineSeries.setData(tvRvolEnabled ? (priceData.volume_baseline || []) : []);
+            }
+            scheduleRvolMarkerDraw();
             if (rangeToRestoreAfterData && tvPriceChart && tvPriceChart.timeScale) {
                 try { tvPriceChart.timeScale().setVisibleLogicalRange(rangeToRestoreAfterData); } catch (e) {}
             }
@@ -21120,7 +21413,6 @@ def index():
                 ? priceData.indicator_candles : candles;
             tvVwapCandles = (priceData.vwap_candles && priceData.vwap_candles.length > 0)
                 ? priceData.vwap_candles : tvIndicatorCandles;
-            tvCurrentDayStartTime = priceData.current_day_start_time || 0;
 
             // Start/maintain real-time streaming for the current ticker
             const streamTicker = (document.getElementById('ticker').value || '').trim();
@@ -23778,6 +24070,9 @@ def index():
                     tvPriceChart = null;
                     tvCandleSeries = null;
                     tvVolumeSeries = null;
+                    tvVolumeBaselineSeries = null;
+                    tvRvolMarkerLayer = null;
+                    tvVolumeMetaByTime = {};
                     tvIndicatorSeries = {};
                     tvAvwapSeriesById = {};
                     tvIndicatorDataCache = {};
@@ -25218,27 +25513,61 @@ def index():
         const RVOL_LS_KEY = 'gex.rvolAtTime.v1';
         const rvolEnabledInput = document.getElementById('rvol_enabled');
         const rvolLookbackInput = document.getElementById('rvol_lookback_days');
+        const rvolLiveModeInput = document.getElementById('rvol_live_mode');
+        const rvolBarModeInput = document.getElementById('rvol_bar_mode');
+        const rvolThresholdInput = document.getElementById('rvol_threshold');
+        const rvolMarkersInput = document.getElementById('rvol_markers_enabled');
+        const rvolMarkerColorInput = document.getElementById('rvol_marker_color_mode');
+        const rvolLineToneInput = document.getElementById('rvol_line_tone');
+        const rvolLineStyleInput = document.getElementById('rvol_line_style');
         try {
             const raw = localStorage.getItem(RVOL_LS_KEY);
             if (raw) {
                 const cfg = JSON.parse(raw) || {};
                 if (rvolEnabledInput && typeof cfg.enabled === 'boolean') rvolEnabledInput.checked = cfg.enabled;
                 if (rvolLookbackInput && cfg.lookback) rvolLookbackInput.value = String(cfg.lookback);
+                if (rvolLiveModeInput && ['completed', 'projected'].includes(cfg.liveMode)) rvolLiveModeInput.value = cfg.liveMode;
+                if (rvolBarModeInput && ['intensity', 'threshold'].includes(cfg.barMode)) rvolBarModeInput.value = cfg.barMode;
+                if (rvolThresholdInput && cfg.threshold) rvolThresholdInput.value = String(cfg.threshold);
+                if (rvolMarkersInput && typeof cfg.markers === 'boolean') rvolMarkersInput.checked = cfg.markers;
+                if (rvolMarkerColorInput && ['single', 'tier', 'direction'].includes(cfg.markerColor)) rvolMarkerColorInput.value = cfg.markerColor;
+                if (rvolLineToneInput && cfg.lineTone) rvolLineToneInput.value = cfg.lineTone;
+                if (rvolLineStyleInput && ['solid', 'dashed', 'dotted'].includes(cfg.lineStyle)) rvolLineStyleInput.value = cfg.lineStyle;
             }
         } catch (e) {}
         if (rvolEnabledInput) tvRvolEnabled = !!rvolEnabledInput.checked;
+        if (rvolLiveModeInput) tvRvolLiveMode = rvolLiveModeInput.value || 'completed';
+        if (rvolBarModeInput) tvRvolBarMode = rvolBarModeInput.value || 'intensity';
+        if (rvolThresholdInput) tvRvolThreshold = Math.max(1, Math.min(10, parseFloat(rvolThresholdInput.value) || 1.5));
+        if (rvolMarkersInput) tvRvolMarkersEnabled = !!rvolMarkersInput.checked;
+        if (rvolMarkerColorInput) tvRvolMarkerColorMode = rvolMarkerColorInput.value || 'single';
+        if (rvolLineToneInput) tvRvolLineTone = rvolLineToneInput.value || 'var(--fg-2)';
+        if (rvolLineStyleInput) tvRvolLineStyle = rvolLineStyleInput.value || 'dotted';
         function persistRvolPrefs() {
             try {
                 localStorage.setItem(RVOL_LS_KEY, JSON.stringify({
                     enabled: !!(rvolEnabledInput && rvolEnabledInput.checked),
                     lookback: rvolLookbackInput ? parseInt(rvolLookbackInput.value) || 10 : 10,
+                    liveMode: rvolLiveModeInput ? rvolLiveModeInput.value : 'completed',
+                    barMode: rvolBarModeInput ? rvolBarModeInput.value : 'intensity',
+                    threshold: rvolThresholdInput ? parseFloat(rvolThresholdInput.value) || 1.5 : 1.5,
+                    markers: !!(rvolMarkersInput && rvolMarkersInput.checked),
+                    markerColor: rvolMarkerColorInput ? rvolMarkerColorInput.value : 'single',
+                    lineTone: rvolLineToneInput ? rvolLineToneInput.value : 'var(--fg-2)',
+                    lineStyle: rvolLineStyleInput ? rvolLineStyleInput.value : 'dotted',
                 }));
             } catch (e) {}
+        }
+        function refreshRvolPresentation() {
+            persistRvolPrefs();
+            if (tvLastPriceData) renderTVPriceChart(tvLastPriceData);
+            applyRvolBaselineStyle();
+            scheduleRvolMarkerDraw();
         }
         if (rvolEnabledInput) {
             rvolEnabledInput.addEventListener('change', () => {
                 tvRvolEnabled = !!rvolEnabledInput.checked;
-                persistRvolPrefs();
+                refreshRvolPresentation();
                 if (typeof fetchPriceHistory === 'function') fetchPriceHistory(true);
             });
         }
@@ -25249,6 +25578,49 @@ def index():
                 rvolLookbackInput.value = String(n);
                 persistRvolPrefs();
                 if (typeof fetchPriceHistory === 'function') fetchPriceHistory(true);
+            });
+        }
+        if (rvolLiveModeInput) {
+            rvolLiveModeInput.addEventListener('change', () => {
+                tvRvolLiveMode = rvolLiveModeInput.value || 'completed';
+                refreshRvolPresentation();
+            });
+        }
+        if (rvolBarModeInput) {
+            rvolBarModeInput.addEventListener('change', () => {
+                tvRvolBarMode = rvolBarModeInput.value || 'intensity';
+                refreshRvolPresentation();
+            });
+        }
+        if (rvolThresholdInput) {
+            rvolThresholdInput.addEventListener('change', () => {
+                tvRvolThreshold = Math.max(1, Math.min(10, parseFloat(rvolThresholdInput.value) || 1.5));
+                rvolThresholdInput.value = String(tvRvolThreshold);
+                refreshRvolPresentation();
+            });
+        }
+        if (rvolMarkersInput) {
+            rvolMarkersInput.addEventListener('change', () => {
+                tvRvolMarkersEnabled = !!rvolMarkersInput.checked;
+                refreshRvolPresentation();
+            });
+        }
+        if (rvolMarkerColorInput) {
+            rvolMarkerColorInput.addEventListener('change', () => {
+                tvRvolMarkerColorMode = rvolMarkerColorInput.value || 'single';
+                refreshRvolPresentation();
+            });
+        }
+        if (rvolLineToneInput) {
+            rvolLineToneInput.addEventListener('change', () => {
+                tvRvolLineTone = rvolLineToneInput.value || 'var(--fg-2)';
+                refreshRvolPresentation();
+            });
+        }
+        if (rvolLineStyleInput) {
+            rvolLineStyleInput.addEventListener('change', () => {
+                tvRvolLineStyle = rvolLineStyleInput.value || 'dotted';
+                refreshRvolPresentation();
             });
         }
 
