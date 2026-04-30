@@ -179,16 +179,16 @@ Status legend: `[x]` shipped on `codex/volume-tpo-profile-prototype` in Phase 1,
   - [x] When row pixel height is below threshold the letter string is replaced with `(count)`.
   - [x] Avoid collisions between TPO letters and TPO VAH/POC/VAL labels/guide lines by default-hiding level labels and clipping guide lines before the widest letter row.
   - [ ] Continue tuning collisions with VP labels, price labels, and strike overlays across zoom/viewport states.
-- [ ] Consider fixed-range TPO drawing.
-  - Add a `TPO Range` drawing tool after right-edge modes are stable.
-  - Reuse the fixed VP anchor model where possible: saved timestamp anchors first, logical indexes as fallback.
-  - The selected drawing editor should expose TPO-specific bin/block/value-area settings only for TPO drawings.
-- [ ] Consider anchored TPO drawing.
-  - A chart anchor should create a live profile from that timestamp to the latest candle.
-  - This may share most of the fixed-range TPO implementation, with the end anchor implicitly tracking the latest candle.
-- [ ] Add initial-balance levels as a follow-up candidate.
-  - Compute IB high/low from the first configurable N minutes of the selected session/range.
-  - Draw IB high/low and optional extensions only after the core TPO mode work is stable.
+- [x] Add fixed-range TPO drawing.
+  - [x] Added a `TPO Range` drawing tool.
+  - [x] Reuses the fixed VP anchor model: saved timestamp anchors first, logical indexes as fallback.
+  - [x] The selected drawing editor exposes TPO-specific bin/block/value-area/single-print/IB settings only for TPO drawings.
+- [x] Add anchored TPO drawing.
+  - [x] A chart anchor creates a live profile from that timestamp to the latest candle.
+  - [x] Shares the fixed-range TPO implementation, with the end anchor implicitly tracking the latest candle.
+- [x] Add initial-balance levels for TPO drawings.
+  - [x] Computes IB high/low/mid from the first configurable N minutes of the selected TPO range.
+  - [x] Draws IBH/IBL/IBM inside fixed-range and anchored TPO drawings when enabled.
 - [x] TPO summary metadata returned on the payload (`total_tpo`, `period_count`, `single_print_count`, `price_high`, `price_low`, `session_count`).
   - [x] Surfaced in a compact chart overlay summary panel when right-edge TPO is enabled.
   - [x] Added `#tpo_show_summary` so the compact summary panel can be hidden when it competes with chart space.

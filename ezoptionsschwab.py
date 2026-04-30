@@ -14391,7 +14391,7 @@ def index():
         // Time-scale sync state
         let tvSyncHandlers = [], tvSyncingTimeScale = false;
         // Drawing state
-        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'fixed_vp' | 'text' | 'avwap'
+        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'fixed_vp' | 'fixed_tpo' | 'anchored_tpo' | 'text' | 'avwap'
         let tvDrawStart = null;         // {price, time, x, y} of first click
         let tvDrawingDefs = [];         // serializable drawing definitions — survive full re-renders
         let tvDrawingUndoStack = [];    // snapshots for user drawing actions: create, clear, delete, hide/show
@@ -14422,7 +14422,7 @@ def index():
         let tvTpoProfilePayload = null;
         let tvProfileOverlayPending = false;
         let tvProfileHoverRows = [];
-        let tvFixedVpDragState = null;
+        let tvProfileAnchorDragState = null;
         // All overlay level prices (exposure, EM, drawn H-lines) — used by autoscaleInfoProvider
         let tvAllLevelPrices = [];
         // Session focus keeps the Y-axis tighter; Reset / auto-range can still fit everything.
@@ -17880,6 +17880,15 @@ def index():
                 normalized.method = ['uniform', 'triangular'].includes(normalized.method) ? normalized.method : 'triangular';
                 normalized.profileSide = normalized.profileSide === 'left' ? 'left' : (normalized.profileSide === 'right' ? 'right' : '');
                 normalized.label = normalized.label || 'Fixed VP';
+            } else if (normalized.type === 'fixed_tpo' || normalized.type === 'anchored_tpo') {
+                normalized.binSize = Math.max(0.01, Math.min(10, Number(normalized.binSize) || 0.25));
+                normalized.blockMinutes = [15, 30, 60, 240].includes(Number(normalized.blockMinutes)) ? Number(normalized.blockMinutes) : 30;
+                normalized.valueAreaPct = Math.max(50, Math.min(95, Number(normalized.valueAreaPct) || 70));
+                normalized.showSinglePrints = normalized.showSinglePrints === true;
+                normalized.showInitialBalance = normalized.showInitialBalance === true;
+                normalized.initialBalanceMinutes = Math.max(15, Math.min(240, Number(normalized.initialBalanceMinutes) || 60));
+                normalized.profileSide = normalized.profileSide === 'left' ? 'left' : (normalized.profileSide === 'right' ? 'right' : '');
+                normalized.label = normalized.label || (normalized.type === 'anchored_tpo' ? 'Anchored TPO' : 'TPO Range');
             } else {
                 delete normalized.profileSide;
             }
@@ -17896,10 +17905,10 @@ def index():
                 if (Number.isFinite(Number(normalized.time))) {
                     normalized.logical = null;
                 }
-                if (normalized.type !== 'fixed_vp' && Number.isFinite(Number(normalized.t1))) {
+                if (!isTVProfileDrawingType(normalized.type) && Number.isFinite(Number(normalized.t1))) {
                     normalized.l1 = null;
                 }
-                if (normalized.type !== 'fixed_vp' && Number.isFinite(Number(normalized.t2))) {
+                if (!isTVProfileDrawingType(normalized.type) && Number.isFinite(Number(normalized.t2))) {
                     normalized.l2 = null;
                 }
                 if (Number.isFinite(Number(normalized.t3))) {
@@ -18259,26 +18268,30 @@ def index():
             }
         }
 
-        function tvBeginFixedVpAnchorDrag(event, def, anchorKey, handleEl) {
-            if (!def || def.type !== 'fixed_vp') return;
+        function isTVProfileDrawingType(type) {
+            return type === 'fixed_vp' || type === 'fixed_tpo' || type === 'anchored_tpo';
+        }
+
+        function tvBeginProfileAnchorDrag(event, def, anchorKey, handleEl) {
+            if (!def || !isTVProfileDrawingType(def.type)) return;
             event.preventDefault();
             event.stopPropagation();
             tvSelectedDrawingId = def.id;
-            tvFixedVpDragState = {
+            tvProfileAnchorDragState = {
                 defId: def.id,
                 anchor: anchorKey === 'end' ? 'end' : 'start',
                 handleEl: handleEl || null,
             };
             if (handleEl && handleEl.classList) handleEl.classList.add('dragging');
-            window.addEventListener('mousemove', tvHandleFixedVpAnchorDragMove);
-            window.addEventListener('mouseup', tvEndFixedVpAnchorDrag);
+            window.addEventListener('mousemove', tvHandleProfileAnchorDragMove);
+            window.addEventListener('mouseup', tvEndProfileAnchorDrag);
         }
 
-        function tvHandleFixedVpAnchorDragMove(event) {
-            if (!tvFixedVpDragState) return;
-            const def = tvFindDrawingById(tvFixedVpDragState.defId);
-            if (!def || def.type !== 'fixed_vp') {
-                tvEndFixedVpAnchorDrag();
+        function tvHandleProfileAnchorDragMove(event) {
+            if (!tvProfileAnchorDragState) return;
+            const def = tvFindDrawingById(tvProfileAnchorDragState.defId);
+            if (!def || !isTVProfileDrawingType(def.type)) {
+                tvEndProfileAnchorDrag();
                 return;
             }
             const point = tvOverlayPointFromEvent(event);
@@ -18288,10 +18301,11 @@ def index():
             let time = null;
             try { time = tvPriceChart.timeScale().coordinateToTime(point.x); } catch (e) { time = null; }
             if (!time) time = tvLogicalToTime(logical);
-            if (tvFixedVpDragState.anchor === 'start') {
+            if (tvProfileAnchorDragState.anchor === 'start') {
                 def.l1 = logical;
                 def.t1 = time || null;
             } else {
+                if (def.type === 'anchored_tpo') return;
                 def.l2 = logical;
                 def.t2 = time || null;
             }
@@ -18299,11 +18313,11 @@ def index():
             scheduleTVProfileOverlayDraw();
         }
 
-        function tvEndFixedVpAnchorDrag() {
-            window.removeEventListener('mousemove', tvHandleFixedVpAnchorDragMove);
-            window.removeEventListener('mouseup', tvEndFixedVpAnchorDrag);
-            const state = tvFixedVpDragState;
-            tvFixedVpDragState = null;
+        function tvEndProfileAnchorDrag() {
+            window.removeEventListener('mousemove', tvHandleProfileAnchorDragMove);
+            window.removeEventListener('mouseup', tvEndProfileAnchorDrag);
+            const state = tvProfileAnchorDragState;
+            tvProfileAnchorDragState = null;
             if (state && state.handleEl && state.handleEl.classList) {
                 state.handleEl.classList.remove('dragging');
             }
@@ -19585,6 +19599,31 @@ def index():
                             '<option value="uniform">Uniform</option>' +
                         '</select>' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-block-row">' +
+                        '<label for="tv-selected-draw-tpo-block">TPO Block</label>' +
+                        '<select id="tv-selected-draw-tpo-block">' +
+                            '<option value="15">15m</option>' +
+                            '<option value="30">30m</option>' +
+                            '<option value="60">1h</option>' +
+                            '<option value="240">4h</option>' +
+                        '</select>' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-va-row">' +
+                        '<label for="tv-selected-draw-tpo-va">TPO VA %</label>' +
+                        '<input type="number" id="tv-selected-draw-tpo-va" min="50" max="95" step="1" />' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-single-row">' +
+                        '<label for="tv-selected-draw-tpo-single">Single Prints</label>' +
+                        '<input type="checkbox" id="tv-selected-draw-tpo-single" />' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-ib-row">' +
+                        '<label for="tv-selected-draw-tpo-ib">IB Levels</label>' +
+                        '<input type="checkbox" id="tv-selected-draw-tpo-ib" />' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-ib-min-row">' +
+                        '<label for="tv-selected-draw-tpo-ib-min">IB Minutes</label>' +
+                        '<input type="number" id="tv-selected-draw-tpo-ib-min" min="15" max="240" step="15" />' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-row" id="tv-drawing-fill-color-row">' +
                         '<label for="tv-selected-draw-fill-color">Fill</label>' +
                         '<input type="color" id="tv-selected-draw-fill-color" />' +
@@ -19636,7 +19675,7 @@ def index():
                     }
                     syncTVUserDrawingAxisLabelLines();
                     if (def.type === 'avwap') applyTVAvwapDrawings();
-                    if (def.type === 'fixed_vp') scheduleTVProfileOverlayDraw();
+                    if (isTVProfileDrawingType(def.type)) scheduleTVProfileOverlayDraw();
                     if (def.type === 'hline' || def.type === 'channel') {
                         updateTVDrawingEditor();
                     }
@@ -19717,7 +19756,7 @@ def index():
                 });
                 editor.querySelector('#tv-selected-draw-profile-side').addEventListener('change', event => {
                     const def = tvFindDrawingById();
-                    if (!def || def.type !== 'fixed_vp') return;
+                    if (!def || !isTVProfileDrawingType(def.type)) return;
                     def.profileSide = event.target.value === 'left' || event.target.value === 'right' ? event.target.value : '';
                     persistTVDrawings();
                     scheduleTVProfileOverlayDraw();
@@ -19725,8 +19764,9 @@ def index():
                 });
                 editor.querySelector('#tv-selected-draw-profile-bin').addEventListener('change', event => {
                     const def = tvFindDrawingById();
-                    if (!def || def.type !== 'fixed_vp') return;
-                    def.binSize = Math.max(0.01, Math.min(10, Number(event.target.value) || getVolumeProfileSettingsFromDom().bin_size));
+                    if (!def || !isTVProfileDrawingType(def.type)) return;
+                    const fallback = def.type === 'fixed_vp' ? getVolumeProfileSettingsFromDom().bin_size : getTpoProfileSettingsFromDom().bin_size;
+                    def.binSize = Math.max(0.01, Math.min(10, Number(event.target.value) || fallback));
                     persistTVDrawings();
                     scheduleTVProfileOverlayDraw();
                 });
@@ -19734,6 +19774,43 @@ def index():
                     const def = tvFindDrawingById();
                     if (!def || def.type !== 'fixed_vp') return;
                     def.method = event.target.value === 'uniform' ? 'uniform' : 'triangular';
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-block').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    const next = Number(event.target.value);
+                    def.blockMinutes = [15, 30, 60, 240].includes(next) ? next : 30;
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-va').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    def.valueAreaPct = Math.max(50, Math.min(95, Number(event.target.value) || 70));
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-single').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    def.showSinglePrints = !!event.target.checked;
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-ib').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    def.showInitialBalance = !!event.target.checked;
+                    persistTVDrawings();
+                    updateTVDrawingEditor();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-ib-min').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    def.initialBalanceMinutes = Math.max(15, Math.min(240, Number(event.target.value) || 60));
                     persistTVDrawings();
                     scheduleTVProfileOverlayDraw();
                 });
@@ -19804,6 +19881,8 @@ def index():
                     : def.type === 'rect' ? 'Box'
                     : def.type === 'avwap' ? 'Anchored VWAP'
                     : def.type === 'fixed_vp' ? 'Fixed VP'
+                    : def.type === 'fixed_tpo' ? 'TPO Range'
+                    : def.type === 'anchored_tpo' ? 'Anchored TPO'
                     : 'Text Label';
                 titleEl.textContent = typeLabel;
             }
@@ -19854,22 +19933,61 @@ def index():
                 extendRightInput.disabled = !isChannel;
             }
             if (profileSideRow && profileSideSelect) {
-                const isFixedVp = def.type === 'fixed_vp';
-                profileSideRow.style.display = isFixedVp ? 'flex' : 'none';
-                profileSideSelect.value = isFixedVp ? (def.profileSide || '') : '';
-                profileSideSelect.disabled = !isFixedVp;
+                const isProfile = isTVProfileDrawingType(def.type);
+                profileSideRow.style.display = isProfile ? 'flex' : 'none';
+                profileSideSelect.value = isProfile ? (def.profileSide || '') : '';
+                profileSideSelect.disabled = !isProfile;
             }
             if (profileBinRow && profileBinInput) {
-                const isFixedVp = def.type === 'fixed_vp';
-                profileBinRow.style.display = isFixedVp ? 'flex' : 'none';
-                profileBinInput.value = isFixedVp ? (def.binSize || getVolumeProfileSettingsFromDom().bin_size || 0.10) : '';
-                profileBinInput.disabled = !isFixedVp;
+                const isProfile = isTVProfileDrawingType(def.type);
+                const isTpo = def.type === 'fixed_tpo' || def.type === 'anchored_tpo';
+                const label = profileBinRow.querySelector('label');
+                if (label) label.textContent = isTpo ? 'TPO Bin' : 'VP Bin';
+                profileBinRow.style.display = isProfile ? 'flex' : 'none';
+                profileBinInput.value = isProfile ? (def.binSize || (isTpo ? getTpoProfileSettingsFromDom().bin_size : getVolumeProfileSettingsFromDom().bin_size) || 0.10) : '';
+                profileBinInput.disabled = !isProfile;
             }
             if (profileMethodRow && profileMethodSelect) {
                 const isFixedVp = def.type === 'fixed_vp';
                 profileMethodRow.style.display = isFixedVp ? 'flex' : 'none';
                 profileMethodSelect.value = isFixedVp ? (def.method || 'triangular') : 'triangular';
                 profileMethodSelect.disabled = !isFixedVp;
+            }
+            const tpoBlockRow = editor.querySelector('#tv-drawing-tpo-block-row');
+            const tpoBlockSelect = editor.querySelector('#tv-selected-draw-tpo-block');
+            const tpoVaRow = editor.querySelector('#tv-drawing-tpo-va-row');
+            const tpoVaInput = editor.querySelector('#tv-selected-draw-tpo-va');
+            const tpoSingleRow = editor.querySelector('#tv-drawing-tpo-single-row');
+            const tpoSingleInput = editor.querySelector('#tv-selected-draw-tpo-single');
+            const tpoIbRow = editor.querySelector('#tv-drawing-tpo-ib-row');
+            const tpoIbInput = editor.querySelector('#tv-selected-draw-tpo-ib');
+            const tpoIbMinRow = editor.querySelector('#tv-drawing-tpo-ib-min-row');
+            const tpoIbMinInput = editor.querySelector('#tv-selected-draw-tpo-ib-min');
+            const isTpoProfile = def.type === 'fixed_tpo' || def.type === 'anchored_tpo';
+            if (tpoBlockRow && tpoBlockSelect) {
+                tpoBlockRow.style.display = isTpoProfile ? 'flex' : 'none';
+                tpoBlockSelect.value = String([15, 30, 60, 240].includes(Number(def.blockMinutes)) ? Number(def.blockMinutes) : 30);
+                tpoBlockSelect.disabled = !isTpoProfile;
+            }
+            if (tpoVaRow && tpoVaInput) {
+                tpoVaRow.style.display = isTpoProfile ? 'flex' : 'none';
+                tpoVaInput.value = isTpoProfile ? (def.valueAreaPct || 70) : '';
+                tpoVaInput.disabled = !isTpoProfile;
+            }
+            if (tpoSingleRow && tpoSingleInput) {
+                tpoSingleRow.style.display = isTpoProfile ? 'flex' : 'none';
+                tpoSingleInput.checked = isTpoProfile ? !!def.showSinglePrints : false;
+                tpoSingleInput.disabled = !isTpoProfile;
+            }
+            if (tpoIbRow && tpoIbInput) {
+                tpoIbRow.style.display = isTpoProfile ? 'flex' : 'none';
+                tpoIbInput.checked = isTpoProfile ? !!def.showInitialBalance : false;
+                tpoIbInput.disabled = !isTpoProfile;
+            }
+            if (tpoIbMinRow && tpoIbMinInput) {
+                tpoIbMinRow.style.display = isTpoProfile && def.showInitialBalance ? 'flex' : 'none';
+                tpoIbMinInput.value = isTpoProfile ? (def.initialBalanceMinutes || 60) : '';
+                tpoIbMinInput.disabled = !isTpoProfile;
             }
             const fillColorRow = editor.querySelector('#tv-drawing-fill-color-row');
             const fillColorInput = editor.querySelector('#tv-selected-draw-fill-color');
@@ -20115,18 +20233,19 @@ def index():
             };
         }
 
-        function computeProfileValueArea(rows, valueKey) {
+        function computeProfileValueArea(rows, valueKey, targetPct = 70) {
             const clean = (rows || [])
                 .map((row, idx) => ({ idx, price: Number(row.price), value: Number(row[valueKey] || 0) }))
                 .filter(row => Number.isFinite(row.price) && Number.isFinite(row.value) && row.value > 0)
                 .sort((a, b) => a.price - b.price);
             if (!clean.length) return { poc: null, val: null, vah: null, prices: new Set() };
             const total = clean.reduce((sum, row) => sum + row.value, 0);
+            const target = Math.max(0.50, Math.min(0.95, (Number(targetPct) || 70) / 100));
             let pocIdx = 0;
             clean.forEach((row, idx) => { if (row.value > clean[pocIdx].value) pocIdx = idx; });
             let lo = pocIdx, hi = pocIdx, sum = clean[pocIdx].value;
             const included = new Set([clean[pocIdx].price]);
-            while (sum < total * 0.70 && (lo > 0 || hi < clean.length - 1)) {
+            while (sum < total * target && (lo > 0 || hi < clean.length - 1)) {
                 const lower = lo > 0 ? clean[lo - 1].value : -1;
                 const upper = hi < clean.length - 1 ? clean[hi + 1].value : -1;
                 if (upper >= lower) {
@@ -20140,6 +20259,140 @@ def index():
                 }
             }
             return { poc: clean[pocIdx].price, val: clean[lo].price, vah: clean[hi].price, prices: included };
+        }
+
+        function selectProfileCandles(candles, fromLogical = null, toLogical = null, fromTime = null, toTime = null) {
+            const minTime = Math.min(Number(fromTime), Number(toTime));
+            const maxTime = Math.max(Number(fromTime), Number(toTime));
+            const useTimeRange = Number.isFinite(minTime) && Number.isFinite(maxTime) && maxTime >= minTime;
+            return (candles || []).filter((c, idx) => {
+                if (useTimeRange) {
+                    const candleTime = Number(c && c.time);
+                    return Number.isFinite(candleTime) && candleTime >= minTime && candleTime <= maxTime;
+                }
+                if (fromLogical == null || toLogical == null) return true;
+                return idx >= Math.floor(fromLogical) && idx <= Math.ceil(toLogical);
+            });
+        }
+
+        function getEasternCandleParts(timeSeconds) {
+            const d = new Date(Number(timeSeconds) * 1000);
+            const parts = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+            }).formatToParts(d).reduce((acc, part) => {
+                if (part.type !== 'literal') acc[part.type] = part.value;
+                return acc;
+            }, {});
+            const hour = Number(parts.hour === '24' ? 0 : parts.hour);
+            return {
+                sessionKey: `${parts.year}-${parts.month}-${parts.day}`,
+                minuteOfDay: (hour * 60) + Number(parts.minute || 0),
+            };
+        }
+
+        function buildTpoProfileFromCandles(candles, settings, fromLogical = null, toLogical = null, fromTime = null, toTime = null) {
+            settings = settings || {};
+            const binSize = Math.max(0.01, Math.min(10, Number(settings.bin_size || settings.binSize) || 0.25));
+            const blockMinutes = [15, 30, 60, 240].includes(Number(settings.block_minutes || settings.blockMinutes))
+                ? Number(settings.block_minutes || settings.blockMinutes)
+                : 30;
+            const valueAreaPct = Math.max(50, Math.min(95, Number(settings.value_area_pct || settings.valueAreaPct) || 70));
+            const showSinglePrints = settings.show_single_prints === true || settings.showSinglePrints === true;
+            const rowsByPrice = new Map();
+            const periodKeysByPrice = new Map();
+            const sessionKeys = [];
+            const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+            const selected = selectProfileCandles(candles, fromLogical, toLogical, fromTime, toTime);
+            selected.forEach(c => {
+                const low = Number(c && c.low), high = Number(c && c.high);
+                const time = Number(c && c.time);
+                if (![low, high, time].every(Number.isFinite)) return;
+                const parts = getEasternCandleParts(time);
+                if (!sessionKeys.includes(parts.sessionKey)) sessionKeys.push(parts.sessionKey);
+                const blockIndex = Math.max(0, Math.floor((parts.minuteOfDay - 570) / blockMinutes));
+                const letter = letters[Math.max(0, Math.min(letters.length - 1, blockIndex))];
+                const periodKey = `${parts.sessionKey}:${blockIndex}`;
+                const lo = Math.min(low, high), hi = Math.max(low, high);
+                for (let i = Math.floor(lo / binSize); i <= Math.ceil(hi / binSize); i += 1) {
+                    const price = Number((i * binSize).toFixed(4));
+                    const bucket = rowsByPrice.get(price) || new Map();
+                    const letterSet = bucket.get(parts.sessionKey) || new Set();
+                    letterSet.add(letter);
+                    bucket.set(parts.sessionKey, letterSet);
+                    rowsByPrice.set(price, bucket);
+                    const periodSet = periodKeysByPrice.get(price) || new Set();
+                    periodSet.add(periodKey);
+                    periodKeysByPrice.set(price, periodSet);
+                }
+            });
+            const latestSession = sessionKeys[sessionKeys.length - 1] || '';
+            const rows = Array.from(rowsByPrice.entries()).sort((a, b) => a[0] - b[0]).map(([price, sessionMap]) => {
+                const latestLetters = sessionMap.get(latestSession) || new Set();
+                const count = (periodKeysByPrice.get(price) || new Set()).size;
+                return {
+                    price,
+                    letters: Array.from(latestLetters).sort((a, b) => letters.indexOf(a) - letters.indexOf(b)).join(''),
+                    count,
+                    session_count: sessionMap.size,
+                    sessions: Array.from(sessionMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, vals]) => ({
+                        date,
+                        letters: Array.from(vals).sort((a, b) => letters.indexOf(a) - letters.indexOf(b)).join(''),
+                        count: vals.size,
+                    })),
+                };
+            });
+            const va = computeProfileValueArea(rows, 'count', valueAreaPct);
+            rows.forEach(row => {
+                row.in_value_area = va.prices.has(Number(row.price));
+                row.is_single_print = row.count === 1;
+            });
+            const singlePrints = showSinglePrints
+                ? rows.filter(row => row.is_single_print).map(row => ({ price: row.price, price_top: Number((Number(row.price) + binSize).toFixed(4)) }))
+                : [];
+            return {
+                enabled: true,
+                rows,
+                max_count: rows.reduce((max, row) => Math.max(max, Number(row.count) || 0), 0),
+                poc: va.poc,
+                value_area_low: va.val,
+                value_area_high: va.vah,
+                value_area_pct: valueAreaPct,
+                bin_size: binSize,
+                block_minutes: blockMinutes,
+                single_prints: singlePrints,
+                summary: {
+                    total_tpo: rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0),
+                    period_count: new Set(Array.from(periodKeysByPrice.values()).flatMap(set => Array.from(set))).size,
+                    single_print_count: rows.filter(row => row.count === 1).length,
+                    session_count: sessionKeys.length,
+                    price_low: rows.length ? rows[0].price : null,
+                    price_high: rows.length ? rows[rows.length - 1].price : null,
+                },
+            };
+        }
+
+        function computeInitialBalanceFromCandles(candles, minutes = 60) {
+            const selected = (candles || []).filter(c => c && Number.isFinite(Number(c.time)));
+            if (!selected.length) return null;
+            const start = Number(selected[0].time);
+            const cutoff = start + (Math.max(15, Math.min(240, Number(minutes) || 60)) * 60);
+            let high = null, low = null;
+            selected.forEach(c => {
+                const t = Number(c.time);
+                if (!Number.isFinite(t) || t < start || t >= cutoff) return;
+                const h = Number(c.high), l = Number(c.low);
+                if (!Number.isFinite(h) || !Number.isFinite(l)) return;
+                high = high == null ? h : Math.max(high, h);
+                low = low == null ? l : Math.min(low, l);
+            });
+            if (!Number.isFinite(high) || !Number.isFinite(low)) return null;
+            return { high, low, mid: (high + low) / 2 };
         }
 
         function getVisibleRangeProfilePayload() {
@@ -20475,7 +20728,7 @@ def index():
             if (!hit) return false;
             event.preventDefault();
             event.stopPropagation();
-            openProfileSettingsFromChart(hit.kind === 'tpo' ? 'tpo' : 'vp');
+            openProfileSettingsFromChart((hit.kind === 'tpo' || hit.kind === 'fixed_tpo' || hit.kind === 'anchored_tpo') ? 'tpo' : 'vp');
             return true;
         }
 
@@ -20643,45 +20896,94 @@ def index():
                 svg.appendChild(group);
             }
             tvDrawingDefs.forEach(def => {
-                if (!def || def.hidden || def.type !== 'fixed_vp') return;
+                if (!def || def.hidden || !isTVProfileDrawingType(def.type)) return;
                 const screen = tvDrawingToScreen(def, width);
-                if (!screen || !screen.profile || !screen.profile.bins.length) return;
+                if (!screen || !screen.profile) return;
+                const isTpoDrawing = def.type === 'fixed_tpo' || def.type === 'anchored_tpo';
+                if (isTpoDrawing) {
+                    if (!Array.isArray(screen.profile.rows) || !screen.profile.rows.length) return;
+                } else if (!Array.isArray(screen.profile.bins) || !screen.profile.bins.length) {
+                    return;
+                }
                 const group = createSvgEl('g', {});
                 const boxX = Math.min(screen.x1, screen.x2);
                 const boxRight = Math.max(screen.x1, screen.x2);
-                const profileSide = def.profileSide || vpSettings.fixed_vp_side || 'right';
+                const profileSide = def.profileSide || (isTpoDrawing ? 'right' : (vpSettings.fixed_vp_side || 'right'));
                 const profileMaxWidth = Math.max(36, Math.min(130, Math.abs(screen.x2 - screen.x1) * 0.72));
-                appendProfileRows(group, screen.profile.bins, {
-                    width,
-                    height,
-                    maxValue: screen.profile.max_volume,
-                    maxBarWidth: profileMaxWidth,
-                    side: profileSide,
-                    xLeft: boxX,
-                    xRight: boxRight,
-                    fill: def.color || 'var(--warn)',
-                    opacity: 0.28,
-                    binSize: def.binSize || vpSettings.bin_size,
-                    poc: screen.profile.poc,
-                    valueAreaFill: def.color || 'var(--warn)',
-                    outsideFill: 'var(--fg-2)',
-                    pocFill: 'var(--rvol-hot)',
-                    total: screen.profile.total_volume || 0,
-                    hoverKind: 'fixed_vp',
-                    hoverLabel: def.label || 'Fixed VP',
-                });
-                appendProfileLevelLine(group, screen.profile.value_area_high, 'VAH', {
+                if (isTpoDrawing) {
+                    const tpoXStart = profileSide === 'left' ? boxX + 6 : Math.max(boxX + 6, boxRight - profileMaxWidth);
+                    const tpoXEnd = profileSide === 'left' ? Math.min(boxRight - 6, tpoXStart + profileMaxWidth) : boxRight - 6;
+                    appendTpoLetterRows(group, screen.profile.rows, {
+                        width,
+                        maxValue: screen.profile.max_count,
+                        xStart: tpoXStart,
+                        xEnd: Math.max(tpoXStart + 24, tpoXEnd),
+                        fill: def.color || 'var(--accent)',
+                        outsideFill: 'var(--fg-2)',
+                        pocFill: 'var(--rvol-hot)',
+                        opacity: 0.62,
+                        binSize: screen.profile.bin_size || def.binSize,
+                        poc: screen.profile.poc,
+                        total: screen.profile.summary && screen.profile.summary.total_tpo,
+                        hoverKind: def.type,
+                        hoverLabel: def.label || (def.type === 'anchored_tpo' ? 'Anchored TPO' : 'TPO Range'),
+                        valueAreaPct: screen.profile.value_area_pct,
+                        compactLabels: true,
+                    });
+                    if (def.showSinglePrints && Array.isArray(screen.profile.single_prints)) {
+                        screen.profile.single_prints.forEach(sp => {
+                            const yLow = tvCandleSeries.priceToCoordinate(Number(sp.price));
+                            const yHigh = tvCandleSeries.priceToCoordinate(Number(sp.price_top));
+                            if (!Number.isFinite(yLow) || !Number.isFinite(yHigh)) return;
+                            group.appendChild(createSvgEl('rect', {
+                                x: boxX,
+                                y: Math.min(yLow, yHigh),
+                                width: Math.max(8, boxRight - boxX),
+                                height: Math.max(2, Math.abs(yHigh - yLow)),
+                                fill: 'var(--tpo-single)',
+                                opacity: 0.10,
+                                rx: 2,
+                            }));
+                        });
+                    }
+                    if (screen.ib) {
+                        appendProfileLevelLine(group, screen.ib.high, 'IBH', { x1: boxX, x2: boxRight, style: 'stroke:var(--call)' });
+                        appendProfileLevelLine(group, screen.ib.low, 'IBL', { x1: boxX, x2: boxRight, style: 'stroke:var(--put)' });
+                        appendProfileLevelLine(group, screen.ib.mid, 'IBM', { x1: boxX, x2: boxRight, style: 'stroke:var(--warn);stroke-dasharray:3,3;' });
+                    }
+                } else {
+                    appendProfileRows(group, screen.profile.bins, {
+                        width,
+                        height,
+                        maxValue: screen.profile.max_volume,
+                        maxBarWidth: profileMaxWidth,
+                        side: profileSide,
+                        xLeft: boxX,
+                        xRight: boxRight,
+                        fill: def.color || 'var(--warn)',
+                        opacity: 0.28,
+                        binSize: def.binSize || vpSettings.bin_size,
+                        poc: screen.profile.poc,
+                        valueAreaFill: def.color || 'var(--warn)',
+                        outsideFill: 'var(--fg-2)',
+                        pocFill: 'var(--rvol-hot)',
+                        total: screen.profile.total_volume || 0,
+                        hoverKind: 'fixed_vp',
+                        hoverLabel: def.label || 'Fixed VP',
+                    });
+                }
+                appendProfileLevelLine(group, screen.profile.value_area_high, isTpoDrawing ? 'TPO VAH' : 'VAH', {
                     x1: boxX,
                     x2: boxRight,
                     style: def.color ? `stroke:${def.color}` : null,
                 });
-                appendProfileLevelLine(group, screen.profile.value_area_low, 'VAL', {
+                appendProfileLevelLine(group, screen.profile.value_area_low, isTpoDrawing ? 'TPO VAL' : 'VAL', {
                     x1: boxX,
                     x2: boxRight,
                     style: def.color ? `stroke:${def.color}` : null,
                 });
                 if (Number.isFinite(Number(screen.profile.poc))) {
-                    appendProfileLevelLine(group, screen.profile.poc, 'POC', {
+                    appendProfileLevelLine(group, screen.profile.poc, isTpoDrawing ? 'TPO POC' : 'POC', {
                         className: 'tv-profile-poc',
                         x1: boxX,
                         x2: boxRight,
@@ -20849,6 +21151,46 @@ def index():
                     def.t2
                 );
                 return { type: 'fixed_vp', x1, x2, profile };
+            }
+            if (def.type === 'fixed_tpo' || def.type === 'anchored_tpo') {
+                const rawX1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                let rawX2 = null;
+                let endTime = def.t2;
+                let endLogical = Number.isFinite(Number(def.l2)) ? Number(def.l2) : tvTimeToLogical(def.t2);
+                if (def.type === 'anchored_tpo') {
+                    const last = tvLastCandles && tvLastCandles.length ? tvLastCandles[tvLastCandles.length - 1] : null;
+                    endTime = last && Number.isFinite(Number(last.time)) ? Number(last.time) : def.t1;
+                    endLogical = tvLastCandles && tvLastCandles.length ? tvLastCandles.length - 1 : endLogical;
+                    rawX2 = tvResolveDrawingAnchorX(endTime, endLogical, null);
+                } else {
+                    rawX2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
+                }
+                if ([rawX1, rawX2].some(v => v == null || Number.isNaN(v))) return null;
+                const x1 = Math.min(rawX1, rawX2);
+                const x2 = Math.max(rawX1, rawX2);
+                const fromLogical = Number.isFinite(Number(def.l1)) ? Number(def.l1) : tvTimeToLogical(def.t1);
+                const selected = selectProfileCandles(
+                    tvLastCandles,
+                    Math.min(fromLogical, endLogical),
+                    Math.max(fromLogical, endLogical),
+                    def.t1,
+                    endTime
+                );
+                const profile = buildTpoProfileFromCandles(
+                    tvLastCandles,
+                    {
+                        binSize: def.binSize || getTpoProfileSettingsFromDom().bin_size,
+                        blockMinutes: def.blockMinutes || getTpoProfileSettingsFromDom().block_minutes,
+                        valueAreaPct: def.valueAreaPct || getTpoProfileSettingsFromDom().value_area_pct,
+                        showSinglePrints: def.showSinglePrints,
+                    },
+                    Math.min(fromLogical, endLogical),
+                    Math.max(fromLogical, endLogical),
+                    def.t1,
+                    endTime
+                );
+                const ib = def.showInitialBalance ? computeInitialBalanceFromCandles(selected, def.initialBalanceMinutes) : null;
+                return { type: def.type, x1, x2, profile, ib };
             }
             if (def.type === 'text') {
                 const y = def.previewY != null ? def.previewY : tvCandleSeries.priceToCoordinate(def.price);
@@ -21207,9 +21549,10 @@ def index():
                     bindSelect(hit);
                     group.appendChild(hit);
                 }
-            } else if (screen.type === 'fixed_vp') {
+            } else if (screen.type === 'fixed_vp' || screen.type === 'fixed_tpo' || screen.type === 'anchored_tpo') {
                 const boxX = Math.min(screen.x1, screen.x2);
                 const boxW = Math.max(1, Math.abs(screen.x2 - screen.x1));
+                const isTpoDrawing = screen.type === 'fixed_tpo' || screen.type === 'anchored_tpo';
                 group.appendChild(createSvgEl('rect', {
                     class: 'tv-drawing-shape',
                     x: boxX,
@@ -21224,7 +21567,7 @@ def index():
                     opacity: isPreview ? 0.7 : 1,
                 }));
                 appendTVDrawingBadge(group, {
-                    label: labelText || 'Fixed VP',
+                    label: labelText || (screen.type === 'anchored_tpo' ? 'Anchored TPO' : (isTpoDrawing ? 'TPO Range' : 'Fixed VP')),
                     color: def.color,
                     x: boxX + 8,
                     y: 18,
@@ -21243,10 +21586,11 @@ def index():
                     bindSelect(hit);
                     group.appendChild(hit);
                     if (def.id === tvSelectedDrawingId) {
-                        [
+                        const handleSpecs = [
                             { key: 'start', cx: screen.x1 },
-                            { key: 'end', cx: screen.x2 },
-                        ].forEach(spec => {
+                            ...(screen.type === 'anchored_tpo' ? [] : [{ key: 'end', cx: screen.x2 }]),
+                        ];
+                        handleSpecs.forEach(spec => {
                             const handle = createSvgEl('circle', {
                                 class: 'tv-drawing-handle tv-drawing-handle--horizontal',
                                 cx: spec.cx,
@@ -21257,7 +21601,7 @@ def index():
                                 'stroke-width': 1.5,
                             });
                             handle.addEventListener('mousedown', event => {
-                                tvBeginFixedVpAnchorDrag(event, def, spec.key, handle);
+                                tvBeginProfileAnchorDrag(event, def, spec.key, handle);
                             });
                             group.appendChild(handle);
                         });
@@ -21370,7 +21714,7 @@ def index():
             const pendingPoints = Array.isArray(tvDrawStart && tvDrawStart.points)
                 ? tvDrawStart.points
                 : (tvDrawStart ? [tvDrawStart] : []);
-            if (pendingPoints.length && (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp')) {
+            if (pendingPoints.length && (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo')) {
                 pendingPoints.forEach(point => {
                     const x = tvResolveDrawingAnchorX(point.time, point.logical, null);
                     const y = tvCandleSeries.priceToCoordinate(point.price);
@@ -21499,7 +21843,7 @@ def index():
                     text: 'Label',
                     color: drawColor,
                 });
-            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp') && tvDrawStart) {
+            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo') && tvDrawStart) {
                 const drawPoints = Array.isArray(tvDrawStart.points) ? tvDrawStart.points : [tvDrawStart];
                 if (tvDrawMode === 'trendline' && drawPoints.length === 1) {
                     const startPoint = drawPoints[0];
@@ -21535,6 +21879,26 @@ def index():
                         method: getVolumeProfileSettingsFromDom().method,
                         profileSide: getVolumeProfileSettingsFromDom().fixed_vp_side,
                         label: 'Fixed VP',
+                    });
+                } else if (tvDrawMode === 'fixed_tpo' && drawPoints.length === 1) {
+                    const startPoint = drawPoints[0];
+                    const tpoSettings = getTpoProfileSettingsFromDom();
+                    nextPreview = normalizeTVDrawingDef({
+                        id: '__preview__',
+                        type: 'fixed_tpo',
+                        t1: startPoint.time,
+                        l1: startPoint.logical,
+                        t2: point.time || startPoint.time,
+                        l2: point.logical,
+                        previewX2: previewPoint.x,
+                        color: drawColor,
+                        lineWidth: 2,
+                        lineStyle: 'dashed',
+                        binSize: tpoSettings.bin_size,
+                        blockMinutes: tpoSettings.block_minutes,
+                        valueAreaPct: tpoSettings.value_area_pct,
+                        showSinglePrints: tpoSettings.show_single_prints,
+                        label: 'TPO Range',
                     });
                 } else if (tvDrawMode === 'rect' && drawPoints.length === 1) {
                     const startPoint = drawPoints[0];
@@ -21753,6 +22117,8 @@ def index():
             if (def.type === 'channel') return 'Channel';
             if (def.type === 'rect') return 'Box';
             if (def.type === 'fixed_vp') return 'Fixed VP';
+            if (def.type === 'fixed_tpo') return 'TPO Range';
+            if (def.type === 'anchored_tpo') return 'Anchored TPO';
             if (def.type === 'avwap') return 'AVWAP';
             if (def.type === 'text') return 'Label';
             return 'Drawing';
@@ -21790,6 +22156,9 @@ def index():
             }
             if (def && def.type === 'fixed_vp') {
                 return `${prefix}: ${Number(def.binSize || 0.10).toFixed(2)} bin`;
+            }
+            if (def && (def.type === 'fixed_tpo' || def.type === 'anchored_tpo')) {
+                return `${prefix}: ${Number(def.binSize || 0.25).toFixed(2)} bin`;
             }
             if (def && def.type === 'trendline') {
                 const priceText = fmtRange(def.p1, def.p2);
@@ -21993,7 +22362,28 @@ def index():
                 return;
             }
 
-            if (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'fixed_vp') {
+            if (tvDrawMode === 'anchored_tpo') {
+                if (!clickTime) return;
+                const tpoSettings = getTpoProfileSettingsFromDom();
+                finishTVDrawingCreation({
+                    type: 'anchored_tpo',
+                    t1: clickTime,
+                    l1: logical,
+                    color: drawColor,
+                    lineWidth: 2,
+                    lineStyle: 'dashed',
+                    binSize: tpoSettings.bin_size,
+                    blockMinutes: tpoSettings.block_minutes,
+                    valueAreaPct: tpoSettings.value_area_pct,
+                    showSinglePrints: tpoSettings.show_single_prints,
+                    showInitialBalance: false,
+                    initialBalanceMinutes: 60,
+                    label: 'Anchored TPO',
+                });
+                return;
+            }
+
+            if (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo') {
                 if (!clickTime) return; // still no time — bail
                 const drawPoints = Array.isArray(tvDrawStart && tvDrawStart.points) ? tvDrawStart.points : [];
                 if (!drawPoints.length) {
@@ -22044,6 +22434,25 @@ def index():
                             method: getVolumeProfileSettingsFromDom().method,
                             profileSide: getVolumeProfileSettingsFromDom().fixed_vp_side,
                             label: 'Fixed VP',
+                        });
+                    } else if (tvDrawMode === 'fixed_tpo') {
+                        const tpoSettings = getTpoProfileSettingsFromDom();
+                        finishTVDrawingCreation({
+                            type: 'fixed_tpo',
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
+                            t2: clickTime,
+                            l2: logical,
+                            color: drawColor,
+                            lineWidth: 2,
+                            lineStyle: 'dashed',
+                            binSize: tpoSettings.bin_size,
+                            blockMinutes: tpoSettings.block_minutes,
+                            valueAreaPct: tpoSettings.value_area_pct,
+                            showSinglePrints: tpoSettings.show_single_prints,
+                            showInitialBalance: false,
+                            initialBalanceMinutes: 60,
+                            label: 'TPO Range',
                         });
                     }
                     tvDrawStart = null;
@@ -22445,6 +22854,8 @@ def index():
                 { key:'channel',   label:'∥ Channel', title:'Draw parallel channel (click two trend points, then width)' },
                 { key:'rect',      label:'▭ Box',    title:'Draw rectangle between two prices (click two points)' },
                 { key:'fixed_vp',  label:'VP Range', title:'Draw fixed range volume profile (click start, click end)' },
+                { key:'fixed_tpo', label:'TPO Range', title:'Draw fixed range TPO market profile (click start, click end)' },
+                { key:'anchored_tpo', label:'⚓ TPO', title:'Anchored TPO profile — click any candle to anchor' },
                 { key:'avwap',     label:'⚓ AVWAP',  title:'Anchored VWAP — click any candle to anchor' },
                 { key:'text',      label:'T Label',  title:'Add price label (click to place)' },
             ];
