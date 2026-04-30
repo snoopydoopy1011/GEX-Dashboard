@@ -63,11 +63,36 @@ Implemented after initial prototype review:
   - Each selected fixed VP drawing also gets a `Profile Side` override in the drawing editor with `Use Setting`, `Right`, and `Left`.
   - Existing drawings without an override continue to follow the global setting.
 - Fixed the drawing editor title for selected fixed VP drawings so it shows `Fixed VP` instead of falling through to `Text Label`.
+- Added profile value-area metadata and overlay levels.
+  - Volume profiles and TPO profiles now return/draw 70% VAH/VAL plus POC from the existing modeled rows.
+  - Fixed-range VP rebuilds its own value area client-side when anchors or per-drawing settings change.
+- Added app-native VP/TPO hover details.
+  - Hover rows expose price, modeled volume or TPO count, percent of max, percent of total where applicable, and value-area membership.
+  - TPO hover includes recent session letter groups when using multi-session mode.
+- Added selected fixed-VP anchor editing.
+  - Selected fixed VP drawings now show draggable start/end handles.
+  - Dragging an anchor updates the saved logical/time anchor and immediately rebuilds the profile.
+- Added per-drawing fixed-VP controls.
+  - The drawing editor now exposes `VP Bin` and `Allocation` for selected fixed VP drawings.
+  - Existing drawings retain their saved overrides; new drawings still inherit current drawer defaults at creation.
+- Added TPO styling and session controls.
+  - Drawer controls now include TPO session mode, composite days, custom date range, color, and opacity.
+  - TPO payloads can aggregate by latest session, composite days, or custom date range while preserving per-session letter buckets for tooltips.
+- Tightened the VP/TPO interaction polish after browser review.
+  - Profile tooltips are now constrained to normal tooltip dimensions instead of stretching over the chart.
+  - Clicking a right-axis VP or TPO row opens the settings drawer and scrolls directly to the relevant profile controls.
+  - Fixed-range VP now prefers saved timestamp anchors when rebuilding its candle slice, with logical indexes as fallback. This fixes cases where the selection box renders but the profile rows are empty over prior-session spans.
+- Made value area and POC visually distinct.
+  - Outside-value-area bars render gray.
+  - Inside-value-area bars render in the selected profile/drawing color.
+  - POC bars and POC lines render magenta (`var(--rvol-hot)`) for right-axis VP, fixed-range VP, and TPO.
 
 Tricky parts:
 
 - The fixed VP bars live in the separate profile SVG overlay, while the selected drawing box and editor live in the drawing overlay path. Side changes therefore need to schedule both overlay redraw paths in a few places.
 - The global side selector should not rewrite older saved drawings, so the drawing definition keeps an empty `profileSide` as "inherit from setting".
+- Fixed VP has two possible anchor models now: saved timestamps and saved logical candle positions. Timestamp-based slicing is more reliable after reloads and across multi-session windows, but logical anchors are still useful as a fallback while drawing/previewing.
+- The profile SVG overlay still keeps `pointer-events: none` so chart drag/zoom behavior remains intact. Row hover/click uses a separate client-side hit map populated during SVG drawing.
 - The local `5002` Flask server may keep serving an old in-memory template after file edits. Restart the listener if new drawer/editor controls do not appear after refresh.
 - SVG-native hover titles were considered, but the profile overlay intentionally uses `pointer-events: none` so chart interactions pass through. A real tooltip should be implemented as an app-native hover layer rather than relying on SVG `<title>`.
 
@@ -78,6 +103,8 @@ Tricky parts:
   - Volume profile bin generation
   - TPO row generation
   - `prepare_price_chart_data()` carrying candle volume plus profile payloads
+- Follow-up synthetic smoke for VP/TPO value-area fields and session-aware TPO rows.
+- `git diff --check`
 - Local Flask server boot on prototype port `5012`.
 - Follow-up smoke on `http://127.0.0.1:5002/`:
   - `/update_price` returned `939` candles, `70` volume-profile bins, and `10` TPO rows for SPY.
@@ -87,11 +114,6 @@ Tricky parts:
 ## Left To Do
 
 - Tune overlay spacing so right-axis VP, TPO letters, price labels, and existing strike overlays do not crowd each other.
-- Add hover tooltip details for VP/TPO rows: price, modeled volume, percent of max, TPO letters/count.
-- Improve fixed-range VP editing:
-  - draggable start/end anchors
-  - per-drawing bin size and allocation controls in the drawing editor
-- Add value area calculations, e.g. VAH/VAL/POC for volume profile and TPO.
-- Consider exposing TPO color/opacity separately from VP once the overlay spacing is settled.
-- Consider session segmentation for TPO instead of only the latest/current RTH session.
+- Continue browser polish on VP/TPO hover hit areas, profile-click settings behavior, and label placement with real Schwab candles.
+- Consider a compact label strategy for TPO rows when many 30-minute letters overlap in a tight price range.
 - Decide whether these should remain chart overlays, become formal indicators, or move into a dedicated chart settings menu once the interaction model is settled.
