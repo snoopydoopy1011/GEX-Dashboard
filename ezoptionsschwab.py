@@ -20225,11 +20225,12 @@ def index():
                 const isPoc = Number.isFinite(pocPrice) && Math.abs(price - pocPrice) <= binSize * 0.5;
                 const rowFill = isPoc ? pocFill : (row.in_value_area ? fill : outsideFill);
                 const rowOpacity = isPoc ? 0.98 : row.in_value_area ? Math.min(0.94, opacity + 0.42) : 0.52;
-                const letters = String(row.letters || '');
-                const useCount = (compactLabels && rowH < 8) || !letters;
-                let display = useCount ? `(${count})` : letters;
+                const lettersOriginal = String(row.letters || '');
+                const lettersReversed = lettersOriginal.split('').reverse().join('');
+                const useCount = (compactLabels && rowH < 8) || !lettersReversed;
+                let display = useCount ? `(${count})` : lettersReversed;
                 if (!useCount && display.length > maxChars) {
-                    display = display.slice(0, Math.max(1, maxChars - 2)) + '+';
+                    display = display.slice(0, Math.max(1, maxChars - 1)) + '+';
                 }
                 const text = createSvgEl('text', {
                     class: 'tv-profile-tpo-letter',
@@ -20494,8 +20495,8 @@ def index():
             if (tpoSettings.enabled && tpo && Array.isArray(tpo.rows) && tpo.rows.length) {
                 const group = createSvgEl('g', {});
                 const totalTpo = tpo.rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
-                const tpoTextX = Math.max(12, width - 224);
-                const tpoTextRight = Math.max(tpoTextX + 42, width - 78);
+                const tpoTextX = Math.max(12, width - 282);
+                const tpoTextRight = Math.max(tpoTextX + 60, width - 132);
                 const tpoLevelX1 = Math.max(0, tpoTextX - 150);
                 const tpoLevelX2 = Math.max(0, tpoTextX - 10);
                 appendProfileLevelLine(group, tpo.value_area_high, 'TPO VAH', {

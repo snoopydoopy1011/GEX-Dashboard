@@ -266,7 +266,8 @@ Implemented after current-session screenshot review:
   - VP and fixed-range VP still use histogram bars.
   - TPO gets a dedicated SVG renderer (`appendTpoLetterRows`) with monospace period letters and invisible hover bands.
   - POC/value-area/outside-value-area distinction is carried by letter color/opacity instead of bar fill.
-  - Letters are right-aligned near the price axis and extend left toward the candles.
+  - Letters are now **right-aligned** at a fixed right anchor and the per-row letter string is **reversed** before rendering, so the first period of the day (A) sits closest to the price axis and each new period extends the row leftward toward the candles. This matches standard TPO market-profile orientation (latest period faces the price action) and visually mirrors the way the original histogram bars used to grow leftward as count increased. Truncation for very long rows keeps the leftmost (latest-period) characters and adds a `+` on the right.
+  - The right anchor sits ~132px from the chart's right edge with up to ~150px of letter width, so even long rows stay well clear of the price-axis labels, matching the spacing the original bar histogram had. VAH/VAL/POC dashed lines come in from the left and terminate just before the leftmost extent of the letters, with labels right-anchored immediately to the left of the letter column.
 - TPO VAH/VAL/POC labels now sit left of the TPO letter column.
   - The level lines stop before the letters, so labels no longer print over crowded letter rows.
   - Single-print `SP` labels follow the same left-side placement.
@@ -289,11 +290,30 @@ Validation:
 - `git diff --check`
 - Fresh `http://127.0.0.1:5012/` template smoke confirmed the right-aligned TPO renderer and toolbar buttons are present.
 
+### Letter-orientation iteration (post-screenshot review)
+
+After three rounds of visual review on real current-session candles, the TPO letter column was re-anchored to match standard market-profile convention:
+
+- First letter-only pass anchored letters on the **left** so rows grew **rightward**. Visually wrong: rows grew toward the price axis instead of toward the candles.
+- Second pass kept right-anchoring but the column landed flush against the price-axis labels. Pulled the column ~30px off the price axis.
+- Third pass flipped to **left-anchored** so rows grew rightward from a fixed left baseline (matching how the histogram bars grew rightward from a baseline). Direction was still wrong: in real market profile, the most recent period should face the candles.
+- Final pass (current state): **right-anchored, letter string reversed**. First period (A) sits closest to the price axis; each newer period extends the row leftward toward the candles. Truncation slices the leading reversed chars and appends `+` on the right, so the latest periods remain visible when the row gets long. Hover hit-boxes were re-derived from `xEnd` extending leftward to match.
+
+Tricky parts of this iteration:
+
+- **Direction is not just an anchor flip.** Right-anchoring alone keeps the alphabetical order rendering with A still leftmost. The string itself has to be reversed for the convention "earliest period closest to the price axis, latest period closest to the candles" to read correctly.
+- **Truncation side matters.** With reversed letters, `slice(0, n) + '+'` keeps the *latest* periods (most relevant for trading) and drops earliest-period letters with a `+` glyph against the price axis side. This is the opposite of the slicing the bar-era code did.
+- **Level-line endpoints stay at `xStart - 10`.** Since the letters now extend leftward toward `xStart` (and `xStart` is computed as the leftmost extent of the column), the existing VAH/VAL/POC dashed-line and label geometry kept working unchanged — they still terminate just before the letter cluster from the left.
+- **Hover bands had to flip with the anchor.** Each previous orientation change required re-deriving `x1`/`x2` for the invisible hover rectangles; the rectangles are now `[xEnd - hitWidth, xEnd]`.
+
 ### Still left to do
 
 - Browser-test non-default TPO modes (`Bars Back`, `Anchor`, custom range, composite days) against real Schwab candles.
 - Visual-test the toolbar toggles in-browser with live data, including save/load behavior after toggling from the toolbar rather than the drawer.
 - Continue tuning the right edge with many simultaneous overlays enabled, especially price labels, moving-average tags, key-level labels, strike labels, VP, and TPO.
+- Validate the new right-anchored / reversed-letter orientation against composite-day and bars-back modes (so far only verified visually against `Current session`).
+- Tune the `width - 132` right-edge constant if the letter column ends up too close to the price axis on narrower viewports / when the price scale grows (e.g. 4-digit prices with decimals).
+- Consider whether the truncation `+` indicator should appear on the candle side instead of the price-axis side when a row is dominated by very late-day periods — current choice favors keeping latest periods visible, which is the right default but may want a setting later.
 - Decide whether `block_minutes < timeframe.in_seconds(chart_tf) / 60` should be flagged in the UI. Pine indicator allows it, but with 1-minute candles a 15-minute block is fine — only relevant if the chart timeframe ever drops below 1m.
 - Implement the deferred TradingView features when the right-edge interaction model feels good:
   - Fixed-range TPO drawing tool (reusing the fixed VP anchor model: timestamp anchors first, logical fallback).
