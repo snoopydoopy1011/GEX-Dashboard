@@ -6805,13 +6805,183 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     return out
 
 
+def _normalize_profile_bin_size(value, current_price=None, default=0.10):
+    try:
+        size = float(value)
+    except Exception:
+        size = default
+    if not np.isfinite(size) or size <= 0:
+        size = default
+    # Keep runaway settings from producing thousands of SVG rows.
+    return max(0.01, min(10.0, size))
+
+
+def _profile_session_key(candle, tz):
+    try:
+        return datetime.fromtimestamp(candle['datetime'] / 1000, tz).date().isoformat()
+    except Exception:
+        return ''
+
+
+def _filter_profile_candles(candles, settings, tz):
+    if not candles:
+        return []
+    mode = str((settings or {}).get('mode') or 'days').lower()
+    if mode == 'visible':
+        # Visible-range mode is recomputed in JS from the currently displayed
+        # candles. Server still returns a sane seed for first paint.
+        mode = 'days'
+    if mode == 'session':
+        days = 1
+    else:
+        try:
+            days = int((settings or {}).get('days') or 5)
+        except Exception:
+            days = 5
+    days = max(1, min(20, days))
+    session_keys = []
+    for c in candles:
+        key = _profile_session_key(c, tz)
+        if key and (not session_keys or session_keys[-1] != key):
+            session_keys.append(key)
+    allowed = set(session_keys[-days:])
+    return [c for c in candles if _profile_session_key(c, tz) in allowed]
+
+
+def _build_modeled_volume_bins(candles, bin_size=0.10, method='triangular'):
+    bins = {}
+    total_volume = 0.0
+    method = str(method or 'triangular').lower()
+    for c in candles or []:
+        try:
+            low = float(c.get('low'))
+            high = float(c.get('high'))
+            close = float(c.get('close'))
+            volume = float(c.get('volume') or 0)
+        except Exception:
+            continue
+        if not all(np.isfinite(v) for v in [low, high, close, volume]) or volume <= 0:
+            continue
+        if high < low:
+            low, high = high, low
+        if high == low:
+            key = round(round(close / bin_size) * bin_size, 4)
+            bins[key] = bins.get(key, 0.0) + volume
+            total_volume += volume
+            continue
+        start = int(np.floor(low / bin_size))
+        end = int(np.ceil(high / bin_size))
+        prices = [round(i * bin_size, 4) for i in range(start, end + 1)
+                  if (i * bin_size) >= low - bin_size * 0.5 and (i * bin_size) <= high + bin_size * 0.5]
+        if not prices:
+            prices = [round(round(close / bin_size) * bin_size, 4)]
+        center = (high + low + close) / 3.0
+        weights = []
+        for price in prices:
+            if method == 'uniform' or len(prices) == 1:
+                weight = 1.0
+            elif method == 'close':
+                weight = 1.0 if abs(price - close) <= bin_size / 2 else 0.0
+            else:
+                span = max(high - low, bin_size)
+                weight = max(0.05, 1.0 - abs(price - center) / span)
+            weights.append(weight)
+        denom = sum(weights) or len(prices)
+        for price, weight in zip(prices, weights):
+            bins[price] = bins.get(price, 0.0) + volume * (weight / denom)
+        total_volume += volume
+    return bins, total_volume
+
+
+def build_volume_profile_payload(candles, settings=None, tz=None, current_price=None):
+    settings = settings or {}
+    if not settings.get('enabled'):
+        return {'enabled': False, 'bins': []}
+    tz = tz or pytz.timezone('US/Eastern')
+    bin_size = _normalize_profile_bin_size(settings.get('bin_size'), current_price)
+    selected = _filter_profile_candles(candles, settings, tz)
+    bins, total_volume = _build_modeled_volume_bins(
+        selected,
+        bin_size=bin_size,
+        method=settings.get('method') or 'triangular',
+    )
+    rows = [{'price': price, 'volume': vol} for price, vol in sorted(bins.items()) if vol > 0]
+    max_vol = max((row['volume'] for row in rows), default=0.0)
+    poc = max(rows, key=lambda row: row['volume'])['price'] if rows else None
+    return {
+        'enabled': True,
+        'mode': settings.get('mode') or 'days',
+        'days': int(settings.get('days') or 5),
+        'bin_size': bin_size,
+        'method': settings.get('method') or 'triangular',
+        'total_volume': total_volume,
+        'max_volume': max_vol,
+        'poc': poc,
+        'bins': rows,
+    }
+
+
+def build_tpo_profile_payload(candles, settings=None, tz=None):
+    settings = settings or {}
+    if not settings.get('enabled'):
+        return {'enabled': False, 'rows': []}
+    tz = tz or pytz.timezone('US/Eastern')
+    bin_size = _normalize_profile_bin_size(settings.get('bin_size'), default=0.25)
+    today = datetime.now(tz).date()
+    session_candles = []
+    for c in candles or []:
+        try:
+            dt = datetime.fromtimestamp(c['datetime'] / 1000, tz)
+        except Exception:
+            continue
+        if dt.date() == today:
+            session_candles.append(c)
+    if not session_candles and candles:
+        last_date = max(datetime.fromtimestamp(c['datetime'] / 1000, tz).date() for c in candles)
+        session_candles = [c for c in candles if datetime.fromtimestamp(c['datetime'] / 1000, tz).date() == last_date]
+    letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    rows = {}
+    for c in session_candles:
+        try:
+            dt = datetime.fromtimestamp(c['datetime'] / 1000, tz)
+            period = max(0, min(len(letters) - 1, ((dt.hour * 60 + dt.minute) - 570) // 30))
+            letter = letters[period]
+            low = float(c.get('low'))
+            high = float(c.get('high'))
+        except Exception:
+            continue
+        if not np.isfinite(low) or not np.isfinite(high):
+            continue
+        if high < low:
+            low, high = high, low
+        start = int(np.floor(low / bin_size))
+        end = int(np.ceil(high / bin_size))
+        for i in range(start, end + 1):
+            price = round(i * bin_size, 4)
+            rows.setdefault(price, set()).add(letter)
+    output = [{'price': price, 'letters': ''.join(sorted(vals, key=letters.index)), 'count': len(vals)}
+              for price, vals in sorted(rows.items())]
+    max_count = max((row['count'] for row in output), default=0)
+    poc = max(output, key=lambda row: row['count'])['price'] if output else None
+    return {
+        'enabled': True,
+        'bin_size': bin_size,
+        'period_minutes': 30,
+        'poc': poc,
+        'max_count': max_count,
+        'rows': output,
+    }
+
+
 def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_types=[],
                               exposure_levels_count=3, call_color=CALL_COLOR, put_color=PUT_COLOR,
                               strike_range=0.1, use_heikin_ashi=False,
                               highlight_max_level=False, max_level_color='#800080',
                               coloring_mode='Linear Intensity', ticker=None,
                               selected_expiries=None, timeframe=1,
-                              rvol_lookback_days=None):
+                              rvol_lookback_days=None,
+                              volume_profile_settings=None,
+                              tpo_profile_settings=None):
     """Return raw OHLCV + overlay data as JSON for TradingView Lightweight Charts rendering."""
     import json as _json
 
@@ -6894,7 +7064,8 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     for i, c in enumerate(display_candles):
         ts = int(c['datetime'] / 1000)
         lc_candles.append({'time': ts, 'open': c['open'], 'high': c['high'],
-                           'low': c['low'], 'close': c['close']})
+                           'low': c['low'], 'close': c['close'],
+                           'volume': c.get('volume', 0)})
         is_up = c['close'] >= c['open'] if i == 0 else c['close'] >= display_candles[i - 1]['close']
         bar = {'time': ts, 'value': c['volume'],
                'color': call_color if is_up else put_color,
@@ -6936,6 +7107,17 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     current_price = display_candles[-1]['close'] if display_candles else 0
     last_candle = display_candles[-1] if display_candles else None
     last_candle_up = (last_candle['close'] >= last_candle['open']) if last_candle else True
+    volume_profile_payload = build_volume_profile_payload(
+        display_candles,
+        volume_profile_settings,
+        est,
+        current_price=current_price,
+    )
+    tpo_profile_payload = build_tpo_profile_payload(
+        sorted_candles,
+        tpo_profile_settings,
+        est,
+    )
 
     historical_exposure_levels, historical_expected_moves = build_historical_levels_overlay(
         ticker=ticker,
@@ -7073,6 +7255,8 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         'expected_moves': expected_moves,
         'historical_exposure_levels': historical_exposure_levels,
         'historical_expected_moves': historical_expected_moves,
+        'volume_profile': volume_profile_payload,
+        'tpo_profile': tpo_profile_payload,
         'indicator_candles': lc_indicator_candles,
         'vwap_candles': lc_vwap_candles,
         'current_day_start_time': current_day_start_time,
@@ -11256,6 +11440,32 @@ def index():
             height: 100%;
             overflow: visible;
         }
+        .tv-profile-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 5;
+            pointer-events: none;
+            overflow: hidden;
+        }
+        .tv-profile-overlay svg {
+            width: 100%;
+            height: 100%;
+            overflow: visible;
+        }
+        .tv-profile-label {
+            fill: var(--fg-2);
+            font-size: 10px;
+            dominant-baseline: middle;
+            paint-order: stroke;
+            stroke: var(--bg-0);
+            stroke-width: 3px;
+        }
+        .tv-profile-poc {
+            stroke: var(--warn);
+            stroke-width: 1.5;
+            stroke-dasharray: 5 5;
+            opacity: 0.9;
+        }
         .tv-drawing-layer {
             pointer-events: none;
         }
@@ -13045,6 +13255,46 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section" open>
+                    <summary>Volume / Market Profile</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="vp_enabled">
+                            <label for="vp_enabled">Right-axis Volume Profile</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_mode">Profile Range:</label>
+                            <select id="vp_mode" title="Composite uses the last N sessions; visible range rebuilds from the candles currently on screen.">
+                                <option value="days" selected>Composite Days</option>
+                                <option value="session">Current Session</option>
+                                <option value="visible">Visible Range</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_days">Composite Days:</label>
+                            <input type="number" id="vp_days" min="1" max="20" value="5" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_bin_size">VP Bin:</label>
+                            <input type="number" id="vp_bin_size" min="0.01" max="10" value="0.10" step="0.01" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_method">Allocation:</label>
+                            <select id="vp_method">
+                                <option value="triangular" selected>Triangular</option>
+                                <option value="uniform">Uniform</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_enabled">
+                            <label for="tpo_enabled">TPO Market Profile</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_bin_size">TPO Bin:</label>
+                            <input type="number" id="tpo_bin_size" min="0.01" max="10" value="0.25" step="0.01" style="width: 72px;">
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section" open>
                     <summary>Alerts</summary>
                     <div class="drawer-content">
                         <div class="control-group">
@@ -13779,7 +14029,7 @@ def index():
         // Time-scale sync state
         let tvSyncHandlers = [], tvSyncingTimeScale = false;
         // Drawing state
-        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'text' | 'avwap'
+        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'fixed_vp' | 'text' | 'avwap'
         let tvDrawStart = null;         // {price, time, x, y} of first click
         let tvDrawingDefs = [];         // serializable drawing definitions — survive full re-renders
         let tvDrawingUndoStack = [];    // snapshots for user drawing actions: create, clear, delete, hide/show
@@ -13806,6 +14056,9 @@ def index():
         let tvIndicatorEditorTargetKey = '';
         let tvCurrentDayStartTime = 0;  // unix seconds of current day's first candle (for daily VWAP)
         let tvLastPriceData = null;     // cache of full priceData for redraw
+        let tvVolumeProfilePayload = null;
+        let tvTpoProfilePayload = null;
+        let tvProfileOverlayPending = false;
         // All overlay level prices (exposure, EM, drawn H-lines) — used by autoscaleInfoProvider
         let tvAllLevelPrices = [];
         // Session focus keeps the Y-axis tighter; Reset / auto-range can still fit everything.
@@ -15540,6 +15793,20 @@ def index():
             normalizeTopOICountInput();
             updateData();
         });
+        ['vp_mode', 'vp_days', 'vp_bin_size', 'vp_method', 'tpo_bin_size'].forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('input', () => {
+                scheduleTVProfileOverlayDraw();
+                _priceHistoryLastKey = '';
+                updateData();
+            });
+            el.addEventListener('change', () => {
+                scheduleTVProfileOverlayDraw();
+                _priceHistoryLastKey = '';
+                updateData();
+            });
+        });
 
         // Levels dropdown handlers
         function updateLevelsDisplay() {
@@ -17234,6 +17501,11 @@ def index():
                 delete normalized.extendRight;
                 delete normalized.fillColor;
                 delete normalized.midlineColor;
+            }
+            if (normalized.type === 'fixed_vp') {
+                normalized.binSize = Math.max(0.01, Math.min(10, Number(normalized.binSize) || 0.10));
+                normalized.method = ['uniform', 'triangular'].includes(normalized.method) ? normalized.method : 'triangular';
+                normalized.label = normalized.label || 'Fixed VP';
             }
             if (normalized.type === 'avwap') {
                 const rawAnchor = Number(normalized.anchorTime);
@@ -19163,6 +19435,209 @@ def index():
             return el;
         }
 
+        function ensureTVProfileOverlay() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let overlay = container.querySelector('.tv-profile-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.className = 'tv-profile-overlay';
+                overlay.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>';
+                const drawingOverlay = container.querySelector('.tv-drawing-overlay');
+                if (drawingOverlay) container.insertBefore(overlay, drawingOverlay);
+                else container.appendChild(overlay);
+            }
+            return overlay;
+        }
+
+        function getVolumeProfileSettingsFromDom() {
+            const modeEl = document.getElementById('vp_mode');
+            const daysEl = document.getElementById('vp_days');
+            const binEl = document.getElementById('vp_bin_size');
+            const methodEl = document.getElementById('vp_method');
+            return {
+                enabled: !!(document.getElementById('vp_enabled') && document.getElementById('vp_enabled').checked),
+                mode: modeEl ? modeEl.value : 'days',
+                days: daysEl ? Math.max(1, Math.min(20, parseInt(daysEl.value) || 5)) : 5,
+                bin_size: binEl ? Math.max(0.01, Math.min(10, parseFloat(binEl.value) || 0.10)) : 0.10,
+                method: methodEl ? methodEl.value : 'triangular',
+            };
+        }
+
+        function getTpoProfileSettingsFromDom() {
+            const binEl = document.getElementById('tpo_bin_size');
+            return {
+                enabled: !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked),
+                bin_size: binEl ? Math.max(0.01, Math.min(10, parseFloat(binEl.value) || 0.25)) : 0.25,
+            };
+        }
+
+        function buildModeledProfileFromCandles(candles, settings, fromLogical = null, toLogical = null) {
+            settings = settings || {};
+            const binSize = Math.max(0.01, Math.min(10, Number(settings.bin_size) || 0.10));
+            const method = settings.method || 'triangular';
+            const bins = new Map();
+            let total = 0;
+            const rows = (candles || []).filter((c, idx) => {
+                if (fromLogical == null || toLogical == null) return true;
+                return idx >= Math.floor(fromLogical) && idx <= Math.ceil(toLogical);
+            });
+            rows.forEach(c => {
+                const low = Number(c.low), high = Number(c.high), close = Number(c.close), vol = Number(c.volume || c.value || 0);
+                if (![low, high, close, vol].every(Number.isFinite) || vol <= 0) return;
+                const lo = Math.min(low, high), hi = Math.max(low, high);
+                const start = Math.floor(lo / binSize);
+                const end = Math.ceil(hi / binSize);
+                const prices = [];
+                for (let i = start; i <= end; i += 1) {
+                    const price = Number((i * binSize).toFixed(4));
+                    if (price >= lo - binSize * 0.5 && price <= hi + binSize * 0.5) prices.push(price);
+                }
+                if (!prices.length) prices.push(Number((Math.round(close / binSize) * binSize).toFixed(4)));
+                const center = (hi + lo + close) / 3;
+                const weights = prices.map(price => method === 'uniform' ? 1 : Math.max(0.05, 1 - Math.abs(price - center) / Math.max(hi - lo, binSize)));
+                const denom = weights.reduce((sum, v) => sum + v, 0) || prices.length;
+                prices.forEach((price, idx) => {
+                    bins.set(price, (bins.get(price) || 0) + vol * weights[idx] / denom);
+                });
+                total += vol;
+            });
+            const out = Array.from(bins.entries()).map(([price, volume]) => ({ price, volume })).sort((a, b) => a.price - b.price);
+            const maxVolume = out.reduce((m, r) => Math.max(m, r.volume), 0);
+            const pocRow = out.reduce((best, r) => (!best || r.volume > best.volume ? r : best), null);
+            return { enabled: true, bins: out, max_volume: maxVolume, total_volume: total, poc: pocRow ? pocRow.price : null };
+        }
+
+        function getVisibleRangeProfilePayload() {
+            if (!tvPriceChart || !tvPriceChart.timeScale) return null;
+            let range = null;
+            try { range = tvPriceChart.timeScale().getVisibleLogicalRange(); } catch (e) {}
+            if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return null;
+            return buildModeledProfileFromCandles(tvLastCandles, getVolumeProfileSettingsFromDom(), range.from, range.to);
+        }
+
+        function appendProfileRows(group, rows, options) {
+            const width = options.width, height = options.height;
+            const maxValue = Math.max(1, Number(options.maxValue) || 1);
+            const maxBarWidth = options.maxBarWidth || 120;
+            const rightPad = options.rightPad || 64;
+            const xRight = width - rightPad;
+            const fill = options.fill || 'var(--info)';
+            const opacity = options.opacity == null ? 0.24 : options.opacity;
+            rows.forEach(row => {
+                const price = Number(row.price);
+                const value = Number(row.volume != null ? row.volume : row.count);
+                if (!Number.isFinite(price) || !Number.isFinite(value) || value <= 0) return;
+                const y = tvCandleSeries.priceToCoordinate(price);
+                const y2 = tvCandleSeries.priceToCoordinate(price + (options.binSize || 0.10));
+                if (y == null || Number.isNaN(y)) return;
+                const h = Math.max(2, Math.min(18, Math.abs((y2 == null || Number.isNaN(y2)) ? 8 : y2 - y)));
+                const w = Math.max(2, (value / maxValue) * maxBarWidth);
+                group.appendChild(createSvgEl('rect', {
+                    x: xRight - w,
+                    y: Math.max(0, y - h / 2),
+                    width: w,
+                    height: h,
+                    fill,
+                    opacity,
+                    rx: 1,
+                }));
+            });
+        }
+
+        function drawTVProfileOverlay() {
+            tvProfileOverlayPending = false;
+            const overlay = ensureTVProfileOverlay();
+            if (!overlay) return;
+            const svg = overlay.querySelector('svg');
+            const width = overlay.clientWidth || 0;
+            const height = overlay.clientHeight || 0;
+            if (!svg || !width || !height || !tvCandleSeries) return;
+            svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+            svg.replaceChildren();
+            const vpSettings = getVolumeProfileSettingsFromDom();
+            let vp = tvVolumeProfilePayload;
+            if (vpSettings.enabled && vpSettings.mode === 'visible') {
+                vp = getVisibleRangeProfilePayload();
+            }
+            if (vpSettings.enabled && vp && Array.isArray(vp.bins) && vp.bins.length) {
+                const group = createSvgEl('g', {});
+                appendProfileRows(group, vp.bins, {
+                    width,
+                    height,
+                    maxValue: vp.max_volume,
+                    maxBarWidth: Math.min(150, Math.max(70, width * 0.14)),
+                    rightPad: 72,
+                    fill: 'var(--info)',
+                    opacity: 0.24,
+                    binSize: vp.bin_size || vpSettings.bin_size,
+                });
+                if (Number.isFinite(Number(vp.poc))) {
+                    const y = tvCandleSeries.priceToCoordinate(Number(vp.poc));
+                    if (Number.isFinite(y)) {
+                        group.appendChild(createSvgEl('line', {
+                            class: 'tv-profile-poc',
+                            x1: Math.max(0, width - 230),
+                            y1: y,
+                            x2: width - 58,
+                            y2: y,
+                        }));
+                        const label = createSvgEl('text', { class: 'tv-profile-label', x: width - 56, y });
+                        label.textContent = 'VP POC';
+                        group.appendChild(label);
+                    }
+                }
+                svg.appendChild(group);
+            }
+            const tpoSettings = getTpoProfileSettingsFromDom();
+            const tpo = tvTpoProfilePayload;
+            if (tpoSettings.enabled && tpo && Array.isArray(tpo.rows) && tpo.rows.length) {
+                const group = createSvgEl('g', {});
+                appendProfileRows(group, tpo.rows, {
+                    width,
+                    height,
+                    maxValue: tpo.max_count,
+                    maxBarWidth: Math.min(120, Math.max(56, width * 0.10)),
+                    rightPad: 230,
+                    fill: 'var(--accent)',
+                    opacity: 0.18,
+                    binSize: tpo.bin_size || tpoSettings.bin_size,
+                });
+                tpo.rows.forEach(row => {
+                    if (!row || !row.letters) return;
+                    const y = tvCandleSeries.priceToCoordinate(Number(row.price));
+                    if (!Number.isFinite(y)) return;
+                    const label = createSvgEl('text', { class: 'tv-profile-label', x: width - 226, y });
+                    label.textContent = String(row.letters).slice(0, 14);
+                    group.appendChild(label);
+                });
+                svg.appendChild(group);
+            }
+            tvDrawingDefs.forEach(def => {
+                if (!def || def.hidden || def.type !== 'fixed_vp') return;
+                const screen = tvDrawingToScreen(def, width);
+                if (!screen || !screen.profile || !screen.profile.bins.length) return;
+                const group = createSvgEl('g', {});
+                appendProfileRows(group, screen.profile.bins, {
+                    width,
+                    height,
+                    maxValue: screen.profile.max_volume,
+                    maxBarWidth: Math.max(36, Math.min(130, Math.abs(screen.x2 - screen.x1) * 0.72)),
+                    rightPad: width - Math.max(screen.x1, screen.x2),
+                    fill: def.color || 'var(--warn)',
+                    opacity: 0.28,
+                    binSize: def.binSize || vpSettings.bin_size,
+                });
+                svg.appendChild(group);
+            });
+        }
+
+        function scheduleTVProfileOverlayDraw() {
+            if (tvProfileOverlayPending) return;
+            tvProfileOverlayPending = true;
+            requestAnimationFrame(drawTVProfileOverlay);
+        }
+
         function tvResolvePreviewPoint(param) {
             const container = document.getElementById('price-chart');
             if (!tvPriceChart || !tvCandleSeries || !container || !param || !param.point) return null;
@@ -19296,6 +19771,22 @@ def index():
                     w: Math.max(1, x2 - x1),
                     h: Math.max(1, Math.abs(yBot - yTop)),
                 };
+            }
+            if (def.type === 'fixed_vp') {
+                const rawX1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                const rawX2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
+                if ([rawX1, rawX2].some(v => v == null || Number.isNaN(v))) return null;
+                const x1 = Math.min(rawX1, rawX2);
+                const x2 = Math.max(rawX1, rawX2);
+                const fromLogical = Number.isFinite(Number(def.l1)) ? Number(def.l1) : tvTimeToLogical(def.t1);
+                const toLogical = Number.isFinite(Number(def.l2)) ? Number(def.l2) : tvTimeToLogical(def.t2);
+                const profile = buildModeledProfileFromCandles(
+                    tvLastCandles,
+                    { bin_size: def.binSize || getVolumeProfileSettingsFromDom().bin_size, method: def.method || getVolumeProfileSettingsFromDom().method },
+                    Math.min(fromLogical, toLogical),
+                    Math.max(fromLogical, toLogical)
+                );
+                return { type: 'fixed_vp', x1, x2, profile };
             }
             if (def.type === 'text') {
                 const y = def.previewY != null ? def.previewY : tvCandleSeries.priceToCoordinate(def.price);
@@ -19654,6 +20145,42 @@ def index():
                     bindSelect(hit);
                     group.appendChild(hit);
                 }
+            } else if (screen.type === 'fixed_vp') {
+                const boxX = Math.min(screen.x1, screen.x2);
+                const boxW = Math.max(1, Math.abs(screen.x2 - screen.x1));
+                group.appendChild(createSvgEl('rect', {
+                    class: 'tv-drawing-shape',
+                    x: boxX,
+                    y: 0,
+                    width: boxW,
+                    height,
+                    fill: def.color,
+                    'fill-opacity': isPreview ? 0.04 : 0.06,
+                    stroke: def.color,
+                    'stroke-width': strokeWidth,
+                    'stroke-dasharray': dashArray || '5 5',
+                    opacity: isPreview ? 0.7 : 1,
+                }));
+                appendTVDrawingBadge(group, {
+                    label: labelText || 'Fixed VP',
+                    color: def.color,
+                    x: boxX + 8,
+                    y: 18,
+                    anchor: 'left',
+                    boundWidth: width,
+                    boundHeight: height,
+                });
+                if (interactive) {
+                    const hit = createSvgEl('rect', {
+                        class: 'tv-drawing-hitbox',
+                        x: boxX,
+                        y: 0,
+                        width: boxW,
+                        height,
+                    });
+                    bindSelect(hit);
+                    group.appendChild(hit);
+                }
             } else if (screen.type === 'avwap') {
                 // The actual line is rendered via a LightweightCharts line series
                 // (managed in applyTVAvwapDrawings). The overlay only paints the
@@ -19761,7 +20288,7 @@ def index():
             const pendingPoints = Array.isArray(tvDrawStart && tvDrawStart.points)
                 ? tvDrawStart.points
                 : (tvDrawStart ? [tvDrawStart] : []);
-            if (pendingPoints.length && (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel')) {
+            if (pendingPoints.length && (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp')) {
                 pendingPoints.forEach(point => {
                     const x = tvResolveDrawingAnchorX(point.time, point.logical, null);
                     const y = tvCandleSeries.priceToCoordinate(point.price);
@@ -19783,6 +20310,7 @@ def index():
             tvRefreshDrawingLevels();
             applyTVAvwapDrawings();
             scheduleTVDrawingOverlayDraw();
+            scheduleTVProfileOverlayDraw();
         }
 
         function clearTVDrawingPreview() {
@@ -19889,7 +20417,7 @@ def index():
                     text: 'Label',
                     color: drawColor,
                 });
-            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel') && tvDrawStart) {
+            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp') && tvDrawStart) {
                 const drawPoints = Array.isArray(tvDrawStart.points) ? tvDrawStart.points : [tvDrawStart];
                 if (tvDrawMode === 'trendline' && drawPoints.length === 1) {
                     const startPoint = drawPoints[0];
@@ -19907,6 +20435,23 @@ def index():
                         color: drawColor,
                         lineWidth: 2,
                         lineStyle: 'dashed',
+                    });
+                } else if (tvDrawMode === 'fixed_vp' && drawPoints.length === 1) {
+                    const startPoint = drawPoints[0];
+                    nextPreview = normalizeTVDrawingDef({
+                        id: '__preview__',
+                        type: 'fixed_vp',
+                        t1: startPoint.time,
+                        l1: startPoint.logical,
+                        t2: point.time || startPoint.time,
+                        l2: point.logical,
+                        previewX2: previewPoint.x,
+                        color: drawColor,
+                        lineWidth: 2,
+                        lineStyle: 'dashed',
+                        binSize: getVolumeProfileSettingsFromDom().bin_size,
+                        method: getVolumeProfileSettingsFromDom().method,
+                        label: 'Fixed VP',
                     });
                 } else if (tvDrawMode === 'rect' && drawPoints.length === 1) {
                     const startPoint = drawPoints[0];
@@ -20124,6 +20669,7 @@ def index():
             if (def.type === 'trendline') return 'Trend';
             if (def.type === 'channel') return 'Channel';
             if (def.type === 'rect') return 'Box';
+            if (def.type === 'fixed_vp') return 'Fixed VP';
             if (def.type === 'avwap') return 'AVWAP';
             if (def.type === 'text') return 'Label';
             return 'Drawing';
@@ -20158,6 +20704,9 @@ def index():
             if (def && def.type === 'rect') {
                 const priceText = fmtRange(def.bot, def.top);
                 if (priceText) return `${prefix} ${priceText}`;
+            }
+            if (def && def.type === 'fixed_vp') {
+                return `${prefix}: ${Number(def.binSize || 0.10).toFixed(2)} bin`;
             }
             if (def && def.type === 'trendline') {
                 const priceText = fmtRange(def.p1, def.p2);
@@ -20361,7 +20910,7 @@ def index():
                 return;
             }
 
-            if (tvDrawMode === 'trendline' || tvDrawMode === 'rect') {
+            if (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'fixed_vp') {
                 if (!clickTime) return; // still no time — bail
                 const drawPoints = Array.isArray(tvDrawStart && tvDrawStart.points) ? tvDrawStart.points : [];
                 if (!drawPoints.length) {
@@ -20397,6 +20946,20 @@ def index():
                             color: drawColor,
                             lineWidth: 2,
                             lineStyle: 'solid',
+                        });
+                    } else if (tvDrawMode === 'fixed_vp') {
+                        finishTVDrawingCreation({
+                            type: 'fixed_vp',
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
+                            t2: clickTime,
+                            l2: logical,
+                            color: drawColor,
+                            lineWidth: 2,
+                            lineStyle: 'dashed',
+                            binSize: getVolumeProfileSettingsFromDom().bin_size,
+                            method: getVolumeProfileSettingsFromDom().method,
+                            label: 'Fixed VP',
                         });
                     }
                     tvDrawStart = null;
@@ -20781,6 +21344,7 @@ def index():
                 { key:'trendline', label:'↗ Trend',  title:'Draw trend line (click start, click end)' },
                 { key:'channel',   label:'∥ Channel', title:'Draw parallel channel (click two trend points, then width)' },
                 { key:'rect',      label:'▭ Box',    title:'Draw rectangle between two prices (click two points)' },
+                { key:'fixed_vp',  label:'VP Range', title:'Draw fixed range volume profile (click start, click end)' },
                 { key:'avwap',     label:'⚓ AVWAP',  title:'Anchored VWAP — click any candle to anchor' },
                 { key:'text',      label:'T Label',  title:'Add price label (click to place)' },
             ];
@@ -21401,6 +21965,7 @@ def index():
                     scheduleTVStrikeOverlayDraw();
                     scheduleTVDrawingOverlayDraw();
                     scheduleTVHistoricalOverlayDraw();
+                    scheduleTVProfileOverlayDraw();
                     scheduleRvolMarkerDraw();
                     scheduleGexPanelSync();
                 });
@@ -21411,6 +21976,7 @@ def index():
                         scheduleTVStrikeOverlayDraw();
                         scheduleTVDrawingOverlayDraw();
                         scheduleTVHistoricalOverlayDraw();
+                        scheduleTVProfileOverlayDraw();
                         scheduleRvolMarkerDraw();
                         scheduleGexPanelSync();
                         requestTVDrawingOverlayActiveRedraw(activeDuration);
@@ -21596,10 +22162,13 @@ def index():
             clearTVHistoricalExpectedMoveSeries();
 
             tvHistoricalPoints = priceData.historical_exposure_levels || [];
+            tvVolumeProfilePayload = priceData.volume_profile || null;
+            tvTpoProfilePayload = priceData.tpo_profile || null;
             tvRestoreDrawings();
             scheduleSessionLevelCloudDraw();
             scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
+            scheduleTVProfileOverlayDraw();
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             renderKeyLevels(getScopedKeyLevels());
             renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
@@ -21620,6 +22189,7 @@ def index():
                         scheduleSessionLevelCloudDraw();
                         scheduleTVStrikeOverlayDraw();
                         scheduleTVHistoricalOverlayDraw();
+                        scheduleTVProfileOverlayDraw();
                     } catch(e) {}
                 }, 50);
             } else if (shouldFocusSession) {
@@ -24139,6 +24709,8 @@ def index():
                 coloring_mode: document.getElementById('coloring_mode').value,
                 top_oi_count: getTopOICountSetting(),
                 session_levels: getSessionLevelSettingsFromDom(),
+                volume_profile: getVolumeProfileSettingsFromDom(),
+                tpo_profile: getTpoProfileSettingsFromDom(),
                 gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
             };
         }
@@ -25258,6 +25830,7 @@ def index():
             scheduleTVDrawingOverlayDraw();
             scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
+            scheduleTVProfileOverlayDraw();
             scheduleGexPanelSync();
         });
 
@@ -25311,7 +25884,7 @@ def index():
         // Settings save/load functions
         function gatherSettings() {
             return {
-                settings_schema_version: 6,
+                settings_schema_version: 7,
                 ticker: document.getElementById('ticker').value,
                 timeframe: document.getElementById('timeframe').value,
                 strike_range: document.getElementById('strike_range').value,
@@ -25346,6 +25919,8 @@ def index():
                 tv_indicator_prefs: normalizeTVIndicatorPrefMap(tvIndicatorPrefs),
                 price_level_prefs: normalizePriceLevelPrefMap(priceLevelPrefs),
                 session_levels: getSessionLevelSettingsFromDom(),
+                volume_profile: getVolumeProfileSettingsFromDom(),
+                tpo_profile: getTpoProfileSettingsFromDom(),
                 // Chart visibility
                 charts: getChartVisibility()
             };
@@ -25428,6 +26003,19 @@ def index():
                 setEmRangeLocked(settings.em_range_locked);
             }
             applySessionLevelSettingsToDom(settings.session_levels || DEFAULT_SESSION_LEVEL_SETTINGS);
+            if (settings.volume_profile) {
+                const vp = settings.volume_profile;
+                if (document.getElementById('vp_enabled')) document.getElementById('vp_enabled').checked = !!vp.enabled;
+                if (document.getElementById('vp_mode')) document.getElementById('vp_mode').value = vp.mode || 'days';
+                if (document.getElementById('vp_days')) document.getElementById('vp_days').value = vp.days || 5;
+                if (document.getElementById('vp_bin_size')) document.getElementById('vp_bin_size').value = vp.bin_size || 0.10;
+                if (document.getElementById('vp_method')) document.getElementById('vp_method').value = vp.method || 'triangular';
+            }
+            if (settings.tpo_profile) {
+                const tpo = settings.tpo_profile;
+                if (document.getElementById('tpo_enabled')) document.getElementById('tpo_enabled').checked = !!tpo.enabled;
+                if (document.getElementById('tpo_bin_size')) document.getElementById('tpo_bin_size').value = tpo.bin_size || 0.25;
+            }
             let nextTvActiveInds;
             if (Array.isArray(settings.tv_active_indicators)) {
                 nextTvActiveInds = new Set(normalizeTVIndicatorActiveKeys(settings.tv_active_indicators));
@@ -26340,6 +26928,8 @@ def update_price():
         coloring_mode = data.get('coloring_mode', 'Linear Intensity')
         top_oi_count = data.get('top_oi_count', 5)
         session_level_config = normalize_session_level_config(data.get('session_levels'))
+        volume_profile_settings = data.get('volume_profile') or {}
+        tpo_profile_settings = data.get('tpo_profile') or {}
         # Mirror /update_data semantics. compute_trader_stats has needed these
         # since Phase 2 Stage 3 (commit 6fc40bb); without them every tick raised
         # a silent NameError and trader_stats stayed None.
@@ -26398,6 +26988,8 @@ def update_price():
             selected_expiries=selected_expiries,
             timeframe=timeframe,
             rvol_lookback_days=rvol_lookback_days,
+            volume_profile_settings=volume_profile_settings,
+            tpo_profile_settings=tpo_profile_settings,
         )
         # Inject timeframe so the popout candle-close timer knows the selected interval
         try:
