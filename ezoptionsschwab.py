@@ -13639,6 +13639,14 @@ def index():
                             <label for="tpo_compact_labels">Compact Labels (hide letters when crowded)</label>
                         </div>
                         <div class="control-group">
+                            <input type="checkbox" id="tpo_show_level_labels">
+                            <label for="tpo_show_level_labels">Show TPO Level Labels</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_show_summary" checked>
+                            <label for="tpo_show_summary">Show TPO Summary</label>
+                        </div>
+                        <div class="control-group">
                             <label for="tpo_color">TPO Color:</label>
                             <input type="color" id="tpo_color" value="#A78BFA">
                         </div>
@@ -16151,7 +16159,7 @@ def index():
         });
         syncVolumeProfileSettingsVisibility();
         syncTpoProfileSettingsVisibility();
-        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_color', 'tpo_opacity'].forEach(id => {
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_show_level_labels', 'tpo_show_summary', 'tpo_color', 'tpo_opacity'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             el.addEventListener('input', () => {
@@ -19994,6 +20002,8 @@ def index():
             const singleEl = document.getElementById('tpo_show_single_prints');
             const singleBoxesEl = document.getElementById('tpo_single_print_boxes');
             const compactEl = document.getElementById('tpo_compact_labels');
+            const levelLabelsEl = document.getElementById('tpo_show_level_labels');
+            const summaryEl = document.getElementById('tpo_show_summary');
             const colorFallback = resolveCssColor('var(--accent)') || '#A78BFA';
             return {
                 enabled: !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked),
@@ -20009,6 +20019,8 @@ def index():
                 show_single_prints: !!(singleEl && singleEl.checked),
                 single_print_boxes: !!(singleBoxesEl && singleBoxesEl.checked),
                 compact_labels: !!(compactEl && compactEl.checked),
+                show_level_labels: !!(levelLabelsEl && levelLabelsEl.checked),
+                show_summary: !summaryEl || summaryEl.checked,
                 color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
                 opacity: opacityEl ? Math.max(0.05, Math.min(0.60, parseFloat(opacityEl.value) || 0.18)) : 0.18,
             };
@@ -20197,6 +20209,46 @@ def index():
             });
         }
 
+        function getTpoLetterDisplayMetrics(rows, options = {}) {
+            const width = Number(options.width) || 0;
+            const binSize = Number(options.binSize) || 0.25;
+            const compactLabels = options.compactLabels !== false;
+            const xStart = Number.isFinite(Number(options.xStart)) ? Number(options.xStart) : Math.max(0, width - 226);
+            const xEnd = Number.isFinite(Number(options.xEnd)) ? Number(options.xEnd) : Math.max(xStart + 24, width - 78);
+            const charStep = 6.4;
+            const maxChars = Math.max(1, Math.floor((xEnd - xStart) / charStep));
+            let maxDisplayChars = 0;
+            let maxDisplayWidth = 0;
+            (Array.isArray(rows) ? rows : []).forEach(row => {
+                if (!row) return;
+                const price = Number(row.price);
+                const count = Number(row.count) || 0;
+                if (!Number.isFinite(price) || count <= 0) return;
+                const y = tvCandleSeries.priceToCoordinate(price);
+                if (!Number.isFinite(y)) return;
+                const yBin = tvCandleSeries.priceToCoordinate(price + binSize);
+                const rowH = Math.max(3, Math.min(18, Math.abs(Number.isFinite(yBin) ? yBin - y : 8)));
+                const lettersOriginal = String(row.letters || '');
+                const lettersReversed = lettersOriginal.split('').reverse().join('');
+                const useCount = (compactLabels && rowH < 8) || !lettersReversed;
+                let display = useCount ? `(${count})` : lettersReversed;
+                if (!useCount && display.length > maxChars) {
+                    display = display.slice(0, Math.max(1, maxChars - 1)) + '+';
+                }
+                maxDisplayChars = Math.max(maxDisplayChars, display.length);
+                maxDisplayWidth = Math.max(maxDisplayWidth, display.length * charStep);
+            });
+            return {
+                charStep,
+                maxChars,
+                maxDisplayChars,
+                maxDisplayWidth,
+                textLeftX: xEnd - maxDisplayWidth,
+                xStart,
+                xEnd,
+            };
+        }
+
         function appendTpoLetterRows(group, rows, options = {}) {
             const width = Number(options.width) || 0;
             const maxValue = Math.max(1, Number(options.maxValue) || 1);
@@ -20204,8 +20256,9 @@ def index():
             const compactLabels = options.compactLabels !== false;
             const xStart = Number.isFinite(Number(options.xStart)) ? Number(options.xStart) : Math.max(0, width - 226);
             const xEnd = Number.isFinite(Number(options.xEnd)) ? Number(options.xEnd) : Math.max(xStart + 24, width - 78);
-            const charStep = 6.4;
-            const maxChars = Math.max(1, Math.floor((xEnd - xStart) / charStep));
+            const metrics = getTpoLetterDisplayMetrics(rows, { ...options, width, binSize, compactLabels, xStart, xEnd });
+            const charStep = metrics.charStep;
+            const maxChars = metrics.maxChars;
             const fill = options.fill || 'var(--accent)';
             const outsideFill = options.outsideFill || 'var(--fg-2)';
             const pocFill = options.pocFill || 'var(--rvol-hot)';
@@ -20301,7 +20354,7 @@ def index():
             const overlay = ensureTVProfileOverlay();
             const summaryEl = overlay ? overlay.querySelector('.tv-profile-summary') : null;
             if (!summaryEl) return;
-            if (!settings || !settings.enabled || !tpo || !tpo.enabled || !Array.isArray(tpo.rows) || !tpo.rows.length) {
+            if (!settings || !settings.enabled || settings.show_summary === false || !tpo || !tpo.enabled || !Array.isArray(tpo.rows) || !tpo.rows.length) {
                 summaryEl.style.display = 'none';
                 summaryEl.innerHTML = '';
                 return;
@@ -20497,33 +20550,43 @@ def index():
                 const totalTpo = tpo.rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
                 const tpoTextX = Math.max(12, width - 282);
                 const tpoTextRight = Math.max(tpoTextX + 60, width - 132);
+                const tpoLabelX = Math.min(width - 56, tpoTextRight + 8);
+                const tpoBin = tpo.bin_size || tpoSettings.bin_size || 0.25;
+                const tpoLetterMetrics = getTpoLetterDisplayMetrics(tpo.rows, {
+                    width,
+                    xStart: tpoTextX,
+                    xEnd: tpoTextRight,
+                    binSize: tpoBin,
+                    compactLabels: tpoSettings.compact_labels !== false,
+                });
+                const tpoLevelStopX = Math.max(0, Math.min(tpoLabelX - 8, tpoLetterMetrics.textLeftX - 6));
                 const tpoLevelX1 = Math.max(0, tpoTextX - 150);
-                const tpoLevelX2 = Math.max(0, tpoTextX - 10);
-                appendProfileLevelLine(group, tpo.value_area_high, 'TPO VAH', {
+                const tpoLevelX2 = Math.max(tpoLevelX1, tpoLevelStopX);
+                const showTpoLevelLabels = !!tpoSettings.show_level_labels;
+                appendProfileLevelLine(group, tpo.value_area_high, showTpoLevelLabels ? 'TPO VAH' : '', {
                     x1: tpoLevelX1,
                     x2: tpoLevelX2,
-                    labelX: tpoTextX - 14,
-                    labelAnchor: 'end',
+                    labelX: tpoLabelX,
+                    labelAnchor: 'start',
                     style: tpoSettings.color ? `stroke:${tpoSettings.color}` : null,
                 });
-                appendProfileLevelLine(group, tpo.value_area_low, 'TPO VAL', {
+                appendProfileLevelLine(group, tpo.value_area_low, showTpoLevelLabels ? 'TPO VAL' : '', {
                     x1: tpoLevelX1,
                     x2: tpoLevelX2,
-                    labelX: tpoTextX - 14,
-                    labelAnchor: 'end',
+                    labelX: tpoLabelX,
+                    labelAnchor: 'start',
                     style: tpoSettings.color ? `stroke:${tpoSettings.color}` : null,
                 });
                 if (Number.isFinite(Number(tpo.poc))) {
-                    appendProfileLevelLine(group, tpo.poc, 'TPO POC', {
+                    appendProfileLevelLine(group, tpo.poc, showTpoLevelLabels ? 'TPO POC' : '', {
                         className: 'tv-profile-poc',
                         x1: tpoLevelX1,
                         x2: tpoLevelX2,
-                        labelX: tpoTextX - 14,
-                        labelAnchor: 'end',
+                        labelX: tpoLabelX,
+                        labelAnchor: 'start',
                         style: 'stroke:var(--rvol-hot)',
                     });
                 }
-                const tpoBin = tpo.bin_size || tpoSettings.bin_size || 0.25;
                 if (tpoSettings.show_single_prints && Array.isArray(tpo.single_prints) && tpo.single_prints.length) {
                     tpo.single_prints.forEach(sp => {
                         const yLow = tvCandleSeries.priceToCoordinate(Number(sp.price));
@@ -20544,16 +20607,16 @@ def index():
                             group.appendChild(createSvgEl('line', {
                                 x1: tpoLevelX1,
                                 y1: yPos,
-                                x2: tpoTextX - 10,
+                                x2: tpoLevelX2,
                                 y2: yPos,
                                 style: 'stroke:var(--tpo-single);stroke-width:1.5;stroke-dasharray:4,3;',
                             }));
                         });
                         const spLabel = createSvgEl('text', {
                             class: 'tv-profile-label',
-                            x: tpoTextX - 14,
+                            x: tpoLabelX,
                             y: (yLow + yHigh) / 2,
-                            'text-anchor': 'end',
+                            'text-anchor': 'start',
                             style: 'fill:var(--tpo-single);',
                         });
                         spLabel.textContent = 'SP';
@@ -27082,6 +27145,8 @@ def index():
                 if (document.getElementById('tpo_show_single_prints')) document.getElementById('tpo_show_single_prints').checked = !!tpo.show_single_prints;
                 if (document.getElementById('tpo_single_print_boxes')) document.getElementById('tpo_single_print_boxes').checked = !!tpo.single_print_boxes;
                 if (document.getElementById('tpo_compact_labels')) document.getElementById('tpo_compact_labels').checked = tpo.compact_labels !== false;
+                if (document.getElementById('tpo_show_level_labels')) document.getElementById('tpo_show_level_labels').checked = !!tpo.show_level_labels;
+                if (document.getElementById('tpo_show_summary')) document.getElementById('tpo_show_summary').checked = tpo.show_summary !== false;
                 if (document.getElementById('tpo_color')) document.getElementById('tpo_color').value = normalizeTVIndicatorColor(tpo.color, resolveCssColor('var(--accent)') || '#A78BFA');
                 if (document.getElementById('tpo_opacity')) document.getElementById('tpo_opacity').value = tpo.opacity || 0.18;
                 syncTpoProfileSettingsVisibility();

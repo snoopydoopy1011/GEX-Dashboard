@@ -86,6 +86,12 @@ Implemented after initial prototype review:
   - Outside-value-area bars render gray.
   - Inside-value-area bars render in the selected profile/drawing color.
   - POC bars and POC lines render magenta (`var(--rvol-hot)`) for right-axis VP, fixed-range VP, and TPO.
+- Polished right-edge TPO layout after live browser review.
+  - TPO letters now occupy the same right-profile column where the first bar-based prototype rendered its rows.
+  - The displayed letter order is preserved while the profile is right-anchored, so the widest/POC rows project left toward the candles.
+  - TPO VAH/POC/VAL guide lines now stop before the left edge of the widest visible TPO letter row instead of running underneath the letters.
+  - TPO VAH/POC/VAL text labels are hidden by default and can be restored with `#tpo_show_level_labels`.
+  - The compact top TPO summary panel can now be shown/hidden with `#tpo_show_summary`.
 
 Tricky parts:
 
@@ -95,6 +101,8 @@ Tricky parts:
 - The profile SVG overlay still keeps `pointer-events: none` so chart drag/zoom behavior remains intact. Row hover/click uses a separate client-side hit map populated during SVG drawing.
 - The local `5002` Flask server may keep serving an old in-memory template after file edits. Restart the listener if new drawer/editor controls do not appear after refresh.
 - SVG-native hover titles were considered, but the profile overlay intentionally uses `pointer-events: none` so chart interactions pass through. A real tooltip should be implemented as an app-native hover layer rather than relying on SVG `<title>`.
+- TPO line clipping is based on the same compact/truncated display calculation used by `appendTpoLetterRows()`. This keeps VAH/POC/VAL lines out of the letter text even when compact-label mode changes the rendered string to `(count)` or when long rows are truncated with `+`.
+- The summary and level-label controls are client-only display settings. They are intentionally threaded through `getTpoProfileSettingsFromDom()`, the redraw listener list, and `loadSettings()` so they persist and redraw immediately without changing server-side TPO math.
 
 ## Validation Done
 
@@ -106,6 +114,11 @@ Tricky parts:
 - Follow-up synthetic smoke for VP/TPO value-area fields and session-aware TPO rows.
 - `git diff --check`
 - Local Flask server boot on prototype port `5012`.
+- Follow-up browser smoke on `http://127.0.0.1:5012/`:
+  - Confirmed TPO letters face the candles while staying in the right-profile column.
+  - Confirmed TPO VAH/POC/VAL guide lines stop before the widest visible letter row.
+  - Confirmed TPO level labels are hidden by default and return when `Show TPO Level Labels` is enabled.
+  - Confirmed `Show TPO Summary` can hide/show the compact top TPO stats panel.
 - Follow-up smoke on `http://127.0.0.1:5002/`:
   - `/update_price` returned `939` candles, `70` volume-profile bins, and `10` TPO rows for SPY.
   - Browser test confirmed a newly drawn fixed VP over real candles renders visible histogram bars.
@@ -113,9 +126,8 @@ Tricky parts:
 
 ## Left To Do
 
-- Tune overlay spacing so right-axis VP, TPO letters, price labels, and existing strike overlays do not crowd each other.
+- Continue tuning overlay spacing so right-axis VP, TPO letters, price labels, and existing strike overlays do not crowd each other in every viewport/zoom state.
 - Continue browser polish on VP/TPO hover hit areas, profile-click settings behavior, and label placement with real Schwab candles.
-- Consider a compact label strategy for TPO rows when many 30-minute letters overlap in a tight price range.
 - Decide whether these should remain chart overlays, become formal indicators, or move into a dedicated chart settings menu once the interaction model is settled.
 
 ## Proposed TPO Expansion
@@ -165,7 +177,8 @@ Status legend: `[x]` shipped on `codex/volume-tpo-profile-prototype` in Phase 1,
   - [x] Boxes display option (`#tpo_single_print_boxes`) adds a subtle filled band behind the dashed single-print bounds.
 - [x] Improve dense TPO label handling (toggle-gated via `#tpo_compact_labels`, default on).
   - [x] When row pixel height is below threshold the letter string is replaced with `(count)`.
-  - [ ] Avoid collisions with VP labels, price labels, strike overlays, POC/VAH/VAL labels — needs browser tuning with real Schwab candles.
+  - [x] Avoid collisions between TPO letters and TPO VAH/POC/VAL labels/guide lines by default-hiding level labels and clipping guide lines before the widest letter row.
+  - [ ] Continue tuning collisions with VP labels, price labels, and strike overlays across zoom/viewport states.
 - [ ] Consider fixed-range TPO drawing.
   - Add a `TPO Range` drawing tool after right-edge modes are stable.
   - Reuse the fixed VP anchor model where possible: saved timestamp anchors first, logical indexes as fallback.
@@ -178,6 +191,7 @@ Status legend: `[x]` shipped on `codex/volume-tpo-profile-prototype` in Phase 1,
   - Draw IB high/low and optional extensions only after the core TPO mode work is stable.
 - [x] TPO summary metadata returned on the payload (`total_tpo`, `period_count`, `single_print_count`, `price_high`, `price_low`, `session_count`).
   - [x] Surfaced in a compact chart overlay summary panel when right-edge TPO is enabled.
+  - [x] Added `#tpo_show_summary` so the compact summary panel can be hidden when it competes with chart space.
 
 ### Suggested Implementation Order
 
@@ -239,9 +253,14 @@ Client-side JS:
 - `#tpo_single_print_boxes` optionally fills each single-print row with a subtle `--tpo-single` band behind the dashed bounds.
 - `updateTpoProfileSummary()` shows the payload `summary` block as a compact chart overlay with total TPO, periods, single prints, sessions, and price range.
 - Compact-label mode: when row pixel height is below ~9px the letter string is replaced with `(count)`. Toggleable via `#tpo_compact_labels` (default on) — turning it off reverts to the original letter-only behavior.
+- Follow-up visual polish:
+  - TPO letters are right-anchored within the right-profile column so the profile shape faces the candle chart.
+  - VAH/POC/VAL guide lines stop before the left edge of the widest displayed TPO text row.
+  - `#tpo_show_level_labels` restores TPO VAH/POC/VAL text labels when desired; default is off.
+  - `#tpo_show_summary` controls the compact top TPO summary panel; default is on.
 - `formatProfileTooltip()` now reflects the configured value-area percent and shows a `Single Print: Yes` row when applicable. Value-area percent is plumbed through `appendProfileRows` -> hover record so each profile can tooltip its own VA%.
 
-Settings: the `tpo_profile` save/load path persists `bars_back`, `anchor_datetime`, `block_minutes`, `value_area_pct`, `show_single_prints`, `single_print_boxes`, and `compact_labels`. Existing saved settings without these fields fall back to the original defaults.
+Settings: the `tpo_profile` save/load path persists `bars_back`, `anchor_datetime`, `block_minutes`, `value_area_pct`, `show_single_prints`, `single_print_boxes`, `compact_labels`, `show_level_labels`, and `show_summary`. Existing saved settings without these fields fall back to the original defaults.
 
 ### Tricky parts
 
@@ -249,6 +268,7 @@ Settings: the `tpo_profile` save/load path persists `bars_back`, `anchor_datetim
 - **Value-area threading.** `_profile_value_area` is shared with VP. The default `target=0.70` keeps VP untouched, while TPO passes its configured percentage. Adding a sanity clamp inside the helper avoids silent breakage if a future caller passes garbage.
 - **Anchor parsing.** `<input type="datetime-local">` returns local time without a timezone. The server localizes to the chart's `pytz` zone (US/Eastern) before converting to ms, so anchor times match the displayed candles.
 - **Compact labels and existing letter slicing.** Old behavior used `String(row.letters).slice(0, 14)` regardless of row height. The new code only swaps to `(count)` when the row is genuinely too narrow to read a letter. With `tpo_compact_labels` off, behavior is the original 14-char slice.
+- **Guide-line clipping uses rendered text metrics.** The VAH/POC/VAL guide lines need to stop before the letters, but the letter width changes when compact labels or truncation are active. `getTpoLetterDisplayMetrics()` mirrors the actual row-display logic, then the level-line endpoint is derived from the widest rendered row.
 - **Default-off discipline.** The "baseline simple TPO" case is preserved by ensuring every new branch reads `false`/default from the DOM when the corresponding control is missing or unchecked. Important for the first browser load before settings have been saved.
 
 ### Validation
@@ -257,6 +277,11 @@ Settings: the `tpo_profile` save/load path persists `bars_back`, `anchor_datetim
 - Synthetic candle smoke covering: baseline preserved, `bars_back` mode, `anchor` mode, `block_minutes=60` with `value_area_pct=80` and `show_single_prints=True`, `enabled: False` short-circuit, invalid `block_minutes` fallback, and VP value-area untouched. All passing.
 - Render smoke on `http://127.0.0.1:5012/` confirmed the updated template loads after the summary/box controls.
 - Visual review against real current-session candles confirmed the default TPO view is readable enough for the prototype checkpoint.
+- Follow-up visual smoke on `http://127.0.0.1:5012/` confirmed:
+  - TPO rows face the candle chart from the right-profile column.
+  - VAH/POC/VAL guide lines stop before the letter text.
+  - Level labels are hidden by default and return when `Show TPO Level Labels` is enabled.
+  - The compact TPO summary panel can be hidden/shown with `Show TPO Summary`.
 
 ## TPO Expansion — Visual Readability Pass
 
