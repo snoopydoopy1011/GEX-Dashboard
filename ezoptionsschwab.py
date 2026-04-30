@@ -11649,6 +11649,14 @@ def index():
             stroke: var(--bg-0);
             stroke-width: 3px;
         }
+        .tv-profile-tpo-letter {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+            font-size: 11px;
+            dominant-baseline: middle;
+            paint-order: stroke;
+            stroke: var(--bg-0);
+            stroke-width: 2.5px;
+        }
         .tv-profile-poc {
             stroke: var(--warn);
             stroke-width: 1.5;
@@ -12026,6 +12034,9 @@ def index():
         }
         .tv-toolbar-group[data-group="strike-overlay"] {
             background: rgba(16, 185, 129, 0.06);
+        }
+        .tv-toolbar-group[data-group="profiles"] {
+            background: rgba(167, 139, 250, 0.06);
         }
         .strike-overlay-toggle {
             min-width: 66px;
@@ -16146,6 +16157,7 @@ def index():
             el.addEventListener('input', () => {
                 syncVolumeProfileSettingsVisibility();
                 syncTpoProfileSettingsVisibility();
+                syncTVProfileToolbarButtons();
                 scheduleTVProfileOverlayDraw();
                 _priceHistoryLastKey = '';
                 updateData();
@@ -16153,11 +16165,13 @@ def index():
             el.addEventListener('change', () => {
                 syncVolumeProfileSettingsVisibility();
                 syncTpoProfileSettingsVisibility();
+                syncTVProfileToolbarButtons();
                 scheduleTVProfileOverlayDraw();
                 _priceHistoryLastKey = '';
                 updateData();
             });
         });
+        syncTVProfileToolbarButtons();
 
         // Levels dropdown handlers
         function updateLevelsDisplay() {
@@ -20014,6 +20028,28 @@ def index():
             if (anchorRow) anchorRow.style.display = mode === 'anchor' ? 'flex' : 'none';
         }
 
+        function syncTVProfileToolbarButtons() {
+            const vpEnabled = !!(document.getElementById('vp_enabled') && document.getElementById('vp_enabled').checked);
+            const tpoEnabled = !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked);
+            document.querySelectorAll('[data-profile-toggle="vp"]').forEach(btn => {
+                btn.classList.toggle('active', vpEnabled);
+                btn.setAttribute('aria-pressed', vpEnabled ? 'true' : 'false');
+            });
+            document.querySelectorAll('[data-profile-toggle="tpo"]').forEach(btn => {
+                btn.classList.toggle('active', tpoEnabled);
+                btn.setAttribute('aria-pressed', tpoEnabled ? 'true' : 'false');
+            });
+        }
+
+        function setTVProfileToggle(kind, enabled) {
+            const id = kind === 'tpo' ? 'tpo_enabled' : 'vp_enabled';
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.checked = !!enabled;
+            syncTVProfileToolbarButtons();
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
         function buildModeledProfileFromCandles(candles, settings, fromLogical = null, toLogical = null, fromTime = null, toTime = null) {
             settings = settings || {};
             const binSize = Math.max(0.01, Math.min(10, Number(settings.bin_size) || 0.10));
@@ -20161,6 +20197,69 @@ def index():
             });
         }
 
+        function appendTpoLetterRows(group, rows, options = {}) {
+            const width = Number(options.width) || 0;
+            const maxValue = Math.max(1, Number(options.maxValue) || 1);
+            const binSize = Number(options.binSize) || 0.25;
+            const compactLabels = options.compactLabels !== false;
+            const xStart = Number.isFinite(Number(options.xStart)) ? Number(options.xStart) : Math.max(0, width - 226);
+            const xEnd = Number.isFinite(Number(options.xEnd)) ? Number(options.xEnd) : Math.max(xStart + 24, width - 78);
+            const charStep = 6.4;
+            const maxChars = Math.max(1, Math.floor((xEnd - xStart) / charStep));
+            const fill = options.fill || 'var(--accent)';
+            const outsideFill = options.outsideFill || 'var(--fg-2)';
+            const pocFill = options.pocFill || 'var(--rvol-hot)';
+            const opacity = Number(options.opacity) || 0.24;
+            const pocPrice = Number(options.poc);
+            const hoverKind = options.hoverKind || '';
+            const hoverLabel = options.hoverLabel || hoverKind;
+            rows.forEach(row => {
+                if (!row) return;
+                const price = Number(row.price);
+                const count = Number(row.count) || 0;
+                if (!Number.isFinite(price) || count <= 0) return;
+                const y = tvCandleSeries.priceToCoordinate(price);
+                if (!Number.isFinite(y)) return;
+                const yBin = tvCandleSeries.priceToCoordinate(price + binSize);
+                const rowH = Math.max(3, Math.min(18, Math.abs(Number.isFinite(yBin) ? yBin - y : 8)));
+                const isPoc = Number.isFinite(pocPrice) && Math.abs(price - pocPrice) <= binSize * 0.5;
+                const rowFill = isPoc ? pocFill : (row.in_value_area ? fill : outsideFill);
+                const rowOpacity = isPoc ? 0.98 : row.in_value_area ? Math.min(0.94, opacity + 0.42) : 0.52;
+                const letters = String(row.letters || '');
+                const useCount = (compactLabels && rowH < 8) || !letters;
+                let display = useCount ? `(${count})` : letters;
+                if (!useCount && display.length > maxChars) {
+                    display = display.slice(0, Math.max(1, maxChars - 2)) + '+';
+                }
+                const text = createSvgEl('text', {
+                    class: 'tv-profile-tpo-letter',
+                    x: xEnd,
+                    y,
+                    'text-anchor': 'end',
+                    fill: rowFill,
+                    opacity: rowOpacity,
+                });
+                text.textContent = display;
+                group.appendChild(text);
+                if (hoverKind) {
+                    const hitWidth = Math.max(18, Math.min(xEnd - xStart, display.length * charStep));
+                    tvProfileHoverRows.push({
+                        kind: hoverKind,
+                        label: hoverLabel,
+                        row,
+                        x1: xEnd - hitWidth - 4,
+                        x2: xEnd + 4,
+                        y1: Math.max(0, y - rowH / 2),
+                        y2: y + rowH / 2,
+                        maxValue,
+                        total: options.total || 0,
+                        binSize,
+                        valueAreaPct: options.valueAreaPct,
+                    });
+                }
+            });
+        }
+
         function appendProfileLevelLine(group, price, label, options = {}) {
             const y = tvCandleSeries.priceToCoordinate(Number(price));
             if (!Number.isFinite(y)) return;
@@ -20175,8 +20274,10 @@ def index():
             if (label) {
                 const text = createSvgEl('text', {
                     class: 'tv-profile-label',
-                    x: (options.x2 || 0) + 4,
+                    x: options.labelX != null ? options.labelX : (options.x2 || 0) + 4,
                     y,
+                    'text-anchor': options.labelAnchor || 'start',
+                    style: options.labelStyle || null,
                 });
                 text.textContent = label;
                 group.appendChild(text);
@@ -20393,62 +20494,35 @@ def index():
             if (tpoSettings.enabled && tpo && Array.isArray(tpo.rows) && tpo.rows.length) {
                 const group = createSvgEl('g', {});
                 const totalTpo = tpo.rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
-                appendProfileRows(group, tpo.rows, {
-                    width,
-                    height,
-                    maxValue: tpo.max_count,
-                    maxBarWidth: Math.min(120, Math.max(56, width * 0.10)),
-                    rightPad: 230,
-                    fill: tpoSettings.color || 'var(--accent)',
-                    opacity: tpoSettings.opacity,
-                    binSize: tpo.bin_size || tpoSettings.bin_size,
-                    poc: tpo.poc,
-                    valueAreaFill: tpoSettings.color || 'var(--accent)',
-                    outsideFill: 'var(--fg-2)',
-                    pocFill: 'var(--rvol-hot)',
-                    total: totalTpo,
-                    hoverKind: 'tpo',
-                    hoverLabel: 'TPO Profile',
-                    valueAreaPct: tpo.value_area_pct,
-                });
+                const tpoTextX = Math.max(12, width - 224);
+                const tpoTextRight = Math.max(tpoTextX + 42, width - 78);
+                const tpoLevelX1 = Math.max(0, tpoTextX - 150);
+                const tpoLevelX2 = Math.max(0, tpoTextX - 10);
                 appendProfileLevelLine(group, tpo.value_area_high, 'TPO VAH', {
-                    x1: Math.max(0, width - 360),
-                    x2: width - 236,
+                    x1: tpoLevelX1,
+                    x2: tpoLevelX2,
+                    labelX: tpoTextX - 14,
+                    labelAnchor: 'end',
                     style: tpoSettings.color ? `stroke:${tpoSettings.color}` : null,
                 });
                 appendProfileLevelLine(group, tpo.value_area_low, 'TPO VAL', {
-                    x1: Math.max(0, width - 360),
-                    x2: width - 236,
+                    x1: tpoLevelX1,
+                    x2: tpoLevelX2,
+                    labelX: tpoTextX - 14,
+                    labelAnchor: 'end',
                     style: tpoSettings.color ? `stroke:${tpoSettings.color}` : null,
                 });
                 if (Number.isFinite(Number(tpo.poc))) {
                     appendProfileLevelLine(group, tpo.poc, 'TPO POC', {
                         className: 'tv-profile-poc',
-                        x1: Math.max(0, width - 360),
-                        x2: width - 236,
+                        x1: tpoLevelX1,
+                        x2: tpoLevelX2,
+                        labelX: tpoTextX - 14,
+                        labelAnchor: 'end',
                         style: 'stroke:var(--rvol-hot)',
                     });
                 }
-                const compactLabels = tpoSettings.compact_labels !== false;
                 const tpoBin = tpo.bin_size || tpoSettings.bin_size || 0.25;
-                tpo.rows.forEach(row => {
-                    if (!row) return;
-                    const hasLetters = !!row.letters;
-                    const count = Number(row.count) || 0;
-                    if (!hasLetters && !count) return;
-                    const y = tvCandleSeries.priceToCoordinate(Number(row.price));
-                    if (!Number.isFinite(y)) return;
-                    const yBin = tvCandleSeries.priceToCoordinate(Number(row.price) + tpoBin);
-                    const rowH = Number.isFinite(yBin) ? Math.abs(yBin - y) : 8;
-                    const label = createSvgEl('text', { class: 'tv-profile-label', x: width - 226, y });
-                    const useCount = (compactLabels && rowH < 9) || !hasLetters;
-                    if (useCount) {
-                        label.textContent = `(${count})`;
-                    } else {
-                        label.textContent = String(row.letters).slice(0, 14);
-                    }
-                    group.appendChild(label);
-                });
                 if (tpoSettings.show_single_prints && Array.isArray(tpo.single_prints) && tpo.single_prints.length) {
                     tpo.single_prints.forEach(sp => {
                         const yLow = tvCandleSeries.priceToCoordinate(Number(sp.price));
@@ -20456,9 +20530,9 @@ def index():
                         if (!Number.isFinite(yLow) || !Number.isFinite(yHigh)) return;
                         if (tpoSettings.single_print_boxes) {
                             group.appendChild(createSvgEl('rect', {
-                                x: Math.max(0, width - 360),
+                                x: tpoLevelX1,
                                 y: Math.min(yLow, yHigh),
-                                width: Math.max(8, (width - 236) - Math.max(0, width - 360)),
+                                width: Math.max(8, tpoTextRight - tpoLevelX1),
                                 height: Math.max(2, Math.abs(yHigh - yLow)),
                                 fill: 'var(--tpo-single)',
                                 opacity: 0.14,
@@ -20467,23 +20541,41 @@ def index():
                         }
                         [yLow, yHigh].forEach(yPos => {
                             group.appendChild(createSvgEl('line', {
-                                x1: Math.max(0, width - 360),
+                                x1: tpoLevelX1,
                                 y1: yPos,
-                                x2: width - 236,
+                                x2: tpoTextX - 10,
                                 y2: yPos,
                                 style: 'stroke:var(--tpo-single);stroke-width:1.5;stroke-dasharray:4,3;',
                             }));
                         });
                         const spLabel = createSvgEl('text', {
                             class: 'tv-profile-label',
-                            x: width - 232,
+                            x: tpoTextX - 14,
                             y: (yLow + yHigh) / 2,
+                            'text-anchor': 'end',
                             style: 'fill:var(--tpo-single);',
                         });
                         spLabel.textContent = 'SP';
                         group.appendChild(spLabel);
                     });
                 }
+                appendTpoLetterRows(group, tpo.rows, {
+                    width,
+                    maxValue: tpo.max_count,
+                    xStart: tpoTextX,
+                    xEnd: tpoTextRight,
+                    fill: tpoSettings.color || 'var(--accent)',
+                    outsideFill: 'var(--fg-2)',
+                    pocFill: 'var(--rvol-hot)',
+                    opacity: tpoSettings.opacity,
+                    binSize: tpoBin,
+                    poc: tpo.poc,
+                    total: totalTpo,
+                    hoverKind: 'tpo',
+                    hoverLabel: 'TPO Profile',
+                    valueAreaPct: tpo.value_area_pct,
+                    compactLabels: tpoSettings.compact_labels !== false,
+                });
                 svg.appendChild(group);
             }
             tvDrawingDefs.forEach(def => {
@@ -22041,6 +22133,22 @@ def index():
             const drawGroup = makeGroup('draw');
             const actionsGroup = makeGroup('actions');
             renderStrikeOverlayControls(toolbarMain);
+            const profilesGroup = makeGroup('profiles');
+            const vpToggle = btn('VP', 'Toggle price-axis volume profile', () => {
+                const current = !!(document.getElementById('vp_enabled') && document.getElementById('vp_enabled').checked);
+                setTVProfileToggle('vp', !current);
+            });
+            vpToggle.dataset.profileToggle = 'vp';
+            vpToggle.setAttribute('aria-pressed', 'false');
+            addToGroup(profilesGroup, vpToggle);
+            const tpoToggle = btn('TPO', 'Toggle price-axis TPO market profile', () => {
+                const current = !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked);
+                setTVProfileToggle('tpo', !current);
+            });
+            tpoToggle.dataset.profileToggle = 'tpo';
+            tpoToggle.setAttribute('aria-pressed', 'false');
+            addToGroup(profilesGroup, tpoToggle);
+            syncTVProfileToolbarButtons();
             const helperGroup = document.createElement('div');
             helperGroup.className = 'tv-toolbar-group tv-toolbar-helper';
             helperGroup.dataset.group = 'contract-helper';
@@ -26956,6 +27064,7 @@ def index():
                 if (document.getElementById('fixed_vp_side')) document.getElementById('fixed_vp_side').value = vp.fixed_vp_side === 'left' ? 'left' : 'right';
                 if (document.getElementById('vp_method')) document.getElementById('vp_method').value = vp.method || 'triangular';
                 syncVolumeProfileSettingsVisibility();
+                syncTVProfileToolbarButtons();
             }
             if (settings.tpo_profile) {
                 const tpo = settings.tpo_profile;
@@ -26975,6 +27084,7 @@ def index():
                 if (document.getElementById('tpo_color')) document.getElementById('tpo_color').value = normalizeTVIndicatorColor(tpo.color, resolveCssColor('var(--accent)') || '#A78BFA');
                 if (document.getElementById('tpo_opacity')) document.getElementById('tpo_opacity').value = tpo.opacity || 0.18;
                 syncTpoProfileSettingsVisibility();
+                syncTVProfileToolbarButtons();
             }
             let nextTvActiveInds;
             if (Array.isArray(settings.tv_active_indicators)) {

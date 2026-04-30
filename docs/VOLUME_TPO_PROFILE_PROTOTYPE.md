@@ -258,10 +258,42 @@ Settings: the `tpo_profile` save/load path persists `bars_back`, `anchor_datetim
 - Render smoke on `http://127.0.0.1:5012/` confirmed the updated template loads after the summary/box controls.
 - Visual review against real current-session candles confirmed the default TPO view is readable enough for the prototype checkpoint.
 
+## TPO Expansion — Visual Readability Pass
+
+Implemented after current-session screenshot review:
+
+- Right-edge TPO now renders as a market-profile letter column instead of histogram bars with labels beside them.
+  - VP and fixed-range VP still use histogram bars.
+  - TPO gets a dedicated SVG renderer (`appendTpoLetterRows`) with monospace period letters and invisible hover bands.
+  - POC/value-area/outside-value-area distinction is carried by letter color/opacity instead of bar fill.
+  - Letters are right-aligned near the price axis and extend left toward the candles.
+- TPO VAH/VAL/POC labels now sit left of the TPO letter column.
+  - The level lines stop before the letters, so labels no longer print over crowded letter rows.
+  - Single-print `SP` labels follow the same left-side placement.
+- Price chart toolbar now includes `VP` and `TPO` buttons for quickly toggling the price-axis volume profile and TPO profile.
+  - The buttons mirror the existing drawer checkboxes and reuse the existing profile update/save-load path.
+- Compact-label behavior remains available for truly compressed rows.
+  - When row height is too small, compact mode still falls back to `(count)`.
+  - Long rows are width-clamped with a `+` suffix instead of spilling into the right price labels.
+
+Tricky parts:
+
+- **TPO direction matters.** The first letter-only pass anchored the text on the left, so rows appeared to grow rightward. The desired price-axis behavior is the opposite: anchor near the price scale and let longer TPO rows extend left into the chart.
+- **Keep VP and TPO rendering separate.** The shared profile-row renderer still draws real histograms for VP and fixed VP. TPO now has its own renderer so market-profile letters are not coupled to volume-profile bar behavior.
+- **Toolbar buttons should not create parallel state.** The new `VP` and `TPO` toolbar buttons mirror `#vp_enabled` and `#tpo_enabled`, dispatch the existing change event, and let the existing `/update_price`, save/load, and overlay draw paths do the work.
+- **Hover hit areas moved with the text anchor.** Since TPO text now extends left from the right anchor, the invisible hover bands also had to be computed from the right edge back toward the candles.
+
+Validation:
+
+- `python3 -m py_compile ezoptionsschwab.py` (only the pre-existing unrelated `\(` escape-sequence warning remains).
+- `git diff --check`
+- Fresh `http://127.0.0.1:5012/` template smoke confirmed the right-aligned TPO renderer and toolbar buttons are present.
+
 ### Still left to do
 
-- Browser-test non-default modes (`Bars Back`, `Anchor`, custom range, composite days) against real Schwab candles.
-- Tune spacing and label priority for the SP label, `(count)` compact labels, TPO letters, VAH/VAL/POC labels, right-axis price labels, key-level labels, and strike/VP overlays so the right edge stays readable when many overlays are enabled.
+- Browser-test non-default TPO modes (`Bars Back`, `Anchor`, custom range, composite days) against real Schwab candles.
+- Visual-test the toolbar toggles in-browser with live data, including save/load behavior after toggling from the toolbar rather than the drawer.
+- Continue tuning the right edge with many simultaneous overlays enabled, especially price labels, moving-average tags, key-level labels, strike labels, VP, and TPO.
 - Decide whether `block_minutes < timeframe.in_seconds(chart_tf) / 60` should be flagged in the UI. Pine indicator allows it, but with 1-minute candles a 15-minute block is fine — only relevant if the chart timeframe ever drops below 1m.
 - Implement the deferred TradingView features when the right-edge interaction model feels good:
   - Fixed-range TPO drawing tool (reusing the fixed VP anchor model: timestamp anchors first, logical fallback).
