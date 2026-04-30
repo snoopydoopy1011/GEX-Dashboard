@@ -345,4 +345,7 @@ Tricky parts of this iteration:
   - Anchored TPO drawing tool (likely shares most of the fixed-range implementation, with the end anchor tracking the latest candle).
   - Initial-balance lines (high/low from the first N blocks of the period, plus optional extensions).
   - Periodic / Daily / Weekly / Monthly / Quarterly / Monthly-OPEX / Quarterly-OPEX modes from the Pine indicator.
-- Consider exposing line-style and line-width controls for VAH/VAL/POC like the Pine version does. Low priority — the current single style is readable.
+- [x] VAH/VAL/POC line-style and line-width controls.
+  - [x] Drawer exposes `VP Line Style` / `VP Line Width` and `TPO Line Style` / `TPO Line Width` (solid/dashed/dotted, 0.5–5).
+  - [x] Applied at right-edge VP, right-edge TPO, fixed-VP, fixed-TPO, and anchored-TPO drawings via `buildLevelLineStyle()`.
+  - [x] Defaults preserve current visual (dashed, width 1); persists through `volume_profile` / `tpo_profile` save/load.

@@ -13576,6 +13576,18 @@ def index():
                             </select>
                         </div>
                         <div class="control-group">
+                            <label for="vp_level_line_style">VP Line Style:</label>
+                            <select id="vp_level_line_style">
+                                <option value="solid">Solid</option>
+                                <option value="dashed" selected>Dashed</option>
+                                <option value="dotted">Dotted</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_level_line_width">VP Line Width:</label>
+                            <input type="number" id="vp_level_line_width" min="0.5" max="5" step="0.5" value="1" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
                             <input type="checkbox" id="tpo_enabled">
                             <label for="tpo_enabled">TPO Market Profile</label>
                         </div>
@@ -13653,6 +13665,18 @@ def index():
                         <div class="control-group">
                             <label for="tpo_opacity">TPO Opacity:</label>
                             <input type="range" id="tpo_opacity" min="0.05" max="0.60" value="0.18" step="0.01">
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_level_line_style">TPO Line Style:</label>
+                            <select id="tpo_level_line_style">
+                                <option value="solid">Solid</option>
+                                <option value="dashed" selected>Dashed</option>
+                                <option value="dotted">Dotted</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_level_line_width">TPO Line Width:</label>
+                            <input type="number" id="tpo_level_line_width" min="0.5" max="5" step="0.5" value="1" style="width: 72px;">
                         </div>
                     </div>
                 </details>
@@ -16159,7 +16183,7 @@ def index():
         });
         syncVolumeProfileSettingsVisibility();
         syncTpoProfileSettingsVisibility();
-        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_show_level_labels', 'tpo_show_summary', 'tpo_color', 'tpo_opacity'].forEach(id => {
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_show_level_labels', 'tpo_show_summary', 'tpo_color', 'tpo_opacity', 'vp_level_line_style', 'vp_level_line_width', 'tpo_level_line_style', 'tpo_level_line_width'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             el.addEventListener('input', () => {
@@ -20080,6 +20104,8 @@ def index():
             const methodEl = document.getElementById('vp_method');
             const colorEl = document.getElementById('vp_color');
             const fixedSideEl = document.getElementById('fixed_vp_side');
+            const lineStyleEl = document.getElementById('vp_level_line_style');
+            const lineWidthEl = document.getElementById('vp_level_line_width');
             const colorFallback = resolveCssColor('var(--info)') || '#3B82F6';
             const fixedSide = fixedSideEl && fixedSideEl.value === 'left' ? 'left' : 'right';
             return {
@@ -20092,7 +20118,21 @@ def index():
                 method: methodEl ? methodEl.value : 'triangular',
                 color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
                 fixed_vp_side: fixedSide,
+                level_line_style: lineStyleEl && ['solid', 'dashed', 'dotted'].includes(lineStyleEl.value) ? lineStyleEl.value : 'dashed',
+                level_line_width: lineWidthEl ? Math.max(0.5, Math.min(5, parseFloat(lineWidthEl.value) || 1)) : 1,
             };
+        }
+
+        function buildLevelLineStyle(color, lineStyle, lineWidth) {
+            const parts = [];
+            if (color) parts.push(`stroke:${color}`);
+            const w = Math.max(0.5, Math.min(5, Number(lineWidth) || 1));
+            parts.push(`stroke-width:${w}`);
+            const ls = lineStyle || 'dashed';
+            if (ls === 'solid') parts.push('stroke-dasharray:none');
+            else if (ls === 'dotted') parts.push('stroke-dasharray:1 3');
+            else parts.push('stroke-dasharray:4 4');
+            return parts.join(';');
         }
 
         function syncVolumeProfileSettingsVisibility() {
@@ -20122,6 +20162,8 @@ def index():
             const compactEl = document.getElementById('tpo_compact_labels');
             const levelLabelsEl = document.getElementById('tpo_show_level_labels');
             const summaryEl = document.getElementById('tpo_show_summary');
+            const lineStyleEl = document.getElementById('tpo_level_line_style');
+            const lineWidthEl = document.getElementById('tpo_level_line_width');
             const colorFallback = resolveCssColor('var(--accent)') || '#A78BFA';
             return {
                 enabled: !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked),
@@ -20141,6 +20183,8 @@ def index():
                 show_summary: !summaryEl || summaryEl.checked,
                 color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
                 opacity: opacityEl ? Math.max(0.05, Math.min(0.60, parseFloat(opacityEl.value) || 0.18)) : 0.18,
+                level_line_style: lineStyleEl && ['solid', 'dashed', 'dotted'].includes(lineStyleEl.value) ? lineStyleEl.value : 'dashed',
+                level_line_width: lineWidthEl ? Math.max(0.5, Math.min(5, parseFloat(lineWidthEl.value) || 1)) : 1,
             };
         }
 
@@ -20767,15 +20811,17 @@ def index():
                     hoverKind: 'vp',
                     hoverLabel: 'Volume Profile',
                 });
+                const vpVaStyle = buildLevelLineStyle(vpSettings.color, vpSettings.level_line_style, vpSettings.level_line_width);
+                const vpPocStyle = buildLevelLineStyle('var(--rvol-hot)', vpSettings.level_line_style, vpSettings.level_line_width);
                 appendProfileLevelLine(group, vp.value_area_high, 'VAH', {
                     x1: Math.max(0, width - 230),
                     x2: width - 84,
-                    style: vpSettings.color ? `stroke:${vpSettings.color}` : null,
+                    style: vpVaStyle,
                 });
                 appendProfileLevelLine(group, vp.value_area_low, 'VAL', {
                     x1: Math.max(0, width - 230),
                     x2: width - 84,
-                    style: vpSettings.color ? `stroke:${vpSettings.color}` : null,
+                    style: vpVaStyle,
                 });
                 if (Number.isFinite(Number(vp.poc))) {
                     const y = tvCandleSeries.priceToCoordinate(Number(vp.poc));
@@ -20786,7 +20832,7 @@ def index():
                             y1: y,
                             x2: width - 58,
                             y2: y,
-                            style: 'stroke:var(--rvol-hot)',
+                            style: vpPocStyle,
                         }));
                         const label = createSvgEl('text', { class: 'tv-profile-label', x: width - 56, y });
                         label.textContent = 'VP POC';
@@ -20816,19 +20862,21 @@ def index():
                 const tpoLevelX1 = Math.max(0, tpoTextX - 150);
                 const tpoLevelX2 = Math.max(tpoLevelX1, tpoLevelStopX);
                 const showTpoLevelLabels = !!tpoSettings.show_level_labels;
+                const tpoVaStyle = buildLevelLineStyle(tpoSettings.color, tpoSettings.level_line_style, tpoSettings.level_line_width);
+                const tpoPocStyle = buildLevelLineStyle('var(--rvol-hot)', tpoSettings.level_line_style, tpoSettings.level_line_width);
                 appendProfileLevelLine(group, tpo.value_area_high, showTpoLevelLabels ? 'TPO VAH' : '', {
                     x1: tpoLevelX1,
                     x2: tpoLevelX2,
                     labelX: tpoLabelX,
                     labelAnchor: 'start',
-                    style: tpoSettings.color ? `stroke:${tpoSettings.color}` : null,
+                    style: tpoVaStyle,
                 });
                 appendProfileLevelLine(group, tpo.value_area_low, showTpoLevelLabels ? 'TPO VAL' : '', {
                     x1: tpoLevelX1,
                     x2: tpoLevelX2,
                     labelX: tpoLabelX,
                     labelAnchor: 'start',
-                    style: tpoSettings.color ? `stroke:${tpoSettings.color}` : null,
+                    style: tpoVaStyle,
                 });
                 if (Number.isFinite(Number(tpo.poc))) {
                     appendProfileLevelLine(group, tpo.poc, showTpoLevelLabels ? 'TPO POC' : '', {
@@ -20837,7 +20885,7 @@ def index():
                         x2: tpoLevelX2,
                         labelX: tpoLabelX,
                         labelAnchor: 'start',
-                        style: 'stroke:var(--rvol-hot)',
+                        style: tpoPocStyle,
                     });
                 }
                 if (tpoSettings.show_single_prints && Array.isArray(tpo.single_prints) && tpo.single_prints.length) {
@@ -20972,22 +21020,26 @@ def index():
                         hoverLabel: def.label || 'Fixed VP',
                     });
                 }
+                const drawingLineStyle = isTpoDrawing ? tpoSettings.level_line_style : vpSettings.level_line_style;
+                const drawingLineWidth = isTpoDrawing ? tpoSettings.level_line_width : vpSettings.level_line_width;
+                const drawingVaStyle = buildLevelLineStyle(def.color, drawingLineStyle, drawingLineWidth);
+                const drawingPocStyle = buildLevelLineStyle('var(--rvol-hot)', drawingLineStyle, drawingLineWidth);
                 appendProfileLevelLine(group, screen.profile.value_area_high, isTpoDrawing ? 'TPO VAH' : 'VAH', {
                     x1: boxX,
                     x2: boxRight,
-                    style: def.color ? `stroke:${def.color}` : null,
+                    style: drawingVaStyle,
                 });
                 appendProfileLevelLine(group, screen.profile.value_area_low, isTpoDrawing ? 'TPO VAL' : 'VAL', {
                     x1: boxX,
                     x2: boxRight,
-                    style: def.color ? `stroke:${def.color}` : null,
+                    style: drawingVaStyle,
                 });
                 if (Number.isFinite(Number(screen.profile.poc))) {
                     appendProfileLevelLine(group, screen.profile.poc, isTpoDrawing ? 'TPO POC' : 'POC', {
                         className: 'tv-profile-poc',
                         x1: boxX,
                         x2: boxRight,
-                        style: 'stroke:var(--rvol-hot)',
+                        style: drawingPocStyle,
                     });
                 }
                 svg.appendChild(group);
@@ -27538,6 +27590,8 @@ def index():
                 if (document.getElementById('vp_bin_size')) document.getElementById('vp_bin_size').value = vp.bin_size || 0.10;
                 if (document.getElementById('fixed_vp_side')) document.getElementById('fixed_vp_side').value = vp.fixed_vp_side === 'left' ? 'left' : 'right';
                 if (document.getElementById('vp_method')) document.getElementById('vp_method').value = vp.method || 'triangular';
+                if (document.getElementById('vp_level_line_style')) document.getElementById('vp_level_line_style').value = ['solid', 'dashed', 'dotted'].includes(vp.level_line_style) ? vp.level_line_style : 'dashed';
+                if (document.getElementById('vp_level_line_width')) document.getElementById('vp_level_line_width').value = Math.max(0.5, Math.min(5, parseFloat(vp.level_line_width) || 1));
                 syncVolumeProfileSettingsVisibility();
                 syncTVProfileToolbarButtons();
             }
@@ -27560,6 +27614,8 @@ def index():
                 if (document.getElementById('tpo_show_summary')) document.getElementById('tpo_show_summary').checked = tpo.show_summary !== false;
                 if (document.getElementById('tpo_color')) document.getElementById('tpo_color').value = normalizeTVIndicatorColor(tpo.color, resolveCssColor('var(--accent)') || '#A78BFA');
                 if (document.getElementById('tpo_opacity')) document.getElementById('tpo_opacity').value = tpo.opacity || 0.18;
+                if (document.getElementById('tpo_level_line_style')) document.getElementById('tpo_level_line_style').value = ['solid', 'dashed', 'dotted'].includes(tpo.level_line_style) ? tpo.level_line_style : 'dashed';
+                if (document.getElementById('tpo_level_line_width')) document.getElementById('tpo_level_line_width').value = Math.max(0.5, Math.min(5, parseFloat(tpo.level_line_width) || 1));
                 syncTpoProfileSettingsVisibility();
                 syncTVProfileToolbarButtons();
             }
