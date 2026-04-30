@@ -11693,6 +11693,36 @@ def index():
         .tv-profile-tooltip .muted {
             color: var(--fg-2);
         }
+        .tv-profile-summary {
+            position: absolute;
+            top: 8px;
+            right: 72px;
+            z-index: 57;
+            display: none;
+            min-width: 180px;
+            max-width: 260px;
+            padding: 6px 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: color-mix(in srgb, var(--bg-1) 90%, transparent);
+            color: var(--fg-1);
+            font-size: 11px;
+            line-height: 1.25;
+            pointer-events: none;
+            box-shadow: 0 10px 28px rgba(0, 0, 0, 0.30);
+        }
+        .tv-profile-summary-title {
+            color: var(--fg-0);
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .tv-profile-summary-grid {
+            display: grid;
+            grid-template-columns: auto auto;
+            justify-content: start;
+            column-gap: 12px;
+            row-gap: 2px;
+        }
         .tv-drawing-layer {
             pointer-events: none;
         }
@@ -13588,6 +13618,10 @@ def index():
                         <div class="control-group">
                             <input type="checkbox" id="tpo_show_single_prints">
                             <label for="tpo_show_single_prints">Show Single Prints</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_single_print_boxes">
+                            <label for="tpo_single_print_boxes">Box Single Prints</label>
                         </div>
                         <div class="control-group">
                             <input type="checkbox" id="tpo_compact_labels" checked>
@@ -16106,7 +16140,7 @@ def index():
         });
         syncVolumeProfileSettingsVisibility();
         syncTpoProfileSettingsVisibility();
-        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_compact_labels', 'tpo_color', 'tpo_opacity'].forEach(id => {
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_color', 'tpo_opacity'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             el.addEventListener('input', () => {
@@ -19884,10 +19918,15 @@ def index():
             if (!overlay) {
                 overlay = document.createElement('div');
                 overlay.className = 'tv-profile-overlay';
-                overlay.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>';
+                overlay.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg><div class="tv-profile-summary" aria-hidden="true"></div>';
                 const drawingOverlay = container.querySelector('.tv-drawing-overlay');
                 if (drawingOverlay) container.insertBefore(overlay, drawingOverlay);
                 else container.appendChild(overlay);
+            } else if (!overlay.querySelector('.tv-profile-summary')) {
+                const summary = document.createElement('div');
+                summary.className = 'tv-profile-summary';
+                summary.setAttribute('aria-hidden', 'true');
+                overlay.appendChild(summary);
             }
             return overlay;
         }
@@ -19939,6 +19978,7 @@ def index():
             const blockEl = document.getElementById('tpo_block_minutes');
             const vaPctEl = document.getElementById('tpo_value_area_pct');
             const singleEl = document.getElementById('tpo_show_single_prints');
+            const singleBoxesEl = document.getElementById('tpo_single_print_boxes');
             const compactEl = document.getElementById('tpo_compact_labels');
             const colorFallback = resolveCssColor('var(--accent)') || '#A78BFA';
             return {
@@ -19953,6 +19993,7 @@ def index():
                 block_minutes: blockEl ? (parseInt(blockEl.value) || 30) : 30,
                 value_area_pct: vaPctEl ? Math.max(50, Math.min(95, parseFloat(vaPctEl.value) || 70)) : 70,
                 show_single_prints: !!(singleEl && singleEl.checked),
+                single_print_boxes: !!(singleBoxesEl && singleBoxesEl.checked),
                 compact_labels: !!(compactEl && compactEl.checked),
                 color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
                 opacity: opacityEl ? Math.max(0.05, Math.min(0.60, parseFloat(opacityEl.value) || 0.18)) : 0.18,
@@ -20154,6 +20195,43 @@ def index():
             return tooltip;
         }
 
+        function updateTpoProfileSummary(tpo, settings) {
+            const overlay = ensureTVProfileOverlay();
+            const summaryEl = overlay ? overlay.querySelector('.tv-profile-summary') : null;
+            if (!summaryEl) return;
+            if (!settings || !settings.enabled || !tpo || !tpo.enabled || !Array.isArray(tpo.rows) || !tpo.rows.length) {
+                summaryEl.style.display = 'none';
+                summaryEl.innerHTML = '';
+                return;
+            }
+            const summary = tpo.summary || {};
+            const totalTpo = Number(summary.total_tpo != null ? summary.total_tpo : tpo.rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0));
+            const periods = Number(summary.period_count);
+            const singles = Number(summary.single_print_count);
+            const sessions = Number(summary.session_count);
+            const priceLow = Number(summary.price_low);
+            const priceHigh = Number(summary.price_high);
+            const modeLabelMap = {
+                session: 'Current session',
+                days: 'Composite days',
+                custom: 'Custom range',
+                bars_back: 'Bars back',
+                anchor: 'Anchor',
+            };
+            const modeLabel = modeLabelMap[tpo.mode || settings.mode] || 'TPO';
+            const rangeText = Number.isFinite(priceLow) && Number.isFinite(priceHigh) ? `${priceLow.toFixed(2)}-${priceHigh.toFixed(2)}` : '--';
+            summaryEl.innerHTML =
+                `<div class="tv-profile-summary-title">${modeLabel} TPO</div>` +
+                '<div class="tv-profile-summary-grid">' +
+                    `<span>Total</span><span>${Number.isFinite(totalTpo) ? totalTpo.toFixed(0) : '--'}</span>` +
+                    `<span>Periods</span><span>${Number.isFinite(periods) ? periods.toFixed(0) : '--'}</span>` +
+                    `<span>Singles</span><span>${Number.isFinite(singles) ? singles.toFixed(0) : '--'}</span>` +
+                    `<span>Sessions</span><span>${Number.isFinite(sessions) ? sessions.toFixed(0) : '--'}</span>` +
+                    `<span>Range</span><span>${rangeText}</span>` +
+                '</div>';
+            summaryEl.style.display = 'block';
+        }
+
         function formatProfileTooltip(rowInfo) {
             if (!rowInfo || !rowInfo.row) return '';
             const row = rowInfo.row;
@@ -20311,6 +20389,7 @@ def index():
             }
             const tpoSettings = getTpoProfileSettingsFromDom();
             const tpo = tvTpoProfilePayload;
+            updateTpoProfileSummary(tpo, tpoSettings);
             if (tpoSettings.enabled && tpo && Array.isArray(tpo.rows) && tpo.rows.length) {
                 const group = createSvgEl('g', {});
                 const totalTpo = tpo.rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
@@ -20375,6 +20454,17 @@ def index():
                         const yLow = tvCandleSeries.priceToCoordinate(Number(sp.price));
                         const yHigh = tvCandleSeries.priceToCoordinate(Number(sp.price_top));
                         if (!Number.isFinite(yLow) || !Number.isFinite(yHigh)) return;
+                        if (tpoSettings.single_print_boxes) {
+                            group.appendChild(createSvgEl('rect', {
+                                x: Math.max(0, width - 360),
+                                y: Math.min(yLow, yHigh),
+                                width: Math.max(8, (width - 236) - Math.max(0, width - 360)),
+                                height: Math.max(2, Math.abs(yHigh - yLow)),
+                                fill: 'var(--tpo-single)',
+                                opacity: 0.14,
+                                rx: 2,
+                            }));
+                        }
                         [yLow, yHigh].forEach(yPos => {
                             group.appendChild(createSvgEl('line', {
                                 x1: Math.max(0, width - 360),
@@ -26880,6 +26970,7 @@ def index():
                 if (document.getElementById('tpo_block_minutes')) document.getElementById('tpo_block_minutes').value = [15, 30, 60, 240].includes(parseInt(tpo.block_minutes)) ? String(tpo.block_minutes) : '30';
                 if (document.getElementById('tpo_value_area_pct')) document.getElementById('tpo_value_area_pct').value = tpo.value_area_pct || 70;
                 if (document.getElementById('tpo_show_single_prints')) document.getElementById('tpo_show_single_prints').checked = !!tpo.show_single_prints;
+                if (document.getElementById('tpo_single_print_boxes')) document.getElementById('tpo_single_print_boxes').checked = !!tpo.single_print_boxes;
                 if (document.getElementById('tpo_compact_labels')) document.getElementById('tpo_compact_labels').checked = tpo.compact_labels !== false;
                 if (document.getElementById('tpo_color')) document.getElementById('tpo_color').value = normalizeTVIndicatorColor(tpo.color, resolveCssColor('var(--accent)') || '#A78BFA');
                 if (document.getElementById('tpo_opacity')) document.getElementById('tpo_opacity').value = tpo.opacity || 0.18;
