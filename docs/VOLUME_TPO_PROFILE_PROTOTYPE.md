@@ -41,6 +41,8 @@ The important modeling caveat is that Schwab historical candles provide OHLCV bu
 - The existing file still emits the pre-existing Python template warning:
   - `SyntaxWarning: invalid escape sequence '\('`
 - This is visually functional prototype code, not polished chart architecture. It deliberately stays inside the single-file app and vanilla JS/SVG constraints.
+- Follow-up browser testing found that fixed-range VP could draw the selection box without visible profile bars. The SVG rows were being created, but their coordinates could land offscreen because fixed VP normalization discarded the clicked logical candle anchors after storing timestamps. Fixed VP now preserves `l1`/`l2` so the histogram rebuild uses the selected candle slice directly.
+- The first pass also wired redraw/update listeners for the VP/TPO inputs, but not the enable checkboxes. The `vp_enabled` and `tpo_enabled` controls now trigger the same refresh path as the other profile settings.
 
 ## Validation Done
 
@@ -50,10 +52,13 @@ The important modeling caveat is that Schwab historical candles provide OHLCV bu
   - TPO row generation
   - `prepare_price_chart_data()` carrying candle volume plus profile payloads
 - Local Flask server boot on prototype port `5012`.
+- Follow-up smoke on `http://127.0.0.1:5002/`:
+  - `/update_price` returned `939` candles, `70` volume-profile bins, and `10` TPO rows for SPY.
+  - Browser test confirmed a newly drawn fixed VP over real candles renders visible histogram bars.
+  - Drawing a VP range over empty/future chart space still produces no bars, which is expected because there are no candles in that selected interval.
 
 ## Left To Do
 
-- Refresh Schwab auth and visually test with real SPY candles in the browser.
 - Tune overlay spacing so right-axis VP, TPO letters, price labels, and existing strike overlays do not crowd each other.
 - Add hover tooltip details for VP/TPO rows: price, modeled volume, percent of max, TPO letters/count.
 - Improve fixed-range VP editing:

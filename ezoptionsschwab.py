@@ -15793,7 +15793,7 @@ def index():
             normalizeTopOICountInput();
             updateData();
         });
-        ['vp_mode', 'vp_days', 'vp_bin_size', 'vp_method', 'tpo_bin_size'].forEach(id => {
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_bin_size', 'vp_method', 'tpo_enabled', 'tpo_bin_size'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             el.addEventListener('input', () => {
@@ -17520,10 +17520,10 @@ def index():
                 if (Number.isFinite(Number(normalized.time))) {
                     normalized.logical = null;
                 }
-                if (Number.isFinite(Number(normalized.t1))) {
+                if (normalized.type !== 'fixed_vp' && Number.isFinite(Number(normalized.t1))) {
                     normalized.l1 = null;
                 }
-                if (Number.isFinite(Number(normalized.t2))) {
+                if (normalized.type !== 'fixed_vp' && Number.isFinite(Number(normalized.t2))) {
                     normalized.l2 = null;
                 }
                 if (Number.isFinite(Number(normalized.t3))) {
