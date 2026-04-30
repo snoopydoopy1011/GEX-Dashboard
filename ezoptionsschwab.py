@@ -11902,6 +11902,56 @@ def index():
         .tv-ohlc-tooltip .tt-time { color: #aaa; font-size: 10px; margin-bottom: 2px; }
         .tv-ohlc-tooltip .tt-up   { color: var(--call); }
         .tv-ohlc-tooltip .tt-dn   { color: var(--put); }
+        .tv-cum-rvol-badge {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 45;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            width: auto !important;
+            height: auto !important;
+            min-width: 0 !important;
+            min-height: 0 !important;
+            max-width: calc(100% - 160px) !important;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: var(--fg-1);
+            box-shadow: none;
+            flex: none !important;
+            align-self: flex-start !important;
+            pointer-events: none;
+            white-space: nowrap;
+            font-family: 'Courier New', monospace;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.2;
+        }
+        .tv-cum-rvol-badge .label {
+            color: var(--fg-2);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .tv-cum-rvol-badge .value {
+            color: var(--fg-0);
+            font-size: 13px;
+            font-weight: 800;
+        }
+        .tv-cum-rvol-badge .detail {
+            color: var(--fg-2);
+            font-size: 10px;
+        }
+        .tv-cum-rvol-badge.tier-cool .value { color: var(--fg-1); }
+        .tv-cum-rvol-badge.tier-normal .value { color: var(--fg-0); }
+        .tv-cum-rvol-badge.tier-elevated .value { color: var(--info); }
+        .tv-cum-rvol-badge.tier-hot .value { color: var(--warn); }
+        .tv-cum-rvol-badge.tier-extreme .value {
+            color: var(--rvol-hot);
+            text-shadow: 0 0 10px color-mix(in srgb, var(--rvol-hot) 45%, transparent);
+        }
         .tv-rvol-marker-layer {
             position: absolute;
             inset: 0;
@@ -13422,6 +13472,59 @@ def index():
         let tvRvolMarkerLayer = null;
         let tvRvolMarkerDrawPending = false;
         let tvVolumeMetaByTime = {};
+        function fmtVolumeCompact(n) {
+            if (n == null || !Number.isFinite(Number(n))) return '—';
+            const val = Number(n);
+            const abs = Math.abs(val);
+            if (abs >= 1e9) return (val / 1e9).toFixed(2) + 'B';
+            if (abs >= 1e6) return (val / 1e6).toFixed(2) + 'M';
+            if (abs >= 1e3) return (val / 1e3).toFixed(0) + 'K';
+            return Math.round(val).toLocaleString();
+        }
+        function ensureCumRvolBadge() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let badge = container.querySelector('.tv-cum-rvol-badge');
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'tv-cum-rvol-badge';
+                badge.id = 'tv-cum-rvol-badge';
+                badge.innerHTML = '<span class="label">Cum RVOL</span><span class="value" data-cum-rvol-value>—</span><span class="detail" data-cum-rvol-detail>—</span>';
+                container.appendChild(badge);
+            }
+            return badge;
+        }
+        function updateCumRvolBadge(meta) {
+            const badge = ensureCumRvolBadge();
+            if (!badge) return;
+            const rvol = Number(meta && meta.cum_rvol);
+            const baseline = Number(meta && meta.cum_baseline);
+            if (!Number.isFinite(rvol) || !Number.isFinite(baseline) || baseline <= 0) {
+                badge.style.display = 'none';
+                return;
+            }
+            const value = badge.querySelector('[data-cum-rvol-value]');
+            const detail = badge.querySelector('[data-cum-rvol-detail]');
+            if (value) value.textContent = rvol.toFixed(2) + 'x';
+            if (detail) detail.textContent = fmtVolumeCompact(Number(meta.cum_volume || 0)) + ' / ' + fmtVolumeCompact(baseline);
+            badge.classList.remove('tier-cool', 'tier-normal', 'tier-elevated', 'tier-hot', 'tier-extreme');
+            badge.classList.add(
+                rvol >= 3.0 ? 'tier-extreme' :
+                rvol >= 2.0 ? 'tier-hot' :
+                rvol >= 1.5 ? 'tier-elevated' :
+                rvol >= 1.0 ? 'tier-normal' :
+                'tier-cool'
+            );
+            badge.style.display = 'inline-flex';
+        }
+        function latestCumRvolMeta(volumeBars) {
+            if (!Array.isArray(volumeBars) || !volumeBars.length) return null;
+            for (let i = volumeBars.length - 1; i >= 0; i -= 1) {
+                const bar = volumeBars[i];
+                if (bar && Number.isFinite(Number(bar.cum_rvol)) && Number.isFinite(Number(bar.cum_baseline))) return bar;
+            }
+            return null;
+        }
         function rvolKeyFromTime(tsSeconds) {
             // Lightweight Charts time is UTC seconds; convert to ET HH:MM.
             const d = new Date(tsSeconds * 1000);
@@ -14616,6 +14719,7 @@ def index():
                     cum_volume: cumVolume,
                     cum_rvol: cumBaseline ? cumVolume / cumBaseline : null,
                 };
+                updateCumRvolBadge(tvVolumeMetaByTime[String(displayBar.time)]);
                 tvVolumeSeries.update({
                     time:  displayBar.time,
                     value: displayBar.volume || 0,
@@ -21367,6 +21471,7 @@ def index():
                 _tip.className = 'tv-ohlc-tooltip';
                 _tip.id = 'tv-ohlc-tooltip';
                 container.appendChild(_tip);
+                ensureCumRvolBadge();
 
                 tvPriceChart.subscribeCrosshairMove(function(param) {
                     const tip = document.getElementById('tv-ohlc-tooltip');
@@ -21387,7 +21492,7 @@ def index():
                     const cls = isUp ? 'tt-up' : 'tt-dn';
                     const chg = bar.open !== 0 ? ((bar.close - bar.open) / bar.open * 100).toFixed(2) : '0.00';
                     const fmt = v => v != null ? v.toFixed(2) : '--';
-                    const fmtVol = v => v >= 1e6 ? (v/1e6).toFixed(2)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'K' : (v||0).toString();
+                    const fmtVol = fmtVolumeCompact;
                     const volMeta = tvVolumeMetaByTime[String(param.time)] || {};
                     const shownRvol = Number.isFinite(volMeta.display_rvol) ? volMeta.display_rvol : volMeta.rvol;
                     const rvolLine = (Number.isFinite(shownRvol) && volMeta.baseline)
@@ -21460,6 +21565,7 @@ def index():
             const volumeBars = priceData.volume || [];
             applyRvolColors(volumeBars, callColor, putColor);
             indexVolumeMeta(volumeBars);
+            updateCumRvolBadge(latestCumRvolMeta(volumeBars));
             tvVolumeSeries.setData(volumeBars);
             if (tvVolumeBaselineSeries) {
                 applyRvolBaselineStyle();
