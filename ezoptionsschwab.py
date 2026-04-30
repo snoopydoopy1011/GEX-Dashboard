@@ -20353,14 +20353,18 @@ def index():
                 const compactLabels = tpoSettings.compact_labels !== false;
                 const tpoBin = tpo.bin_size || tpoSettings.bin_size || 0.25;
                 tpo.rows.forEach(row => {
-                    if (!row || !row.letters) return;
+                    if (!row) return;
+                    const hasLetters = !!row.letters;
+                    const count = Number(row.count) || 0;
+                    if (!hasLetters && !count) return;
                     const y = tvCandleSeries.priceToCoordinate(Number(row.price));
                     if (!Number.isFinite(y)) return;
                     const yBin = tvCandleSeries.priceToCoordinate(Number(row.price) + tpoBin);
                     const rowH = Number.isFinite(yBin) ? Math.abs(yBin - y) : 8;
                     const label = createSvgEl('text', { class: 'tv-profile-label', x: width - 226, y });
-                    if (compactLabels && rowH < 9) {
-                        label.textContent = `(${row.count})`;
+                    const useCount = (compactLabels && rowH < 9) || !hasLetters;
+                    if (useCount) {
+                        label.textContent = `(${count})`;
                     } else {
                         label.textContent = String(row.letters).slice(0, 14);
                     }

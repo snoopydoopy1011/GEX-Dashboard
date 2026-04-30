@@ -145,41 +145,39 @@ Current implementation already covers part of this:
 
 ### TPO Expansion Todos
 
-- Add TPO operating modes:
-  - `Bars Back`: analyze the last N candles/bars from the current visible data stream. Suggested bounds: 10-500 bars.
-  - `Anchor`: analyze from a selected start date/time through the latest candle and update as new data arrives.
-  - Keep existing `Current Session`, `Composite Days`, and `Custom Date Range` modes.
-- Add configurable TPO block time.
-  - Replace the hardcoded 30-minute period calculation with a setting such as `block_minutes`.
-  - Start with practical options: 15, 30, 60, 240.
-  - Ensure period letters or labels remain stable and readable for multi-session composites.
-- Add configurable value-area percentage.
-  - Current value area is fixed at 70%.
-  - Add a bounded setting, likely 50-95%.
-  - Thread this through `_profile_value_area()`, `build_tpo_profile_payload()`, client settings, save/load, and overlay labels/tooltips.
-- Add single-print detection.
-  - Detect price rows touched by exactly one TPO period/block in the selected profile.
-  - Return single-print metadata from `build_tpo_profile_payload()`.
-  - Draw single prints distinctly, preferably purple using an existing/new CSS token rather than raw neon literals.
-  - Support a first-pass display as horizontal lines; consider boxes after the line behavior is stable.
-  - Include single-print status in TPO hover details.
-- Improve dense TPO label handling.
-  - Current labels slice recent letters to a compact string.
-  - Add a strategy for crowded rows: hide letters below a row-height threshold, show count-only labels, or move full letters into hover.
-  - Avoid collisions with VP labels, price labels, strike overlays, and POC/VAH/VAL labels.
-- Consider fixed-range TPO drawing.
+Status legend: `[x]` shipped on `codex/volume-tpo-profile-prototype` in Phase 1, `[ ]` still open. See "TPO Expansion — Phase 1 Implementation" below for what shipped.
+
+- [x] Add TPO operating modes:
+  - [x] `Bars Back`: analyze the last N candles/bars (clamped 10-500, default 200).
+  - [x] `Anchor`: analyze from a selected datetime through the latest candle.
+  - [x] Keep existing `Current Session`, `Composite Days`, and `Custom Date Range` modes.
+- [x] Add configurable TPO block time.
+  - [x] Replaced the hardcoded 30-minute period with a `block_minutes` setting.
+  - [x] Options: 15, 30, 60, 240. Invalid values fall back to 30.
+  - [x] Per-price counts now use `(session_key, block_index)` tuples so multi-session composites stay correct.
+- [x] Add configurable value-area percentage.
+  - [x] Bounded 50-95, default 70.
+  - [x] Threaded through `_profile_value_area()` (new `target` parameter), `build_tpo_profile_payload()`, client settings, save/load, and tooltip text.
+- [x] Add single-print detection (toggle-gated via `#tpo_show_single_prints`).
+  - [x] Per-row `is_single_print` flag and a dedicated `single_prints` list on the payload.
+  - [x] Drawn as dashed horizontal lines using a new `--tpo-single` CSS token (purple, no neon literal).
+  - [x] Single-print status surfaced in TPO hover.
+  - [ ] Boxes display option (lines-only for now).
+- [x] Improve dense TPO label handling (toggle-gated via `#tpo_compact_labels`, default on).
+  - [x] When row pixel height is below threshold the letter string is replaced with `(count)`.
+  - [ ] Avoid collisions with VP labels, price labels, strike overlays, POC/VAH/VAL labels — needs browser tuning with real Schwab candles.
+- [ ] Consider fixed-range TPO drawing.
   - Add a `TPO Range` drawing tool after right-edge modes are stable.
   - Reuse the fixed VP anchor model where possible: saved timestamp anchors first, logical indexes as fallback.
   - The selected drawing editor should expose TPO-specific bin/block/value-area settings only for TPO drawings.
-- Consider anchored TPO drawing.
+- [ ] Consider anchored TPO drawing.
   - A chart anchor should create a live profile from that timestamp to the latest candle.
   - This may share most of the fixed-range TPO implementation, with the end anchor implicitly tracking the latest candle.
-- Add initial-balance levels as a follow-up candidate.
+- [ ] Add initial-balance levels as a follow-up candidate.
   - Compute IB high/low from the first configurable N minutes of the selected session/range.
   - Draw IB high/low and optional extensions only after the core TPO mode work is stable.
-- Add TPO summary metadata.
-  - Return compact stats such as POC, VAH, VAL, range, total TPO count, single-print count, and selected period count.
-  - Surface these in hover or a small profile summary rather than adding more persistent chart clutter.
+- [x] TPO summary metadata returned on the payload (`total_tpo`, `period_count`, `single_print_count`, `price_high`, `price_low`, `session_count`).
+  - [ ] Surface in a compact profile-summary panel rather than only via hover.
 
 ### Suggested Implementation Order
 
