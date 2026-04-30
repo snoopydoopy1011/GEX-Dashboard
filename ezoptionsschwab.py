@@ -6919,6 +6919,11 @@ def _build_modeled_volume_bins(candles, bin_size=0.10, method='triangular'):
 
 
 def _profile_value_area(rows, value_key, price_key='price', target=0.70):
+    try:
+        target = float(target)
+    except Exception:
+        target = 0.70
+    target = max(0.05, min(0.99, target))
     clean_rows = []
     for row in rows or []:
         try:
@@ -6998,28 +7003,71 @@ def build_tpo_profile_payload(candles, settings=None, tz=None):
     tz = tz or pytz.timezone('US/Eastern')
     bin_size = _normalize_profile_bin_size(settings.get('bin_size'), default=0.25)
     mode = str(settings.get('mode') or 'session').lower()
+    valid_modes = ('session', 'days', 'custom', 'bars_back', 'anchor')
+    if mode not in valid_modes:
+        mode = 'session'
     try:
         days = max(1, min(20, int(settings.get('days') or 3)))
     except Exception:
         days = 3
+    try:
+        bars_back = max(10, min(500, int(settings.get('bars_back') or 200)))
+    except Exception:
+        bars_back = 200
+    try:
+        block_minutes = int(settings.get('block_minutes') or 30)
+    except Exception:
+        block_minutes = 30
+    if block_minutes not in (15, 30, 60, 240):
+        block_minutes = 30
+    try:
+        value_area_pct = float(settings.get('value_area_pct') or 70)
+    except Exception:
+        value_area_pct = 70.0
+    value_area_pct = max(50.0, min(95.0, value_area_pct))
+    show_single_prints = bool(settings.get('show_single_prints'))
+
     if mode == 'days':
         selected = _filter_profile_candles(candles, {'mode': 'days', 'days': days}, tz)
     elif mode == 'custom':
         selected = _filter_profile_candles(candles, {'mode': 'custom', 'start_date': settings.get('start_date'), 'end_date': settings.get('end_date')}, tz)
+    elif mode == 'bars_back':
+        selected = list(candles or [])[-bars_back:]
+    elif mode == 'anchor':
+        anchor_raw = str(settings.get('anchor_datetime') or '').strip()
+        anchor_ms = None
+        if anchor_raw:
+            for fmt in ('%Y-%m-%dT%H:%M', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+                try:
+                    dt_anchor = datetime.strptime(anchor_raw, fmt)
+                    if dt_anchor.tzinfo is None:
+                        dt_anchor = tz.localize(dt_anchor)
+                    anchor_ms = int(dt_anchor.timestamp() * 1000)
+                    break
+                except Exception:
+                    continue
+        if anchor_ms is None:
+            selected = _filter_profile_candles(candles, {'mode': 'session'}, tz)
+        else:
+            selected = [c for c in (candles or []) if int(c.get('datetime') or 0) >= anchor_ms]
     else:
         selected = _filter_profile_candles(candles, {'mode': 'session'}, tz)
+
     session_candles = selected
     letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
     rows = {}
     session_keys = []
+    block_period_keys_per_price = {}
     for c in session_candles:
         try:
             dt = datetime.fromtimestamp(c['datetime'] / 1000, tz)
-            period = max(0, min(len(letters) - 1, ((dt.hour * 60 + dt.minute) - 570) // 30))
-            letter = letters[period]
+            session_key = dt.date().isoformat()
+            minute_of_day = dt.hour * 60 + dt.minute
+            block_index = (minute_of_day - 570) // block_minutes if block_minutes > 0 else 0
+            letter = letters[max(0, min(len(letters) - 1, block_index))]
+            block_period_key = (session_key, block_index)
             low = float(c.get('low'))
             high = float(c.get('high'))
-            session_key = dt.date().isoformat()
         except Exception:
             continue
         if not np.isfinite(low) or not np.isfinite(high):
@@ -7034,11 +7082,12 @@ def build_tpo_profile_payload(candles, settings=None, tz=None):
             price = round(i * bin_size, 4)
             bucket = rows.setdefault(price, {})
             bucket.setdefault(session_key, set()).add(letter)
+            block_period_keys_per_price.setdefault(price, set()).add(block_period_key)
     output = []
     for price, session_map in sorted(rows.items()):
         latest_key = session_keys[-1] if session_keys else ''
         latest_letters = session_map.get(latest_key, set())
-        count = sum(len(vals) for vals in session_map.values())
+        count = len(block_period_keys_per_price.get(price, set()))
         output.append({
             'price': price,
             'letters': ''.join(sorted(latest_letters, key=letters.index)),
@@ -7050,27 +7099,57 @@ def build_tpo_profile_payload(candles, settings=None, tz=None):
             ],
         })
     max_count = max((row['count'] for row in output), default=0)
-    val, vah, poc, va_prices = _profile_value_area(output, 'count')
+    val, vah, poc, va_prices = _profile_value_area(output, 'count', target=value_area_pct / 100.0)
     for row in output:
         try:
             row['in_value_area'] = float(row['price']) in va_prices
         except Exception:
             row['in_value_area'] = False
+    single_prints = []
+    single_print_count = 0
+    for row in output:
+        is_single = row['count'] == 1
+        if show_single_prints:
+            row['is_single_print'] = is_single
+            if is_single:
+                single_prints.append({
+                    'price': row['price'],
+                    'price_top': round(float(row['price']) + bin_size, 4),
+                })
+        else:
+            row['is_single_print'] = False
+        if is_single:
+            single_print_count += 1
+    total_tpo = sum(row['count'] for row in output)
+    summary = {
+        'total_tpo': total_tpo,
+        'period_count': len(set().union(*block_period_keys_per_price.values())) if block_period_keys_per_price else 0,
+        'single_print_count': single_print_count,
+        'price_high': max((row['price'] for row in output), default=None),
+        'price_low': min((row['price'] for row in output), default=None),
+        'session_count': len(session_keys),
+    }
     return {
         'enabled': True,
-        'mode': mode if mode in ['session', 'days', 'custom'] else 'session',
+        'mode': mode,
         'days': days,
+        'bars_back': bars_back,
+        'anchor_datetime': str(settings.get('anchor_datetime') or ''),
         'start_date': settings.get('start_date') or '',
         'end_date': settings.get('end_date') or '',
         'bin_size': bin_size,
-        'period_minutes': 30,
+        'period_minutes': block_minutes,
+        'block_minutes': block_minutes,
+        'value_area_pct': value_area_pct,
+        'show_single_prints': show_single_prints,
         'poc': poc,
         'value_area_low': val,
         'value_area_high': vah,
-        'value_area_pct': 70,
         'sessions': session_keys,
         'max_count': max_count,
         'rows': output,
+        'single_prints': single_prints,
+        'summary': summary,
     }
 
 
@@ -8916,7 +8995,7 @@ def index():
             --border:#2A313B; --border-strong:#3A424F;
             --fg-0:#E5E7EB; --fg-1:#9CA3AF; --fg-2:#6B7280;
             --call:#10B981; --put:#EF4444; --accent:#3B82F6;
-            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37; --rvol-hot:#EC4899;
+            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37; --rvol-hot:#EC4899; --tpo-single:#A855F7;
             --radius:6px; --radius-lg:10px;
             --font-ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
             --font-mono:"SF Mono","JetBrains Mono",Menlo,monospace;
@@ -13469,6 +13548,8 @@ def index():
                                 <option value="session" selected>Current Session</option>
                                 <option value="days">Composite Days</option>
                                 <option value="custom">Custom Date Range</option>
+                                <option value="bars_back">Bars Back</option>
+                                <option value="anchor">Anchor</option>
                             </select>
                         </div>
                         <div class="control-group" id="tpo_days_row">
@@ -13482,6 +13563,35 @@ def index():
                         <div class="control-group" id="tpo_custom_end_row">
                             <label for="tpo_end_date">TPO End:</label>
                             <input type="date" id="tpo_end_date">
+                        </div>
+                        <div class="control-group" id="tpo_bars_back_row">
+                            <label for="tpo_bars_back">TPO Bars Back:</label>
+                            <input type="number" id="tpo_bars_back" min="10" max="500" value="200" step="10" style="width: 72px;">
+                        </div>
+                        <div class="control-group" id="tpo_anchor_row">
+                            <label for="tpo_anchor_datetime">TPO Anchor:</label>
+                            <input type="datetime-local" id="tpo_anchor_datetime">
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_block_minutes">TPO Block:</label>
+                            <select id="tpo_block_minutes">
+                                <option value="15">15 min</option>
+                                <option value="30" selected>30 min</option>
+                                <option value="60">60 min</option>
+                                <option value="240">240 min</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_value_area_pct">TPO Value Area %:</label>
+                            <input type="number" id="tpo_value_area_pct" min="50" max="95" value="70" step="1" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_show_single_prints">
+                            <label for="tpo_show_single_prints">Show Single Prints</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_compact_labels" checked>
+                            <label for="tpo_compact_labels">Compact Labels (hide letters when crowded)</label>
                         </div>
                         <div class="control-group">
                             <label for="tpo_color">TPO Color:</label>
@@ -15996,7 +16106,7 @@ def index():
         });
         syncVolumeProfileSettingsVisibility();
         syncTpoProfileSettingsVisibility();
-        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_color', 'tpo_opacity'].forEach(id => {
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_compact_labels', 'tpo_color', 'tpo_opacity'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             el.addEventListener('input', () => {
@@ -19824,6 +19934,12 @@ def index():
             const endEl = document.getElementById('tpo_end_date');
             const colorEl = document.getElementById('tpo_color');
             const opacityEl = document.getElementById('tpo_opacity');
+            const barsBackEl = document.getElementById('tpo_bars_back');
+            const anchorEl = document.getElementById('tpo_anchor_datetime');
+            const blockEl = document.getElementById('tpo_block_minutes');
+            const vaPctEl = document.getElementById('tpo_value_area_pct');
+            const singleEl = document.getElementById('tpo_show_single_prints');
+            const compactEl = document.getElementById('tpo_compact_labels');
             const colorFallback = resolveCssColor('var(--accent)') || '#A78BFA';
             return {
                 enabled: !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked),
@@ -19832,6 +19948,12 @@ def index():
                 days: daysEl ? Math.max(1, Math.min(20, parseInt(daysEl.value) || 3)) : 3,
                 start_date: startEl ? String(startEl.value || '') : '',
                 end_date: endEl ? String(endEl.value || '') : '',
+                bars_back: barsBackEl ? Math.max(10, Math.min(500, parseInt(barsBackEl.value) || 200)) : 200,
+                anchor_datetime: anchorEl ? String(anchorEl.value || '') : '',
+                block_minutes: blockEl ? (parseInt(blockEl.value) || 30) : 30,
+                value_area_pct: vaPctEl ? Math.max(50, Math.min(95, parseFloat(vaPctEl.value) || 70)) : 70,
+                show_single_prints: !!(singleEl && singleEl.checked),
+                compact_labels: !!(compactEl && compactEl.checked),
                 color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
                 opacity: opacityEl ? Math.max(0.05, Math.min(0.60, parseFloat(opacityEl.value) || 0.18)) : 0.18,
             };
@@ -19842,9 +19964,13 @@ def index():
             const daysRow = document.getElementById('tpo_days_row');
             const startRow = document.getElementById('tpo_custom_start_row');
             const endRow = document.getElementById('tpo_custom_end_row');
+            const barsRow = document.getElementById('tpo_bars_back_row');
+            const anchorRow = document.getElementById('tpo_anchor_row');
             if (daysRow) daysRow.style.display = mode === 'days' ? 'flex' : 'none';
             if (startRow) startRow.style.display = mode === 'custom' ? 'flex' : 'none';
             if (endRow) endRow.style.display = mode === 'custom' ? 'flex' : 'none';
+            if (barsRow) barsRow.style.display = mode === 'bars_back' ? 'flex' : 'none';
+            if (anchorRow) anchorRow.style.display = mode === 'anchor' ? 'flex' : 'none';
         }
 
         function buildModeledProfileFromCandles(candles, settings, fromLogical = null, toLogical = null, fromTime = null, toTime = null) {
@@ -19988,6 +20114,7 @@ def index():
                         maxValue,
                         total: options.total || 0,
                         binSize: options.binSize || 0,
+                        valueAreaPct: options.valueAreaPct,
                     });
                 }
             });
@@ -20047,8 +20174,13 @@ def index():
                     const sessionText = row.sessions.slice(-3).map(s => `${s.date}:${s.letters}`).join(' ');
                     lines.push(`<div class="tt-row muted"><span>Sessions</span><span>${sessionText}</span></div>`);
                 }
+                if (row.is_single_print) {
+                    lines.push('<div class="tt-row muted"><span>Single Print</span><span style="color:var(--tpo-single)">Yes</span></div>');
+                }
             }
-            if (row.in_value_area) lines.push('<div class="tt-row muted"><span>Value area</span><span>Inside 70%</span></div>');
+            const vaPct = Number(rowInfo.valueAreaPct);
+            const vaPctText = Number.isFinite(vaPct) ? `${vaPct.toFixed(0)}%` : '70%';
+            if (row.in_value_area) lines.push(`<div class="tt-row muted"><span>Value area</span><span>Inside ${vaPctText}</span></div>`);
             return lines.join('');
         }
 
@@ -20198,6 +20330,7 @@ def index():
                     total: totalTpo,
                     hoverKind: 'tpo',
                     hoverLabel: 'TPO Profile',
+                    valueAreaPct: tpo.value_area_pct,
                 });
                 appendProfileLevelLine(group, tpo.value_area_high, 'TPO VAH', {
                     x1: Math.max(0, width - 360),
@@ -20217,14 +20350,46 @@ def index():
                         style: 'stroke:var(--rvol-hot)',
                     });
                 }
+                const compactLabels = tpoSettings.compact_labels !== false;
+                const tpoBin = tpo.bin_size || tpoSettings.bin_size || 0.25;
                 tpo.rows.forEach(row => {
                     if (!row || !row.letters) return;
                     const y = tvCandleSeries.priceToCoordinate(Number(row.price));
                     if (!Number.isFinite(y)) return;
+                    const yBin = tvCandleSeries.priceToCoordinate(Number(row.price) + tpoBin);
+                    const rowH = Number.isFinite(yBin) ? Math.abs(yBin - y) : 8;
                     const label = createSvgEl('text', { class: 'tv-profile-label', x: width - 226, y });
-                    label.textContent = String(row.letters).slice(0, 14);
+                    if (compactLabels && rowH < 9) {
+                        label.textContent = `(${row.count})`;
+                    } else {
+                        label.textContent = String(row.letters).slice(0, 14);
+                    }
                     group.appendChild(label);
                 });
+                if (tpoSettings.show_single_prints && Array.isArray(tpo.single_prints) && tpo.single_prints.length) {
+                    tpo.single_prints.forEach(sp => {
+                        const yLow = tvCandleSeries.priceToCoordinate(Number(sp.price));
+                        const yHigh = tvCandleSeries.priceToCoordinate(Number(sp.price_top));
+                        if (!Number.isFinite(yLow) || !Number.isFinite(yHigh)) return;
+                        [yLow, yHigh].forEach(yPos => {
+                            group.appendChild(createSvgEl('line', {
+                                x1: Math.max(0, width - 360),
+                                y1: yPos,
+                                x2: width - 236,
+                                y2: yPos,
+                                style: 'stroke:var(--tpo-single);stroke-width:1.5;stroke-dasharray:4,3;',
+                            }));
+                        });
+                        const spLabel = createSvgEl('text', {
+                            class: 'tv-profile-label',
+                            x: width - 232,
+                            y: (yLow + yHigh) / 2,
+                            style: 'fill:var(--tpo-single);',
+                        });
+                        spLabel.textContent = 'SP';
+                        group.appendChild(spLabel);
+                    });
+                }
                 svg.appendChild(group);
             }
             tvDrawingDefs.forEach(def => {
@@ -26702,10 +26867,16 @@ def index():
                 const tpo = settings.tpo_profile;
                 if (document.getElementById('tpo_enabled')) document.getElementById('tpo_enabled').checked = !!tpo.enabled;
                 if (document.getElementById('tpo_bin_size')) document.getElementById('tpo_bin_size').value = tpo.bin_size || 0.25;
-                if (document.getElementById('tpo_mode')) document.getElementById('tpo_mode').value = ['session', 'days', 'custom'].includes(tpo.mode) ? tpo.mode : 'session';
+                if (document.getElementById('tpo_mode')) document.getElementById('tpo_mode').value = ['session', 'days', 'custom', 'bars_back', 'anchor'].includes(tpo.mode) ? tpo.mode : 'session';
                 if (document.getElementById('tpo_days')) document.getElementById('tpo_days').value = tpo.days || 3;
                 if (document.getElementById('tpo_start_date')) document.getElementById('tpo_start_date').value = tpo.start_date || '';
                 if (document.getElementById('tpo_end_date')) document.getElementById('tpo_end_date').value = tpo.end_date || '';
+                if (document.getElementById('tpo_bars_back')) document.getElementById('tpo_bars_back').value = tpo.bars_back || 200;
+                if (document.getElementById('tpo_anchor_datetime')) document.getElementById('tpo_anchor_datetime').value = tpo.anchor_datetime || '';
+                if (document.getElementById('tpo_block_minutes')) document.getElementById('tpo_block_minutes').value = [15, 30, 60, 240].includes(parseInt(tpo.block_minutes)) ? String(tpo.block_minutes) : '30';
+                if (document.getElementById('tpo_value_area_pct')) document.getElementById('tpo_value_area_pct').value = tpo.value_area_pct || 70;
+                if (document.getElementById('tpo_show_single_prints')) document.getElementById('tpo_show_single_prints').checked = !!tpo.show_single_prints;
+                if (document.getElementById('tpo_compact_labels')) document.getElementById('tpo_compact_labels').checked = tpo.compact_labels !== false;
                 if (document.getElementById('tpo_color')) document.getElementById('tpo_color').value = normalizeTVIndicatorColor(tpo.color, resolveCssColor('var(--accent)') || '#A78BFA');
                 if (document.getElementById('tpo_opacity')) document.getElementById('tpo_opacity').value = tpo.opacity || 0.18;
                 syncTpoProfileSettingsVisibility();
