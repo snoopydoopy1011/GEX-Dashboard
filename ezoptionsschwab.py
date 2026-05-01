@@ -5297,8 +5297,12 @@ def _compute_session_deltas(ticker, net_gex, net_dex, scope_id=None):
     if ticker is None or net_gex is None:
         return None
     try:
-        today = datetime.now(pytz.timezone('US/Eastern')).date()
+        now_et = datetime.now(pytz.timezone('US/Eastern'))
+        today = now_et.date()
     except Exception:
+        return None
+    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now_et < market_open:
         return None
     key = (ticker, today, scope_id or 'default')
     if key not in _SESSION_BASELINE:
@@ -10107,11 +10111,11 @@ def index():
             border-top: 1px solid var(--border, #2a2f3a);
             display: flex;
             flex-direction: column;
-            gap: 3px;
+            gap: 4px;
         }
         .rail-spark-svg {
             width: 100%;
-            height: 28px;
+            height: 34px;
             display: block;
         }
         .rail-spark-zero {
@@ -10121,22 +10125,45 @@ def index():
             opacity: 0.9;
         }
         .rail-spark-line {
-            stroke-width: 1.4;
+            stroke-width: 1.55;
             fill: none;
             vector-effect: non-scaling-stroke;
             stroke-linejoin: round;
             stroke-linecap: round;
         }
         .rail-spark-gex { stroke: var(--call, #2ecc71); }
-        .rail-spark-dex { stroke: var(--put, #e74c3c); opacity: 0.92; }
+        .rail-spark-dex {
+            stroke: var(--put, #e74c3c);
+            opacity: 0.92;
+            stroke-dasharray: 3.2 2.2;
+        }
+        .rail-spark-endpoint {
+            stroke: var(--bg-1, #151922);
+            stroke-width: 1.2;
+            paint-order: stroke fill;
+        }
+        .rail-spark-endpoint.gex { fill: var(--call, #2ecc71); }
+        .rail-spark-endpoint.dex { fill: var(--put, #e74c3c); }
         .rail-spark-legend {
             display: flex;
-            justify-content: flex-end;
+            justify-content: space-between;
+            align-items: center;
             gap: 10px;
             font-size: 9px;
             color: var(--fg-2, #98a2b3);
             letter-spacing: 0.04em;
             text-transform: uppercase;
+        }
+        .rail-spark-scale {
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .rail-spark-series {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-left: auto;
         }
         .rail-spark-legend i.dot {
             display: inline-block;
@@ -13870,13 +13897,20 @@ def index():
         </aside>
 
         <dialog class="settings-modal" id="settings-modal">
-            <h3>Color &amp; Coloring</h3>
+            <h3>Display &amp; Coloring</h3>
             <div class="modal-row">
                 <label for="coloring_mode">Coloring Mode</label>
                 <select id="coloring_mode" title="Solid: All bars same color | Linear: Gradual fade by value | Ranked: Only highest exposures are bright, others heavily muted">
                     <option value="Solid" selected>Solid</option>
                     <option value="Linear Intensity">Linear Intensity</option>
                     <option value="Ranked Intensity">Ranked Intensity</option>
+                </select>
+            </div>
+            <div class="modal-row">
+                <label for="netex_spark_anchor">Sparkline Anchor</label>
+                <select id="netex_spark_anchor" title="Open: anchor the Net GEX / Net DEX sparkline to the 9:30 AM ET session open when available. First sample: anchor to the first sample captured in the browser for the day.">
+                    <option value="open" selected>9:30 AM ET Open</option>
+                    <option value="first">First Sample</option>
                 </select>
             </div>
             <div class="modal-row">
@@ -14000,15 +14034,20 @@ def index():
                                     <div class="d" data-met="net_dex_delta"></div>
                                 </div>
                             </div>
-                            <div class="rail-spark-wrap" id="rail-spark-netex" title="Intraday Net GEX (call) and Net DEX (put) — each line normalized to its own range; midline = 0">
-                                <svg class="rail-spark-svg" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true">
-                                    <line class="rail-spark-zero" x1="0" y1="14" x2="120" y2="14"></line>
+                            <div class="rail-spark-wrap" id="rail-spark-netex" title="Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — shared scale; zero = unchanged">
+                                <svg class="rail-spark-svg" viewBox="0 0 120 34" preserveAspectRatio="none" aria-hidden="true">
+                                    <line class="rail-spark-zero" x1="0" y1="17" x2="120" y2="17"></line>
                                     <polyline class="rail-spark-line rail-spark-gex" fill="none" points=""></polyline>
                                     <polyline class="rail-spark-line rail-spark-dex" fill="none" points=""></polyline>
+                                    <circle class="rail-spark-endpoint gex" r="2.3" cx="0" cy="0"></circle>
+                                    <circle class="rail-spark-endpoint dex" r="2.3" cx="0" cy="0"></circle>
                                 </svg>
                                 <div class="rail-spark-legend">
-                                    <span><i class="dot gex"></i>GEX</span>
-                                    <span><i class="dot dex"></i>DEX</span>
+                                    <span class="rail-spark-scale">Δ open</span>
+                                    <div class="rail-spark-series">
+                                        <span><i class="dot gex"></i>GEX</span>
+                                        <span><i class="dot dex"></i>DEX</span>
+                                    </div>
                                 </div>
                             </div>
                             <div class="gex-scope-pill" id="gex-scope-pill">
@@ -14635,6 +14674,15 @@ def index():
         let tvSessionLevelPrices = [];
         let tvTopOIPrices = [];
         let gexScope = (() => { try { return localStorage.getItem('gexScope') || 'all'; } catch(e) { return 'all'; } })();
+        const NETEX_SPARK_ANCHOR_KEY = 'netexSparkAnchor';
+        let netexSparkAnchorMode = (() => {
+            try {
+                const saved = localStorage.getItem(NETEX_SPARK_ANCHOR_KEY);
+                return saved === 'first' ? 'first' : 'open';
+            } catch (e) {
+                return 'open';
+            }
+        })();
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
         let tvHistoricalOverlayPending = false;
@@ -24310,15 +24358,20 @@ def index():
                                 '<div class="rail-metric"><div class="rail-card-header">Net GEX</div><div class="v" data-met="net_gex">—</div><div class="d" data-met="net_gex_delta"></div></div>' +
                                 '<div class="rail-metric"><div class="rail-card-header">Net DEX</div><div class="v" data-met="net_dex">—</div><div class="d" data-met="net_dex_delta"></div></div>' +
                             '</div>' +
-                            '<div class="rail-spark-wrap" id="rail-spark-netex" title="Intraday Net GEX (call) and Net DEX (put) — each line normalized to its own range; midline = 0">' +
-                                '<svg class="rail-spark-svg" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true">' +
-                                    '<line class="rail-spark-zero" x1="0" y1="14" x2="120" y2="14"></line>' +
+                            '<div class="rail-spark-wrap" id="rail-spark-netex" title="Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — shared scale; zero = unchanged">' +
+                                '<svg class="rail-spark-svg" viewBox="0 0 120 34" preserveAspectRatio="none" aria-hidden="true">' +
+                                    '<line class="rail-spark-zero" x1="0" y1="17" x2="120" y2="17"></line>' +
                                     '<polyline class="rail-spark-line rail-spark-gex" fill="none" points=""></polyline>' +
                                     '<polyline class="rail-spark-line rail-spark-dex" fill="none" points=""></polyline>' +
+                                    '<circle class="rail-spark-endpoint gex" r="2.3" cx="0" cy="0"></circle>' +
+                                    '<circle class="rail-spark-endpoint dex" r="2.3" cx="0" cy="0"></circle>' +
                                 '</svg>' +
                                 '<div class="rail-spark-legend">' +
-                                    '<span><i class="dot gex"></i>GEX</span>' +
-                                    '<span><i class="dot dex"></i>DEX</span>' +
+                                    '<span class="rail-spark-scale">Δ open</span>' +
+                                    '<div class="rail-spark-series">' +
+                                        '<span><i class="dot gex"></i>GEX</span>' +
+                                        '<span><i class="dot dex"></i>DEX</span>' +
+                                    '</div>' +
                                 '</div>' +
                             '</div>' +
                             '<div class="gex-scope-pill" id="gex-scope-pill"><button class="gex-scope-btn" data-scope="all">All</button><button class="gex-scope-btn" data-scope="0dte">0DTE</button></div>' +
@@ -27122,6 +27175,7 @@ def index():
                 _setMet('net_dex', '—');
                 _setMet('net_gex_delta', '');
                 _setMet('net_dex_delta', '');
+                netexSparkOpenBaseline = { g: null, d: null };
                 document.querySelectorAll('#rail-card-metrics .v').forEach(el => el.classList.remove('pos', 'neg'));
                 return;
             }
@@ -27140,6 +27194,10 @@ def index():
             const sd = stats.session_deltas || {};
             const dGex = (typeof sd.net_gex_vs_open === 'number') ? sd.net_gex_vs_open : null;
             const dDex = (typeof sd.net_dex_vs_open === 'number') ? sd.net_dex_vs_open : null;
+            netexSparkOpenBaseline = {
+                g: (typeof stats.net_gex === 'number' && dGex != null) ? (stats.net_gex - dGex) : null,
+                d: (typeof stats.net_dex === 'number' && dDex != null) ? (stats.net_dex - dDex) : null,
+            };
             _setMet('net_gex_delta', dGex == null ? '' : ('Δ ' + (dGex > 0 ? '+' : '') + fmtMoneyCompact(dGex)));
             _setMet('net_dex_delta', dDex == null ? '' : ('Δ ' + (dDex > 0 ? '+' : '') + fmtMoneyCompact(dDex)));
             const dGexEl = document.querySelector('#rail-card-metrics [data-met="net_gex_delta"]');
@@ -27157,10 +27215,16 @@ def index():
         }
 
         // ── Net GEX/DEX intraday sparkline ──────────────────────────────────────
-        // Per-ticker, per-day ring buffer (localStorage). Each polyline is
-        // normalized independently around 0 so very different magnitudes still
-        // share one zero midline.
+        // Per-ticker, per-day ring buffer (localStorage). Open mode anchors to
+        // the 09:30 ET session open when the browser has an open-era sample;
+        // otherwise it falls back to the live "vs open" baseline if available.
+        // First-sample mode anchors to the first captured sample of the day.
         const NETEX_SPARK_MAX = 240;
+        const NETEX_SPARK_W = 120;
+        const NETEX_SPARK_H = 34;
+        const NETEX_SPARK_MID = NETEX_SPARK_H / 2;
+        const NETEX_SPARK_AMP = 13;
+        let netexSparkOpenBaseline = { g: null, d: null };
         function _netexSparkKey() {
             const tickerEl = document.getElementById('ticker');
             const tk = tickerEl ? (tickerEl.value || '').trim().toUpperCase() : '';
@@ -27199,29 +27263,119 @@ def index():
             }
             _saveNetexSpark(samples);
         }
-        function _normalizeSparkSeries(values) {
-            // Map values into 0..28 viewBox with 14 = zero. Normalize against
-            // the absolute peak so positive/negative are symmetric around 0.
+        function _netexSparkAnchorLabel() {
+            return netexSparkAnchorMode === 'first' ? 'first' : 'open';
+        }
+        function _netexSparkOpenMs(samples) {
+            const ref = Array.isArray(samples) && samples.length && Number.isFinite(samples[0] && samples[0].t)
+                ? new Date(samples[0].t)
+                : new Date();
+            const fmt = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+            });
+            const parts = fmt.formatToParts(ref).reduce((acc, part) => {
+                if (part.type !== 'literal') acc[part.type] = part.value;
+                return acc;
+            }, {});
+            const hh = Number(parts.hour);
+            const mm = Number(parts.minute);
+            const ss = Number(parts.second);
+            if (!Number.isFinite(hh) || !Number.isFinite(mm) || !Number.isFinite(ss)) return null;
+            const elapsedMs = (((hh * 60) + mm) * 60 + ss) * 1000 + ref.getMilliseconds();
+            const openMsOfDay = ((9 * 60) + 30) * 60 * 1000;
+            return ref.getTime() - (elapsedMs - openMsOfDay);
+        }
+        function _sparkResolveBaseline(values, samples, fallbackValue) {
+            if (!Array.isArray(values) || !values.length) return null;
+            if (netexSparkAnchorMode === 'first') {
+                for (let i = 0; i < values.length; i++) {
+                    const v = values[i];
+                    if (typeof v === 'number' && isFinite(v)) return v;
+                }
+                return null;
+            }
+            const openMs = _netexSparkOpenMs(samples);
+            if (openMs != null) {
+                for (let i = 0; i < values.length; i++) {
+                    const v = values[i];
+                    const t = samples[i] && samples[i].t;
+                    if (typeof v === 'number' && isFinite(v) && Number.isFinite(t) && t >= openMs) {
+                        return v;
+                    }
+                }
+            }
+            if (typeof fallbackValue === 'number' && isFinite(fallbackValue)) return fallbackValue;
+            for (let i = 0; i < values.length; i++) {
+                const v = values[i];
+                if (typeof v === 'number' && isFinite(v)) return v;
+            }
+            return null;
+        }
+        function _sparkSeriesDelta(values, samples, fallbackValue) {
+            const baseline = _sparkResolveBaseline(values, samples, fallbackValue);
+            return values.map(v => {
+                if (typeof v !== 'number' || !isFinite(v)) return null;
+                if (baseline == null) return null;
+                return v - baseline;
+            });
+        }
+        function _sparkSeriesPeak(seriesList) {
+            let peak = 0;
+            seriesList.forEach(values => {
+                (values || []).forEach(v => {
+                    if (typeof v === 'number' && isFinite(v)) peak = Math.max(peak, Math.abs(v));
+                });
+            });
+            return peak;
+        }
+        function _normalizeSparkSeries(values, peak) {
             const finite = values.filter(v => typeof v === 'number' && isFinite(v));
             if (!finite.length) return null;
-            const peak = Math.max(1e-9, ...finite.map(v => Math.abs(v)));
-            return values.map(v => (typeof v === 'number' && isFinite(v)) ? (14 - (v / peak) * 12) : null);
+            const span = Math.max(1e-9, peak || 0);
+            return values.map(v => (typeof v === 'number' && isFinite(v))
+                ? (NETEX_SPARK_MID - (v / span) * NETEX_SPARK_AMP)
+                : null
+            );
+        }
+        function _sparkLastPoint(ys, xStep) {
+            if (!ys) return null;
+            for (let i = ys.length - 1; i >= 0; i--) {
+                const y = ys[i];
+                if (typeof y === 'number' && isFinite(y)) {
+                    return { x: i * xStep, y };
+                }
+            }
+            return null;
         }
         function renderNetExSparkline() {
             document.querySelectorAll('#rail-spark-netex').forEach(wrap => {
                 const samples = _loadNetexSpark();
                 const gexLine = wrap.querySelector('.rail-spark-gex');
                 const dexLine = wrap.querySelector('.rail-spark-dex');
+                const gexDot = wrap.querySelector('.rail-spark-endpoint.gex');
+                const dexDot = wrap.querySelector('.rail-spark-endpoint.dex');
+                const scaleEl = wrap.querySelector('.rail-spark-scale');
                 if (!gexLine || !dexLine) return;
                 if (samples.length < 2) {
                     gexLine.setAttribute('points', '');
                     dexLine.setAttribute('points', '');
+                    if (gexDot) gexDot.style.opacity = '0';
+                    if (dexDot) dexDot.style.opacity = '0';
+                    if (scaleEl) scaleEl.textContent = 'Δ ' + _netexSparkAnchorLabel();
                     return;
                 }
-                const W = 120;
-                const xStep = samples.length === 1 ? 0 : (W / (samples.length - 1));
-                const gexY = _normalizeSparkSeries(samples.map(s => s.g));
-                const dexY = _normalizeSparkSeries(samples.map(s => s.d));
+                const xStep = samples.length === 1 ? 0 : (NETEX_SPARK_W / (samples.length - 1));
+                const gexValues = samples.map(s => s.g);
+                const dexValues = samples.map(s => s.d);
+                const gexDelta = _sparkSeriesDelta(gexValues, samples, netexSparkOpenBaseline.g);
+                const dexDelta = _sparkSeriesDelta(dexValues, samples, netexSparkOpenBaseline.d);
+                const peak = _sparkSeriesPeak([gexDelta, dexDelta]);
+                const gexY = _normalizeSparkSeries(gexDelta, peak);
+                const dexY = _normalizeSparkSeries(dexDelta, peak);
                 const toPts = (ys) => {
                     if (!ys) return '';
                     const out = [];
@@ -27233,6 +27387,25 @@ def index():
                 };
                 gexLine.setAttribute('points', toPts(gexY));
                 dexLine.setAttribute('points', toPts(dexY));
+                const placeDot = (dot, point) => {
+                    if (!dot) return;
+                    if (!point) {
+                        dot.style.opacity = '0';
+                        return;
+                    }
+                    dot.setAttribute('cx', point.x.toFixed(2));
+                    dot.setAttribute('cy', point.y.toFixed(2));
+                    dot.style.opacity = '1';
+                };
+                placeDot(gexDot, _sparkLastPoint(gexY, xStep));
+                placeDot(dexDot, _sparkLastPoint(dexY, xStep));
+                const anchorLabel = _netexSparkAnchorLabel();
+                if (scaleEl) {
+                    scaleEl.textContent = peak > 0 ? ('Δ ' + anchorLabel + ' ±' + fmtMoneyCompact(peak)) : ('Δ ' + anchorLabel);
+                }
+                wrap.title = netexSparkAnchorMode === 'first'
+                    ? 'Intraday Net GEX / Net DEX drift from the first captured sample today — shared scale; zero = unchanged'
+                    : 'Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — shared scale; zero = unchanged';
             });
         }
 
@@ -28018,7 +28191,7 @@ def index():
         // Settings save/load functions
         function gatherSettings() {
             return {
-                settings_schema_version: 7,
+                settings_schema_version: 8,
                 ticker: document.getElementById('ticker').value,
                 timeframe: document.getElementById('timeframe').value,
                 strike_range: document.getElementById('strike_range').value,
@@ -28046,6 +28219,7 @@ def index():
                 highlight_max_level: document.getElementById('highlight_max_level').checked,
                 max_level_color: document.getElementById('max_level_color').value,
                 max_level_mode: document.getElementById('max_level_mode').value,
+                netex_spark_anchor: netexSparkAnchorMode,
                 gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
                 dealer_impact_verbose: !!(document.getElementById('dealer_impact_verbose') && document.getElementById('dealer_impact_verbose').checked),
                 em_range_locked: emRangeLocked,
@@ -28124,6 +28298,11 @@ def index():
             }
             if (settings.max_level_mode) {
                 document.getElementById('max_level_mode').value = settings.max_level_mode;
+            }
+            if (settings.netex_spark_anchor) {
+                setNetexSparkAnchorMode(settings.netex_spark_anchor);
+            } else {
+                setNetexSparkAnchorMode(netexSparkAnchorMode, { skipPersist: true });
             }
             if (settings.gate_alerts !== undefined) {
                 setAlertGateSetting(settings.gate_alerts);
@@ -28594,6 +28773,7 @@ def index():
         const settingsModal = document.getElementById('settings-modal');
         const indicatorSettingsModal = document.getElementById('indicator-settings-modal');
         const priceLevelSettingsModal = document.getElementById('price-level-settings-modal');
+        const netexSparkAnchorSelect = document.getElementById('netex_spark_anchor');
         document.getElementById('settingsToggle').addEventListener('click', () => {
             if (settingsModal.showModal) { settingsModal.showModal(); }
             else { settingsModal.setAttribute('open', ''); } // <dialog> fallback
@@ -28625,6 +28805,23 @@ def index():
             }
             if (document.getElementById('settings-drawer').classList.contains('open')) closeDrawer();
         });
+
+        function setNetexSparkAnchorMode(mode, options = {}) {
+            netexSparkAnchorMode = mode === 'first' ? 'first' : 'open';
+            if (netexSparkAnchorSelect && netexSparkAnchorSelect.value !== netexSparkAnchorMode) {
+                netexSparkAnchorSelect.value = netexSparkAnchorMode;
+            }
+            if (!options.skipPersist) {
+                try { localStorage.setItem(NETEX_SPARK_ANCHOR_KEY, netexSparkAnchorMode); } catch (e) {}
+            }
+            renderNetExSparkline();
+        }
+        if (netexSparkAnchorSelect) {
+            netexSparkAnchorSelect.value = netexSparkAnchorMode;
+            netexSparkAnchorSelect.addEventListener('change', () => {
+                setNetexSparkAnchorMode(netexSparkAnchorSelect.value);
+            });
+        }
 
         // Add event listener for ticker input
         document.getElementById('ticker').addEventListener('input', function(e) {
