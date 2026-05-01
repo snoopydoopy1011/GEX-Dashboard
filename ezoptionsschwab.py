@@ -17483,7 +17483,6 @@ def index():
                 }
                 if (!isTradeRailCollapsed()) {
                     tradeRailState.expiry = '';
-                    tradeRailState.selectedSymbol = '';
                     requestTradeChain({ force: true });
                 }
                 // Options cache is now populated — refresh price levels immediately.
@@ -26142,7 +26141,12 @@ def index():
                 return;
             }
             if (!rows.some(row => row.contract_symbol === tradeRailState.selectedSymbol)) {
+                const previousSymbol = tradeRailState.selectedSymbol;
                 tradeRailState.selectedSymbol = rows[0].contract_symbol;
+                if (previousSymbol !== tradeRailState.selectedSymbol) {
+                    tradeRailState.accountDetails = null;
+                    tradeRailState.accountRequestKey = '';
+                }
             }
             if (list) {
                 list.innerHTML = rows.map(row => {
@@ -26198,8 +26202,6 @@ def index():
                 tradeRailState.payload = data;
                 tradeRailState.expiry = (data.selected_expiries && data.selected_expiries[0]) || tradeRailState.expiry || '';
                 tradeRailState.loading = false;
-                tradeRailState.accountDetails = null;
-                tradeRailState.accountRequestKey = '';
                 renderTradeRail();
             })
             .catch(err => {
