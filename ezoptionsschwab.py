@@ -4969,6 +4969,84 @@ def _selected_contract_position_quantity(raw_details, contract_symbol):
     return 0.0
 
 
+def _trade_order_leg_summary(order):
+    legs = order.get('orderLegCollection') if isinstance(order, dict) else []
+    if not isinstance(legs, list):
+        legs = []
+    normalized = []
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        instrument = leg.get('instrument') if isinstance(leg.get('instrument'), dict) else {}
+        normalized.append({
+            'instruction': leg.get('instruction'),
+            'quantity': leg.get('quantity'),
+            'symbol': str(instrument.get('symbol') or '').strip(),
+            'asset_type': instrument.get('assetType'),
+            'description': instrument.get('description'),
+            'put_call': instrument.get('putCall'),
+            'underlying': instrument.get('underlyingSymbol') or instrument.get('underlying'),
+        })
+    return normalized
+
+
+def _trade_order_matches_selection(order, ticker=None, contract_symbol=None):
+    ticker = format_ticker(ticker or '')
+    contract_symbol = str(contract_symbol or '').strip()
+    if not ticker and not contract_symbol:
+        return True
+    for leg in _trade_order_leg_summary(order):
+        symbol = str(leg.get('symbol') or '').strip()
+        if contract_symbol and symbol == contract_symbol:
+            return True
+        if ticker:
+            underlying = str(leg.get('underlying') or '').upper()
+            if underlying == ticker:
+                return True
+            if symbol.upper().replace(' ', '').startswith(ticker):
+                return True
+    return False
+
+
+def _normalize_trade_orders(raw_orders, ticker=None, contract_symbol=None):
+    if isinstance(raw_orders, dict):
+        if isinstance(raw_orders.get('orders'), list):
+            raw_orders = raw_orders.get('orders')
+        elif isinstance(raw_orders.get('orderList'), list):
+            raw_orders = raw_orders.get('orderList')
+        else:
+            raw_orders = [raw_orders]
+    if not isinstance(raw_orders, list):
+        raw_orders = []
+
+    orders = []
+    for row in raw_orders:
+        if not isinstance(row, dict):
+            continue
+        if not _trade_order_matches_selection(row, ticker=ticker, contract_symbol=contract_symbol):
+            continue
+        status = str(row.get('status') or '').upper()
+        order_id = row.get('orderId') or row.get('order_id') or row.get('id')
+        legs = _trade_order_leg_summary(row)
+        orders.append({
+            'order_id': str(order_id or ''),
+            'status': status or None,
+            'entered_time': row.get('enteredTime') or row.get('entered_time'),
+            'close_time': row.get('closeTime') or row.get('close_time'),
+            'order_type': row.get('orderType'),
+            'session': row.get('session'),
+            'duration': row.get('duration'),
+            'price': row.get('price'),
+            'quantity': row.get('quantity'),
+            'filled_quantity': row.get('filledQuantity') or row.get('filled_quantity'),
+            'remaining_quantity': row.get('remainingQuantity') or row.get('remaining_quantity'),
+            'cancelable': bool(order_id and status in {'ACCEPTED', 'PENDING_ACTIVATION', 'QUEUED', 'WORKING'}),
+            'legs': legs,
+        })
+    orders.sort(key=lambda item: str(item.get('entered_time') or ''), reverse=True)
+    return orders[:50]
+
+
 def _expiration_for_dte(df, target_dte, selected_expiries=None):
     """Return the first expiration matching a DTE offset from today."""
     expiries = _expiration_series_iso(df)
@@ -10585,21 +10663,24 @@ def index():
             cursor: pointer;
         }
         .trade-balance-line,
-        .trade-position-row {
+        .trade-position-row,
+        .trade-order-row {
             margin-top: 7px;
             color: var(--fg-1);
             font-size: 11px;
             line-height: 1.35;
             font-variant-numeric: tabular-nums;
         }
-        .trade-position-row {
+        .trade-position-row,
+        .trade-order-row {
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto;
             gap: 8px;
             padding-top: 7px;
             border-top: 1px solid var(--border);
         }
-        .trade-position-symbol {
+        .trade-position-symbol,
+        .trade-order-symbol {
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -10607,11 +10688,29 @@ def index():
             color: var(--fg-0);
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
         }
-        .trade-position-meta {
+        .trade-position-meta,
+        .trade-order-meta {
             color: var(--fg-2);
         }
-        .trade-position-values {
+        .trade-position-values,
+        .trade-order-values {
             text-align: right;
+        }
+        .trade-order-cancel {
+            margin-top: 4px;
+            min-height: 24px;
+            border: 1px solid color-mix(in srgb, var(--warn) 48%, var(--border));
+            border-radius: 6px;
+            background: color-mix(in srgb, var(--warn) 9%, var(--bg-0));
+            color: var(--fg-1);
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+        .trade-order-cancel:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
         }
         .trade-selected-symbol {
             color: var(--fg-0);
@@ -15317,6 +15416,16 @@ def index():
                         </div>
                         <div data-trade-position-list>
                             <div class="trade-empty">Select an account to show relevant positions.</div>
+                        </div>
+                    </section>
+                    <section class="trade-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Orders</div>
+                            <button type="button" class="trade-account-refresh" data-trade-orders-refresh title="Refresh orders" aria-label="Refresh orders">↻</button>
+                        </div>
+                        <div class="trade-panel-note" data-trade-orders-note>No account</div>
+                        <div data-trade-orders-list>
+                            <div class="trade-empty">Select an account to show open and recent orders.</div>
                         </div>
                     </section>
                     <section class="trade-panel">
@@ -25576,6 +25685,11 @@ def index():
                         '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
                     '</section>' +
                     '<section class="trade-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Orders</div><button type="button" class="trade-account-refresh" data-trade-orders-refresh title="Refresh orders" aria-label="Refresh orders">↻</button></div>' +
+                        '<div class="trade-panel-note" data-trade-orders-note>No account</div>' +
+                        '<div data-trade-orders-list><div class="trade-empty">Select an account to show open and recent orders.</div></div>' +
+                    '</section>' +
+                    '<section class="trade-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Order Ticket</div><div class="trade-panel-note" data-trade-ticket-note>Preview only</div></div>' +
                         '<div class="trade-action-grid" aria-label="Order action">' +
                             '<button type="button" class="trade-action-button buy active" data-trade-action="BUY_TO_OPEN">Buy Ask</button>' +
@@ -26126,6 +26240,11 @@ def index():
             accountDetailsLoading: false,
             accountError: '',
             accountRequestKey: '',
+            orders: [],
+            ordersLoading: false,
+            ordersError: '',
+            ordersRequestKey: '',
+            cancelLoadingId: '',
             action: 'BUY_TO_OPEN',
             quantity: 1,
             limitPrice: '',
@@ -26168,6 +26287,22 @@ def index():
             } catch (e) {
                 return new Date(n).toLocaleTimeString();
             }
+        }
+        function fmtTradeOrderTime(value) {
+            if (!value) return '—';
+            const stamp = Date.parse(value);
+            if (!Number.isFinite(stamp)) return String(value).replace('T', ' ').replace('Z', '');
+            return fmtTradeTimestamp(stamp);
+        }
+        function getTradeOrderLegSummary(order) {
+            const legs = Array.isArray(order && order.legs) ? order.legs : [];
+            const leg = legs[0] || {};
+            const qty = leg.quantity == null ? (order && order.quantity) : leg.quantity;
+            return {
+                symbol: leg.symbol || '—',
+                instruction: leg.instruction || 'Order',
+                quantity: qty == null ? '—' : qty,
+            };
         }
         function getTradeRailTicker() {
             const tickerEl = document.getElementById('ticker');
@@ -26316,12 +26451,56 @@ def index():
                 '</div>';
             }).join('');
         }
+        function renderTradeOrders() {
+            const list = document.querySelector('[data-trade-orders-list]');
+            const note = document.querySelector('[data-trade-orders-note]');
+            if (!list) return;
+            if (!tradeRailState.accountHash) {
+                if (note) note.textContent = 'No account';
+                list.innerHTML = '<div class="trade-empty">Select an account to show open and recent orders.</div>';
+                return;
+            }
+            if (tradeRailState.ordersLoading) {
+                if (note) note.textContent = 'Loading';
+                list.innerHTML = '<div class="trade-empty">Loading Schwab orders...</div>';
+                return;
+            }
+            if (tradeRailState.ordersError) {
+                if (note) note.textContent = 'Unavailable';
+                list.innerHTML = '<div class="trade-empty">' + _escapeHtml(tradeRailState.ordersError) + '</div>';
+                return;
+            }
+            const orders = Array.isArray(tradeRailState.orders) ? tradeRailState.orders : [];
+            if (note) note.textContent = orders.length ? orders.length + ' open/recent' : 'No matching orders';
+            if (!orders.length) {
+                list.innerHTML = '<div class="trade-empty">No open or recent orders for the selected context.</div>';
+                return;
+            }
+            list.innerHTML = orders.map(order => {
+                const leg = getTradeOrderLegSummary(order);
+                const status = order.status || 'UNKNOWN';
+                const price = order.price == null ? '—' : fmtTradePrice(order.price);
+                const cancelable = !!order.cancelable && !!order.order_id;
+                const cancelText = tradeRailState.cancelLoadingId === order.order_id ? 'Canceling...' : 'Cancel';
+                const cancel = cancelable ? '<button type="button" class="trade-order-cancel" data-trade-cancel-order="' + _escapeHtml(order.order_id) + '"' + (tradeRailState.cancelLoadingId ? ' disabled' : '') + '>' + cancelText + '</button>' : '';
+                return '<div class="trade-order-row">' +
+                    '<div><div class="trade-order-symbol">' + _escapeHtml(leg.symbol) + '</div><div class="trade-order-meta">' + _escapeHtml(leg.instruction) + ' · Qty ' + _escapeHtml(String(leg.quantity)) + ' · ' + _escapeHtml(order.order_type || 'ORDER') + ' ' + _escapeHtml(price) + '</div><div class="trade-order-meta">Entered ' + _escapeHtml(fmtTradeOrderTime(order.entered_time)) + '</div></div>' +
+                    '<div class="trade-order-values"><div>' + _escapeHtml(status) + '</div><div class="trade-order-meta">#' + _escapeHtml(order.order_id || '—') + '</div>' + cancel + '</div>' +
+                '</div>';
+            }).join('');
+            list.querySelectorAll('[data-trade-cancel-order]').forEach(btn => {
+                if (btn.__tradeCancelBound) return;
+                btn.__tradeCancelBound = true;
+                btn.addEventListener('click', () => cancelTradeOrder(btn.dataset.tradeCancelOrder || ''));
+            });
+        }
         function requestTradeAccountDetails(options = {}) {
             if (!tradeRailState.accountHash) {
                 tradeRailState.accountDetails = null;
                 tradeRailState.accountRequestKey = '';
                 renderTradeAccounts();
                 renderTradePositions();
+                renderTradeOrders();
                 return;
             }
             const ticker = getTradeRailTicker();
@@ -26355,6 +26534,43 @@ def index():
                 renderTradePositions();
             });
         }
+        function requestTradeOrders(options = {}) {
+            if (!tradeRailState.accountHash) {
+                tradeRailState.orders = [];
+                tradeRailState.ordersRequestKey = '';
+                renderTradeOrders();
+                return;
+            }
+            const ticker = getTradeRailTicker();
+            const selected = getSelectedTradeContract();
+            const symbol = selected ? selected.contract_symbol : tradeRailState.selectedSymbol;
+            const key = tradeRailState.accountHash + '|' + ticker + '|' + (symbol || '');
+            if (tradeRailState.ordersLoading && tradeRailState.ordersRequestKey === key) return;
+            if (!options.force && tradeRailState.ordersRequestKey === key) return;
+            tradeRailState.ordersLoading = true;
+            tradeRailState.ordersError = '';
+            tradeRailState.ordersRequestKey = key;
+            renderTradeOrders();
+            fetch('/trade/orders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ account_hash: tradeRailState.accountHash, ticker, contract_symbol: symbol || '' }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || 'Order lookup unavailable');
+                tradeRailState.orders = Array.isArray(data.orders) ? data.orders : [];
+                tradeRailState.ordersLoading = false;
+                tradeRailState.ordersError = '';
+                renderTradeOrders();
+            })
+            .catch(err => {
+                tradeRailState.orders = [];
+                tradeRailState.ordersLoading = false;
+                tradeRailState.ordersError = err.message || 'Order lookup unavailable';
+                renderTradeOrders();
+            });
+        }
         function requestTradeAccounts(options = {}) {
             if (!options.force && (tradeRailState.accountLoading || tradeRailState.accounts.length)) return;
             tradeRailState.accountLoading = true;
@@ -26371,21 +26587,26 @@ def index():
                     tradeRailState.accountLabel = first.display_label || '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    tradeRailState.orders = [];
+                    tradeRailState.ordersRequestKey = '';
                 }
                 tradeRailState.accountLoading = false;
                 tradeRailState.accountError = (data.warnings || []).join(' · ');
                 renderTradeAccounts();
                 requestTradeAccountDetails({ force: true });
+                requestTradeOrders({ force: true });
             })
             .catch(err => {
                 tradeRailState.accounts = [];
                 tradeRailState.accountHash = '';
                 tradeRailState.accountLabel = '';
                 tradeRailState.accountDetails = null;
+                tradeRailState.orders = [];
                 tradeRailState.accountLoading = false;
                 tradeRailState.accountError = err.message || 'Linked accounts unavailable';
                 renderTradeAccounts();
                 renderTradePositions();
+                renderTradeOrders();
             });
         }
         function getTradeContractsForView() {
@@ -26451,6 +26672,7 @@ def index():
             if (!rail) return;
             renderTradeAccounts();
             renderTradePositions();
+            renderTradeOrders();
             const list = rail.querySelector('[data-trade-chain-list]');
             const meta = rail.querySelector('[data-trade-chain-meta]');
             const warnings = rail.querySelector('[data-trade-chain-warnings]');
@@ -26485,6 +26707,8 @@ def index():
                     tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    tradeRailState.orders = [];
+                    tradeRailState.ordersRequestKey = '';
                     invalidateTradePreview('Contract changed. Preview again.');
                 }
             }
@@ -26504,6 +26728,7 @@ def index():
             const selected = rows.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || rows[0];
             renderTradeSelected(selected);
             requestTradeAccountDetails();
+            requestTradeOrders();
             rail.querySelectorAll('[data-trade-symbol]').forEach(btn => {
                 if (btn.__tradeSymbolBound) return;
                 btn.__tradeSymbolBound = true;
@@ -26512,6 +26737,8 @@ def index():
                     tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    tradeRailState.orders = [];
+                    tradeRailState.ordersRequestKey = '';
                     invalidateTradePreview('Contract changed. Preview again.');
                     renderTradeRail();
                 });
@@ -26630,12 +26857,42 @@ def index():
                 tradeRailState.placementError = '';
                 renderTradeTicket();
                 requestTradeAccountDetails({ force: true });
+                requestTradeOrders({ force: true });
             })
             .catch(err => {
                 tradeRailState.placementLoading = false;
                 tradeRailState.placement = null;
                 tradeRailState.placementError = err.message || 'Live placement failed';
                 renderTradeTicket();
+            });
+        }
+        function cancelTradeOrder(orderId) {
+            orderId = String(orderId || '').trim();
+            if (!orderId || !tradeRailState.accountHash) return;
+            if (!window.confirm('Cancel selected Schwab order?\\n\\nOrder #' + orderId)) return;
+            tradeRailState.cancelLoadingId = orderId;
+            tradeRailState.ordersError = '';
+            renderTradeOrders();
+            fetch('/trade/cancel_order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    account_hash: tradeRailState.accountHash,
+                    order_id: orderId,
+                    confirmed: true,
+                }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                tradeRailState.cancelLoadingId = '';
+                if (!ok || data.error || data.cancelled === false) throw new Error(data.error || 'Cancel failed');
+                requestTradeOrders({ force: true });
+                requestTradeAccountDetails({ force: true });
+            })
+            .catch(err => {
+                tradeRailState.cancelLoadingId = '';
+                tradeRailState.ordersError = err.message || 'Cancel failed';
+                renderTradeOrders();
             });
         }
         function wireTradeRailPickerControls(root = document.getElementById('trade-rail')) {
@@ -26650,14 +26907,28 @@ def index():
                     tradeRailState.accountLabel = account.display_label || '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    tradeRailState.orders = [];
+                    tradeRailState.ordersRequestKey = '';
                     invalidateTradePreview('Account changed. Preview again.');
                     renderTradeAccounts();
                     requestTradeAccountDetails({ force: true });
+                    requestTradeOrders({ force: true });
                 });
             }
             const accountRefresh = root.querySelector('[data-trade-account-refresh]');
             if (accountRefresh) {
-                accountRefresh.addEventListener('click', () => requestTradeAccounts({ force: true }));
+                accountRefresh.addEventListener('click', () => {
+                    requestTradeAccounts({ force: true });
+                    requestTradeAccountDetails({ force: true });
+                    requestTradeOrders({ force: true });
+                });
+            }
+            const ordersRefresh = root.querySelector('[data-trade-orders-refresh]');
+            if (ordersRefresh) {
+                ordersRefresh.addEventListener('click', () => {
+                    requestTradeAccountDetails({ force: true });
+                    requestTradeOrders({ force: true });
+                });
             }
             root.querySelectorAll('[data-trade-type]').forEach(btn => {
                 btn.addEventListener('click', () => {
@@ -26666,6 +26937,8 @@ def index():
                     tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    tradeRailState.orders = [];
+                    tradeRailState.ordersRequestKey = '';
                     invalidateTradePreview('Contract filter changed. Preview again.');
                     renderTradeRail();
                 });
@@ -26678,6 +26951,8 @@ def index():
                     tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    tradeRailState.orders = [];
+                    tradeRailState.ordersRequestKey = '';
                     invalidateTradePreview('Expiry changed. Preview again.');
                     requestTradeChain({ force: true });
                 });
@@ -26690,6 +26965,8 @@ def index():
                     tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    tradeRailState.orders = [];
+                    tradeRailState.ordersRequestKey = '';
                     invalidateTradePreview('Strike range changed. Preview again.');
                     requestTradeChain({ force: true });
                 });
@@ -31040,6 +31317,98 @@ def trade_account_details():
         contract_symbol=contract_symbol,
     )
     return jsonify(payload)
+
+
+@app.route('/trade/orders', methods=['POST'])
+def trade_orders():
+    """Read-only open/recent orders for the selected trading rail account."""
+    client_error = _require_schwab_client()
+    if client_error:
+        return _trade_api_error(client_error, 503)
+    data = request.get_json(silent=True) or {}
+    account_hash = str(data.get('account_hash') or data.get('accountHash') or '').strip()
+    if not account_hash:
+        return _trade_api_error('Missing account hash.', 400)
+
+    ticker = format_ticker(data.get('ticker') or '')
+    contract_symbol = str(data.get('contract_symbol') or data.get('contractSymbol') or '').strip()
+    now_utc = datetime.now(pytz.UTC)
+    from_time = data.get('from_entered_time') or data.get('fromEnteredTime')
+    to_time = data.get('to_entered_time') or data.get('toEnteredTime')
+    if not from_time:
+        from_time = (now_utc - timedelta(days=7)).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    if not to_time:
+        to_time = now_utc.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    try:
+        max_results = int(data.get('max_results') or data.get('maxResults') or 50)
+    except Exception:
+        max_results = 50
+    max_results = max(1, min(max_results, 100))
+    status = data.get('status')
+    if status is not None:
+        status = str(status or '').strip().upper() or None
+
+    try:
+        response = client.account_orders(
+            account_hash,
+            from_time,
+            to_time,
+            maxResults=max_results,
+            status=status,
+        )
+    except Exception as e:
+        return _trade_api_error('Order lookup failed.', 502, e)
+    if not getattr(response, 'ok', False):
+        return _trade_api_error(
+            f"Order lookup failed with Schwab status {getattr(response, 'status_code', 'unknown')}.",
+            502,
+            getattr(response, 'reason', None),
+        )
+
+    return jsonify({
+        'account_hash': account_hash,
+        'ticker': ticker,
+        'contract_symbol': contract_symbol,
+        'from_entered_time': from_time,
+        'to_entered_time': to_time,
+        'orders': _normalize_trade_orders(_redact_trade_payload(_safe_response_json(response)), ticker=ticker, contract_symbol=contract_symbol),
+        'warnings': [],
+    })
+
+
+@app.route('/trade/cancel_order', methods=['POST'])
+def trade_cancel_order():
+    """Cancel one selected Schwab order after explicit frontend confirmation."""
+    client_error = _require_schwab_client()
+    if client_error:
+        return _trade_api_error(client_error, 503)
+    data = request.get_json(silent=True) or {}
+    if data.get('confirmed') is not True and data.get('final_confirmed') is not True:
+        return _trade_api_error('Explicit cancel confirmation is required.', 400)
+    account_hash = str(data.get('account_hash') or data.get('accountHash') or '').strip()
+    order_id = str(data.get('order_id') or data.get('orderId') or '').strip()
+    if not account_hash:
+        return _trade_api_error('Missing account hash.', 400)
+    if not order_id:
+        return _trade_api_error('Missing order id.', 400)
+    try:
+        response = client.cancel_order(account_hash, order_id)
+    except Exception as e:
+        return _trade_api_error('Order cancel failed.', 502, e)
+    status_code = getattr(response, 'status_code', None)
+    schwab_ok = bool(getattr(response, 'ok', False)) or status_code in (200, 201, 202, 204)
+    result = {
+        'ok': schwab_ok,
+        'cancelled': schwab_ok,
+        'order_id': order_id,
+        'schwab_status': status_code,
+        'schwab_response': _redact_trade_payload(_safe_response_json(response)),
+        'warnings': [],
+    }
+    if not schwab_ok:
+        result['warnings'].append(f"Schwab cancel returned status {status_code or 'unknown'}.")
+        return jsonify(result), 502
+    return jsonify(result)
 
 
 @app.route('/trade/preview_order', methods=['POST'])

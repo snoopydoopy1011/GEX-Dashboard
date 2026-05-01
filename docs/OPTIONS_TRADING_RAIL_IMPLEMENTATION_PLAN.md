@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Stage 5 complete / Stage 6 next
+**Status:** Stage 6 complete / Stage 7 later
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -175,6 +175,33 @@ Verification completed:
 - `git diff --check` passed.
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
 - Flask test-client smoke tests for `/trade/place_order` confirmed feature-flag rejection, missing preview-token rejection, stale preview rejection, changed account/contract/action/quantity/price rejection, changed order JSON rejection, missing final confirmation rejection, exact previewed-order placement, `201 Created` plus `Location` handling, and no plain account-number exposure.
+
+### 2026-05-01 Stage 6 Progress Update
+
+Stage 6 is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Added `POST /trade/orders`, using `client.account_orders(accountHash, fromEnteredTime, toEnteredTime, maxResults=None, status=None)` for read-only open/recent order lookup.
+- Added conservative order normalization that returns safe metadata only: order id, status, entered/close time, order type/session/duration/price, quantity fields, cancelability, and leg summaries.
+- Filtered returned orders by selected contract when possible, falling back to ticker/underlying matching.
+- Added an Orders panel to the trading rail with refresh, open/recent order display, and cancel buttons only for cancelable statuses.
+- Added `POST /trade/cancel_order`, gated by explicit confirmation and scoped to the selected account hash plus selected order id. No replace support was added.
+- Refreshed positions and orders after successful placement, after successful cancel, and when the user clicks the rail refresh controls.
+- Preserved Stage 5 live placement guards and the Buy Ask / Sell Bid quick-fill behavior.
+
+Tricky parts / implementation notes:
+
+- Schwab order responses may include plain account numbers or full order structures, so the endpoint never forwards raw order JSON and redacts before normalizing.
+- Cancel is live account state, so the UI requires `window.confirm(...)` and the backend requires `confirmed: true`; the backend calls only `cancel_order(accountHash, orderId)`.
+- The new Orders DOM is mirrored in both initial HTML and `buildTradeRailHtml()` so chart rebuilds keep the panel.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+- Flask test-client smoke tests for `/trade/orders` and `/trade/cancel_order` confirmed missing account rejection, safe Schwab-client errors, no plain account-number exposure, selected contract filtering, explicit cancel confirmation, and cancel scoping to selected account hash/order id.
 
 ---
 
@@ -1185,9 +1212,9 @@ Stage 5:
 
 Stage 6:
 
-- [ ] Add open orders.
-- [ ] Add cancel support.
-- [ ] Add position refresh.
+- [x] Add open orders.
+- [x] Add cancel support.
+- [x] Add position refresh.
 
 ---
 

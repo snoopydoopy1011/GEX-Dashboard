@@ -29,6 +29,8 @@ class MockPreviewClient:
     def __init__(self, positions_payload=None):
         self.preview_calls = []
         self.place_calls = []
+        self.order_calls = []
+        self.cancel_calls = []
         self.positions_payload = positions_payload or {
             'securitiesAccount': {
                 'positions': [
@@ -58,6 +60,52 @@ class MockPreviewClient:
             reason='Created',
             headers={'Location': 'https://api.schwabapi.com/trader/v1/accounts/HASH123/orders/987654321'},
         )
+
+    def account_orders(self, account_hash, from_entered_time, to_entered_time, maxResults=None, status=None):
+        self.order_calls.append((account_hash, from_entered_time, to_entered_time, maxResults, status))
+        return MockResponse([
+            {
+                'orderId': 111,
+                'status': 'WORKING',
+                'enteredTime': '2026-05-01T14:30:00Z',
+                'orderType': 'LIMIT',
+                'price': 0.57,
+                'accountNumber': '123456789',
+                'orderLegCollection': [
+                    {
+                        'instruction': 'BUY_TO_OPEN',
+                        'quantity': 2,
+                        'instrument': {
+                            'symbol': 'SPY   260501C00722000',
+                            'assetType': 'OPTION',
+                            'underlyingSymbol': 'SPY',
+                        },
+                    }
+                ],
+            },
+            {
+                'orderId': 222,
+                'status': 'FILLED',
+                'enteredTime': '2026-05-01T13:30:00Z',
+                'orderType': 'LIMIT',
+                'price': 1.11,
+                'orderLegCollection': [
+                    {
+                        'instruction': 'BUY_TO_OPEN',
+                        'quantity': 1,
+                        'instrument': {
+                            'symbol': 'QQQ   260501C00450000',
+                            'assetType': 'OPTION',
+                            'underlyingSymbol': 'QQQ',
+                        },
+                    }
+                ],
+            },
+        ])
+
+    def cancel_order(self, account_hash, order_id):
+        self.cancel_calls.append((account_hash, order_id))
+        return MockResponse(None, ok=True, status_code=204, reason='No Content')
 
     def account_details(self, account_hash, fields=None):
         return MockResponse(self.positions_payload)
@@ -304,6 +352,76 @@ class TradePlaceOrderEndpointTest(unittest.TestCase):
             response = self.post_place(self.place_payload_from_preview(preview))
         body = response.get_data(as_text=True)
         self.assertNotIn('123456789', body)
+
+
+class TradeOrderManagementEndpointTest(unittest.TestCase):
+    def setUp(self):
+        seed_chain()
+        self.original_client = ezoptionsschwab.client
+        ezoptionsschwab.client = MockPreviewClient()
+        self.app = ezoptionsschwab.app.test_client()
+
+    def tearDown(self):
+        ezoptionsschwab.client = self.original_client
+        ezoptionsschwab._options_cache.clear()
+
+    def post_orders(self, **overrides):
+        payload = {
+            'account_hash': 'HASH123',
+            'ticker': 'SPY',
+            'contract_symbol': 'SPY   260501C00722000',
+        }
+        payload.update(overrides)
+        return self.app.post('/trade/orders', json=payload)
+
+    def test_orders_reject_missing_account(self):
+        response = self.post_orders(account_hash='')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Missing account hash', response.get_json()['error'])
+
+    def test_orders_handle_unavailable_schwab_client(self):
+        ezoptionsschwab.client = None
+        response = self.post_orders()
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('not initialized', response.get_json()['error'])
+
+    def test_order_response_does_not_expose_plain_account_numbers(self):
+        response = self.post_orders()
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        self.assertNotIn('123456789', body)
+
+    def test_selected_contract_filtering_returns_matching_orders(self):
+        response = self.post_orders()
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(len(data['orders']), 1)
+        self.assertEqual(data['orders'][0]['order_id'], '111')
+        self.assertEqual(data['orders'][0]['legs'][0]['symbol'], 'SPY   260501C00722000')
+        self.assertEqual(ezoptionsschwab.client.order_calls[0][0], 'HASH123')
+
+    def test_cancel_requires_explicit_confirmation(self):
+        response = self.app.post('/trade/cancel_order', json={
+            'account_hash': 'HASH123',
+            'order_id': '111',
+            'confirmed': False,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('confirmation', response.get_json()['error'].lower())
+        self.assertEqual(ezoptionsschwab.client.cancel_calls, [])
+
+    def test_cancel_uses_selected_account_hash_and_order_id_only(self):
+        response = self.app.post('/trade/cancel_order', json={
+            'account_hash': 'HASH123',
+            'order_id': '111',
+            'ticker': 'SPY',
+            'contract_symbol': 'SPY   260501C00722000',
+            'order': {'orderLegCollection': []},
+            'confirmed': True,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['cancelled'])
+        self.assertEqual(ezoptionsschwab.client.cancel_calls, [('HASH123', '111')])
 
 
 if __name__ == '__main__':
