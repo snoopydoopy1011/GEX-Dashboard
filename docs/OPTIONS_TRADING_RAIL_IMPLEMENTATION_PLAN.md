@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Stage 1 complete / Stage 2 next
+**Status:** Stage 2 complete / Stage 3 next
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -59,9 +59,35 @@ Verification completed:
 - `git diff --check` passed.
 - Local HTTP smoke test confirmed the page served the new trade rail markup and default collapsed state.
 
+### 2026-05-01 Stage 2 Progress Update
+
+Stage 2 is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Added `build_trading_chain_payload(...)`, a read-only normalizer for cached `_options_cache[ticker]` calls/puts.
+- Added `POST /trade_chain`, which returns cached contracts without account lookup, order preview, or live trading behavior.
+- Preserved Schwab-returned `contractSymbol` exactly as `contract_symbol`; no symbol reconstruction was introduced.
+- Added trading rail call/put controls, expiry filtering, strike-range filtering, and a compact selectable contract table.
+- Defaulted the backend payload to the nearest cached expiry when no requested expiry is available, and to strikes near spot using the requested range.
+- Added a selected contract summary with bid, ask, mid/mark, last, spread, volume, OI, IV, delta, quote time, and trade time.
+- Added stale quote and wide spread warnings from the cached quote fields.
+- Mirrored the new trade rail DOM in `buildTradeRailHtml()` so `ensurePriceChartDom()` rebuilds keep the picker intact.
+
+Tricky parts / implementation notes:
+
+- `/trade_chain` intentionally returns `409` when the normal `/update` chain path has not populated `_options_cache`; it does not create a new Schwab chain fetch loop.
+- The rail fetches the cached payload only when opened or after a successful normal chain update while the rail is open.
+- The UI keeps Stage 2 read-only: ticket presets remain disabled and no account, preview, placement, or live trading endpoints were added.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- Flask test-client smoke test populated `_options_cache` with sample SPY calls/puts and confirmed `/trade_chain` returned status `200`, two contracts, and the exact sample Schwab contract symbol.
+
 Next:
 
-- Stage 2 should add a structured cached-chain payload helper and read-only contract picker UI. Preserve Schwab-returned `contractSymbol` exactly.
+- Stage 3 should add account and position read paths only, with masked account display and no preview/place behavior.
 
 ---
 
@@ -1042,11 +1068,11 @@ Stage 1:
 
 Stage 2:
 
-- [ ] Add structured chain payload helper.
-- [ ] Preserve `contractSymbol`.
-- [ ] Add read-only contract picker.
-- [ ] Add selected contract summary.
-- [ ] Add stale/spread warnings.
+- [x] Add structured chain payload helper.
+- [x] Preserve `contractSymbol`.
+- [x] Add read-only contract picker.
+- [x] Add selected contract summary.
+- [x] Add stale/spread warnings.
 
 Stage 3:
 

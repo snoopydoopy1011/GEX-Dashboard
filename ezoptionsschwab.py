@@ -69,7 +69,7 @@ def not_found_error(error):
 def internal_error(error):
     # Expose the error message for API-like endpoints so the frontend can show details
     msg = getattr(error, 'description', None) or str(error)
-    if request.path.startswith('/api/') or request.path.startswith('/update') or request.path.startswith('/expirations'):
+    if request.path.startswith('/api/') or request.path.startswith('/update') or request.path.startswith('/expirations') or request.path.startswith('/trade_'):
         return jsonify({'error': msg}), 500
     return "500 - Internal Server Error", 500
 
@@ -4485,6 +4485,156 @@ def _nearest_expiration(df):
     if not future.empty:
         return future.min()
     return expiries.min()
+
+
+def build_trading_chain_payload(ticker, calls, puts, S, selected_expiries=None, strike_range=0.02, contract_type='ALL'):
+    """Build the read-only contract picker payload from cached Schwab chain rows."""
+    warnings_out = []
+    ticker = format_ticker(ticker or '')
+    try:
+        spot = float(S)
+    except Exception:
+        spot = None
+
+    frames = []
+    for option_type, df in (('CALL', calls), ('PUT', puts)):
+        if contract_type not in ('ALL', option_type):
+            continue
+        if df is None or getattr(df, 'empty', True):
+            continue
+        working = df.copy()
+        working['_trade_expiry_iso'] = _expiration_series_iso(working)
+        working['_trade_option_type'] = option_type
+        frames.append(working)
+
+    all_expiries = []
+    for frame in frames:
+        all_expiries.extend([exp for exp in frame['_trade_expiry_iso'].dropna().astype(str).tolist() if exp])
+    all_expiries = sorted(set(all_expiries))
+
+    normalized_expiries = _normalize_expiry_list(selected_expiries)
+    available_selected = [exp for exp in normalized_expiries if exp in all_expiries]
+    if normalized_expiries and not available_selected:
+        warnings_out.append('Requested expiry is not available in the cached chain; using nearest cached expiry.')
+    if not available_selected and all_expiries:
+        today = datetime.now(pytz.timezone('US/Eastern')).date().isoformat()
+        future = [exp for exp in all_expiries if exp >= today]
+        available_selected = [future[0] if future else all_expiries[0]]
+
+    try:
+        range_pct = max(0.0, float(strike_range))
+    except Exception:
+        range_pct = 0.02
+
+    def _num(row, key, default=None):
+        try:
+            value = row.get(key, default)
+            if value is None or pd.isna(value):
+                return default
+            value = float(value)
+            if not math.isfinite(value):
+                return default
+            return value
+        except Exception:
+            return default
+
+    def _int(row, key):
+        value = _num(row, key, 0.0)
+        return int(value or 0)
+
+    def _round(value, places=4):
+        if value is None or not math.isfinite(value):
+            return None
+        return round(float(value), places)
+
+    now_ms = int(time.time() * 1000)
+    contracts = []
+    for frame in frames:
+        if available_selected:
+            frame = frame[frame['_trade_expiry_iso'].isin(available_selected)]
+        if spot and range_pct > 0 and 'strike' in frame.columns:
+            lo = spot * (1 - range_pct)
+            hi = spot * (1 + range_pct)
+            ranged = frame[(pd.to_numeric(frame['strike'], errors='coerce') >= lo) & (pd.to_numeric(frame['strike'], errors='coerce') <= hi)]
+            if not ranged.empty:
+                frame = ranged
+            else:
+                warnings_out.append('No contracts fell inside the requested strike range; showing nearest strikes.')
+        if spot and 'strike' in frame.columns:
+            frame = frame.assign(_distance=(pd.to_numeric(frame['strike'], errors='coerce') - spot).abs())
+            frame = frame.sort_values(['_trade_expiry_iso', '_distance', 'strike']).head(80)
+        for _, row in frame.iterrows():
+            symbol = row.get('contractSymbol')
+            if not symbol:
+                continue
+            bid = _num(row, 'bid', 0.0) or 0.0
+            ask = _num(row, 'ask', 0.0) or 0.0
+            mark = _num(row, 'mark', None)
+            last = _num(row, 'lastPrice', None)
+            mid = ((bid + ask) / 2.0) if bid > 0 and ask > 0 and ask >= bid else mark
+            spread = (ask - bid) if ask > 0 and bid >= 0 and ask >= bid else None
+            ref = mid if mid and mid > 0 else (mark if mark and mark > 0 else ask)
+            spread_pct = (spread / ref * 100.0) if spread is not None and ref and ref > 0 else None
+            quote_ts = _coerce_epoch_ms(row.get('quoteTimeInLong'))
+            trade_ts = _coerce_epoch_ms(row.get('tradeTimeInLong'))
+            quote_age_seconds = ((now_ms - quote_ts) / 1000.0) if quote_ts else None
+            expiry_iso = row.get('_trade_expiry_iso') or _normalize_expiry_iso(row.get('expiration', row.get('expiration_date')))
+            try:
+                dte = (datetime.fromisoformat(str(expiry_iso)).date() - datetime.now(pytz.timezone('US/Eastern')).date()).days
+            except Exception:
+                dte = None
+            row_warnings = []
+            if quote_age_seconds is None or quote_age_seconds > 15 * 60:
+                row_warnings.append('stale_quote')
+            if spread_pct is not None and spread_pct >= 12:
+                row_warnings.append('wide_spread')
+            contracts.append({
+                'contract_symbol': str(symbol),
+                'underlying': ticker,
+                'option_type': row.get('_trade_option_type'),
+                'instruction_open': 'BUY_TO_OPEN',
+                'instruction_close': 'SELL_TO_CLOSE',
+                'expiry': expiry_iso,
+                'dte': dte,
+                'strike': _round(_num(row, 'strike'), 3),
+                'bid': _round(bid, 4),
+                'ask': _round(ask, 4),
+                'mark': _round(mark, 4),
+                'last': _round(last, 4),
+                'mid': _round(mid, 4),
+                'spread': _round(spread, 4),
+                'spread_pct': _round(spread_pct, 2),
+                'volume': _int(row, 'volume'),
+                'open_interest': _int(row, 'openInterest'),
+                'iv': _round(_num(row, 'impliedVolatility'), 6),
+                'delta': _round(_num(row, 'delta'), 4),
+                'gamma': _round(_num(row, 'gamma'), 6),
+                'theta': _round(_num(row, 'theta'), 4),
+                'vega': _round(_num(row, 'vega'), 4),
+                'rho': _round(_num(row, 'rho'), 4),
+                'in_the_money': bool(row.get('inTheMoney')) if row.get('inTheMoney') is not None else None,
+                'quote_time': quote_ts,
+                'trade_time': trade_ts,
+                'quote_age_seconds': _round(quote_age_seconds, 1),
+                'warnings': row_warnings,
+            })
+
+    contracts.sort(key=lambda r: (
+        r.get('expiry') or '',
+        0 if r.get('option_type') == 'CALL' else 1,
+        abs((r.get('strike') or 0) - (spot or 0)),
+        r.get('strike') or 0,
+    ))
+    return {
+        'ticker': ticker,
+        'underlying_price': _round(spot, 4) if spot is not None else None,
+        'as_of': datetime.now(pytz.UTC).isoformat().replace('+00:00', 'Z'),
+        'expiries': all_expiries,
+        'selected_expiries': available_selected,
+        'strike_range': range_pct,
+        'contracts': contracts,
+        'warnings': sorted(set(warnings_out)),
+    }
 
 
 def _expiration_for_dte(df, target_dte, selected_expiries=None):
@@ -9912,6 +10062,32 @@ def index():
             gap: 4px;
             margin-bottom: 8px;
         }
+        .trade-filter-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 78px;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+        .trade-filter-grid label {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            color: var(--fg-2);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .trade-filter-grid select,
+        .trade-filter-grid input {
+            width: 100%;
+            min-height: 28px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            color: var(--fg-1);
+            border-radius: 6px;
+            padding: 0 7px;
+            font-size: 11px;
+        }
         .trade-segment button,
         .trade-price-preset {
             min-height: 28px;
@@ -9920,16 +10096,26 @@ def index():
             color: var(--fg-1);
             border-radius: 6px;
             font-size: 11px;
-            cursor: default;
+            cursor: pointer;
+        }
+        .trade-segment button:disabled,
+        .trade-price-preset:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
         }
         .trade-segment button.active.call {
             color: var(--call);
             border-color: color-mix(in srgb, var(--call) 45%, var(--border));
             background: color-mix(in srgb, var(--call) 8%, transparent);
         }
-        .trade-segment button.put {
+        .trade-segment button.put,
+        .trade-segment button.active.put {
             color: var(--put);
             border-color: color-mix(in srgb, var(--put) 24%, var(--border));
+        }
+        .trade-segment button.active.put {
+            border-color: color-mix(in srgb, var(--put) 45%, var(--border));
+            background: color-mix(in srgb, var(--put) 8%, transparent);
         }
         .trade-chain-placeholder {
             display: grid;
@@ -9948,6 +10134,76 @@ def index():
             align-items: center;
             justify-content: center;
         }
+        .trade-chain-table {
+            display: flex;
+            flex-direction: column;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+            background: var(--bg-0);
+        }
+        .trade-chain-head,
+        .trade-contract-row {
+            display: grid;
+            grid-template-columns: 0.75fr repeat(4, minmax(0, 1fr));
+            gap: 0;
+            align-items: center;
+        }
+        .trade-chain-head {
+            min-height: 24px;
+            color: var(--fg-2);
+            background: var(--bg-2);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .trade-chain-head span,
+        .trade-contract-row span {
+            min-width: 0;
+            padding: 5px 6px;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-chain-head span:first-child,
+        .trade-contract-row span:first-child {
+            text-align: left;
+        }
+        .trade-chain-list {
+            max-height: 230px;
+            overflow-y: auto;
+        }
+        .trade-contract-row {
+            width: 100%;
+            border: 0;
+            border-top: 1px solid var(--border);
+            background: transparent;
+            color: var(--fg-1);
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .trade-contract-row:hover,
+        .trade-contract-row.active {
+            background: color-mix(in srgb, var(--accent) 10%, transparent);
+        }
+        .trade-contract-row.call .trade-contract-strike { color: var(--call); }
+        .trade-contract-row.put .trade-contract-strike { color: var(--put); }
+        .trade-contract-row .trade-contract-warn {
+            color: var(--warn);
+            font-weight: 700;
+        }
+        .trade-meta-line,
+        .trade-warning-list {
+            margin-top: 7px;
+            color: var(--fg-2);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .trade-warning-list {
+            color: var(--warn);
+        }
         .trade-selected-symbol {
             color: var(--fg-0);
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -9955,6 +10211,16 @@ def index():
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+        }
+        .trade-selected-summary {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+            margin-top: 8px;
+        }
+        .trade-selected-summary .trade-field-value {
+            min-height: 26px;
+            font-size: 11px;
         }
         .trade-ticket-grid {
             display: grid;
@@ -14533,26 +14799,43 @@ def index():
                     <section class="trade-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Contract Picker</div>
-                            <div class="trade-panel-note">SPY first</div>
+                            <div class="trade-panel-note" data-trade-chain-meta>Cached chain</div>
                         </div>
                         <div class="trade-segment" aria-label="Option type">
-                            <button type="button" class="active call" disabled>Calls</button>
-                            <button type="button" class="put" disabled>Puts</button>
+                            <button type="button" class="active call" data-trade-type="CALL">Calls</button>
+                            <button type="button" class="put" data-trade-type="PUT">Puts</button>
                         </div>
-                        <div class="trade-chain-placeholder" aria-hidden="true">
-                            <span>Strike</span><span>Bid</span><span>Ask</span><span>Mid</span><span>Vol</span>
-                            <span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>
-                            <span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>
+                        <div class="trade-filter-grid">
+                            <label>Expiry
+                                <select id="trade-expiry-select" data-trade-expiry></select>
+                            </label>
+                            <label>Range
+                                <input id="trade-strike-range" data-trade-strike-range type="number" min="0.5" max="20" step="0.5" value="2">
+                            </label>
                         </div>
-                        <div class="trade-empty">Contracts will load from the cached option chain in the next stage.</div>
+                        <div class="trade-chain-table">
+                            <div class="trade-chain-head"><span>Strike</span><span>Bid</span><span>Ask</span><span>Mid</span><span>Vol/OI</span></div>
+                            <div class="trade-chain-list" data-trade-chain-list>
+                                <div class="trade-empty">Run a chain update to load cached contracts.</div>
+                            </div>
+                        </div>
+                        <div class="trade-warning-list" data-trade-chain-warnings></div>
                     </section>
                     <section class="trade-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Selected Contract</div>
-                            <div class="trade-panel-note">No selection</div>
+                            <div class="trade-panel-note" data-trade-selected-note>No selection</div>
                         </div>
-                        <div class="trade-selected-symbol">—</div>
-                        <div class="trade-empty">Exact Schwab contract symbols will be shown here before any preview flow is enabled.</div>
+                        <div class="trade-selected-symbol" data-trade-selected-symbol>—</div>
+                        <div class="trade-selected-summary">
+                            <div class="trade-field"><div class="trade-field-label">Bid / Mid / Ask</div><div class="trade-field-value" data-trade-selected-bma>—</div></div>
+                            <div class="trade-field"><div class="trade-field-label">Last / Mark</div><div class="trade-field-value" data-trade-selected-last>—</div></div>
+                            <div class="trade-field"><div class="trade-field-label">Spread</div><div class="trade-field-value" data-trade-selected-spread>—</div></div>
+                            <div class="trade-field"><div class="trade-field-label">Vol / OI</div><div class="trade-field-value" data-trade-selected-activity>—</div></div>
+                            <div class="trade-field"><div class="trade-field-label">IV / Delta</div><div class="trade-field-value" data-trade-selected-greeks>—</div></div>
+                            <div class="trade-field"><div class="trade-field-label">Quote / Trade</div><div class="trade-field-value" data-trade-selected-time>—</div></div>
+                        </div>
+                        <div class="trade-warning-list" data-trade-selected-warnings></div>
                     </section>
                     <section class="trade-panel">
                         <div class="trade-panel-head">
@@ -16962,6 +17245,11 @@ def index():
                     lastData = data;  // Update before rendering so popout windows get fresh data
                     updateCharts(data, topOiContextKey);
                     updatePriceInfo(data.price_info);
+                }
+                if (!isTradeRailCollapsed()) {
+                    tradeRailState.expiry = '';
+                    tradeRailState.selectedSymbol = '';
+                    requestTradeChain({ force: true });
                 }
                 // Options cache is now populated — refresh price levels immediately.
                 // This fixes the delay where levels were missing right after a ticker change
@@ -24759,22 +25047,33 @@ def index():
             return (
                 '<div class="trade-rail-shell">' +
                     '<section class="trade-panel">' +
-                        '<div class="trade-panel-head"><div class="trade-panel-title">Contract Picker</div><div class="trade-panel-note">SPY first</div></div>' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Contract Picker</div><div class="trade-panel-note" data-trade-chain-meta>Cached chain</div></div>' +
                         '<div class="trade-segment" aria-label="Option type">' +
-                            '<button type="button" class="active call" disabled>Calls</button>' +
-                            '<button type="button" class="put" disabled>Puts</button>' +
+                            '<button type="button" class="active call" data-trade-type="CALL">Calls</button>' +
+                            '<button type="button" class="put" data-trade-type="PUT">Puts</button>' +
                         '</div>' +
-                        '<div class="trade-chain-placeholder" aria-hidden="true">' +
-                            '<span>Strike</span><span>Bid</span><span>Ask</span><span>Mid</span><span>Vol</span>' +
-                            '<span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>' +
-                            '<span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>' +
+                        '<div class="trade-filter-grid">' +
+                            '<label>Expiry<select id="trade-expiry-select" data-trade-expiry></select></label>' +
+                            '<label>Range<input id="trade-strike-range" data-trade-strike-range type="number" min="0.5" max="20" step="0.5" value="2"></label>' +
                         '</div>' +
-                        '<div class="trade-empty">Contracts will load from the cached option chain in the next stage.</div>' +
+                        '<div class="trade-chain-table">' +
+                            '<div class="trade-chain-head"><span>Strike</span><span>Bid</span><span>Ask</span><span>Mid</span><span>Vol/OI</span></div>' +
+                            '<div class="trade-chain-list" data-trade-chain-list><div class="trade-empty">Run a chain update to load cached contracts.</div></div>' +
+                        '</div>' +
+                        '<div class="trade-warning-list" data-trade-chain-warnings></div>' +
                     '</section>' +
                     '<section class="trade-panel">' +
-                        '<div class="trade-panel-head"><div class="trade-panel-title">Selected Contract</div><div class="trade-panel-note">No selection</div></div>' +
-                        '<div class="trade-selected-symbol">—</div>' +
-                        '<div class="trade-empty">Exact Schwab contract symbols will be shown here before any preview flow is enabled.</div>' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Selected Contract</div><div class="trade-panel-note" data-trade-selected-note>No selection</div></div>' +
+                        '<div class="trade-selected-symbol" data-trade-selected-symbol>—</div>' +
+                        '<div class="trade-selected-summary">' +
+                            '<div class="trade-field"><div class="trade-field-label">Bid / Mid / Ask</div><div class="trade-field-value" data-trade-selected-bma>—</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">Last / Mark</div><div class="trade-field-value" data-trade-selected-last>—</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">Spread</div><div class="trade-field-value" data-trade-selected-spread>—</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">Vol / OI</div><div class="trade-field-value" data-trade-selected-activity>—</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">IV / Delta</div><div class="trade-field-value" data-trade-selected-greeks>—</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">Quote / Trade</div><div class="trade-field-value" data-trade-selected-time>—</div></div>' +
+                        '</div>' +
+                        '<div class="trade-warning-list" data-trade-selected-warnings></div>' +
                     '</section>' +
                     '<section class="trade-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Order Ticket</div><div class="trade-panel-note">Read only</div></div>' +
@@ -24821,6 +25120,8 @@ def index():
             } else if (!rail.querySelector('.trade-rail-shell')) {
                 rail.innerHTML = buildTradeRailHtml();
             }
+            wireTradeRailPickerControls(rail);
+            renderTradeRail();
             applyTradeRailCollapse(isTradeRailCollapsed());
             return rail;
         }
@@ -25302,6 +25603,242 @@ def index():
         const TRADE_RAIL_COLLAPSE_KEY = 'gex.tradeRailCollapsed';
         const TRADE_RAIL_WIDTH_KEY = 'gex.tradeRailWidthPx';
         const TRADE_RAIL_DEFAULT_WIDTH = 400;
+        const tradeRailState = {
+            ticker: '',
+            optionType: 'CALL',
+            expiry: '',
+            strikeRangePct: 2,
+            payload: null,
+            selectedSymbol: '',
+            loading: false,
+            requestKey: '',
+        };
+
+        function fmtTradePrice(value) {
+            const n = Number(value);
+            return Number.isFinite(n) ? n.toFixed(n >= 10 ? 2 : 3).replace(/0+$/, '').replace(/\.$/, '') : '—';
+        }
+        function fmtTradeInt(value) {
+            const n = Number(value);
+            return Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
+        }
+        function fmtTradePct(value) {
+            const n = Number(value);
+            return Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—';
+        }
+        function fmtTradeTimestamp(ms) {
+            const n = Number(ms);
+            if (!Number.isFinite(n) || n <= 0) return '—';
+            try {
+                return new Intl.DateTimeFormat('en-US', {
+                    timeZone: 'America/New_York',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false,
+                }).format(new Date(n));
+            } catch (e) {
+                return new Date(n).toLocaleTimeString();
+            }
+        }
+        function getTradeRailTicker() {
+            const tickerEl = document.getElementById('ticker');
+            return String((tickerEl && tickerEl.value) || '').trim().toUpperCase();
+        }
+        function getTradeRailSelectedDashboardExpiries() {
+            if (typeof getSelectedExpiryValues === 'function') return getSelectedExpiryValues();
+            return Array.from(document.querySelectorAll('.expiry-option input[type="checkbox"]:checked')).map(cb => cb.value);
+        }
+        function setTradeText(selector, text) {
+            document.querySelectorAll(selector).forEach(el => { el.textContent = text; });
+        }
+        function setTradeField(key, text) {
+            setTradeText('[data-trade-' + key + ']', text);
+        }
+        function getTradeContractsForView() {
+            const payload = tradeRailState.payload || {};
+            const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
+            const expiry = tradeRailState.expiry || (payload.selected_expiries && payload.selected_expiries[0]) || '';
+            return contracts.filter(row => {
+                if (tradeRailState.optionType && row.option_type !== tradeRailState.optionType) return false;
+                if (expiry && row.expiry !== expiry) return false;
+                return true;
+            }).sort((a, b) => {
+                const spot = Number(payload.underlying_price);
+                const da = Math.abs((Number(a.strike) || 0) - (Number.isFinite(spot) ? spot : 0));
+                const db = Math.abs((Number(b.strike) || 0) - (Number.isFinite(spot) ? spot : 0));
+                return da - db || ((Number(a.strike) || 0) - (Number(b.strike) || 0));
+            });
+        }
+        function renderTradeExpiryOptions(payload) {
+            const select = document.querySelector('[data-trade-expiry]');
+            if (!select) return;
+            const expiries = Array.isArray(payload && payload.expiries) ? payload.expiries : [];
+            const selected = tradeRailState.expiry || (payload && payload.selected_expiries && payload.selected_expiries[0]) || expiries[0] || '';
+            if (tradeRailState.expiry !== selected) tradeRailState.expiry = selected;
+            select.innerHTML = expiries.length
+                ? expiries.map(exp => '<option value="' + _escapeHtml(exp) + '"' + (exp === selected ? ' selected' : '') + '>' + _escapeHtml(exp) + '</option>').join('')
+                : '<option value="">No expiry</option>';
+        }
+        function renderTradeSelected(contract) {
+            const warningEl = document.querySelector('[data-trade-selected-warnings]');
+            if (!contract) {
+                setTradeField('selected-symbol', '—');
+                setTradeField('selected-note', 'No selection');
+                setTradeField('selected-bma', '—');
+                setTradeField('selected-last', '—');
+                setTradeField('selected-spread', '—');
+                setTradeField('selected-activity', '—');
+                setTradeField('selected-greeks', '—');
+                setTradeField('selected-time', '—');
+                if (warningEl) warningEl.textContent = '';
+                return;
+            }
+            setTradeField('selected-symbol', contract.contract_symbol || '—');
+            setTradeField('selected-note', (contract.expiry || '—') + ' ' + (contract.option_type || '') + ' ' + fmtTradePrice(contract.strike));
+            setTradeField('selected-bma', fmtTradePrice(contract.bid) + ' / ' + fmtTradePrice(contract.mid) + ' / ' + fmtTradePrice(contract.ask));
+            setTradeField('selected-last', fmtTradePrice(contract.last) + ' / ' + fmtTradePrice(contract.mark));
+            setTradeField('selected-spread', fmtTradePrice(contract.spread) + (contract.spread_pct == null ? '' : ' (' + Number(contract.spread_pct).toFixed(1) + '%)'));
+            setTradeField('selected-activity', fmtTradeInt(contract.volume) + ' / ' + fmtTradeInt(contract.open_interest));
+            setTradeField('selected-greeks', fmtTradePct(contract.iv) + ' / ' + fmtTradePrice(contract.delta));
+            setTradeField('selected-time', fmtTradeTimestamp(contract.quote_time) + ' / ' + fmtTradeTimestamp(contract.trade_time));
+            const warnings = [];
+            if ((contract.warnings || []).includes('stale_quote')) warnings.push('Stale quote');
+            if ((contract.warnings || []).includes('wide_spread')) warnings.push('Wide spread');
+            if (warningEl) warningEl.textContent = warnings.join(' · ');
+            document.querySelectorAll('.trade-price-preset').forEach(btn => {
+                btn.disabled = true;
+                const label = btn.textContent.trim().toLowerCase();
+                const value = label === 'bid' ? contract.bid : label === 'mid' ? contract.mid : label === 'ask' ? contract.ask : contract.mark;
+                btn.title = Number.isFinite(Number(value)) ? fmtTradePrice(value) : '';
+            });
+            const limitEl = Array.from(document.querySelectorAll('.trade-field-label')).find(el => el.textContent === 'Limit');
+            if (limitEl && limitEl.nextElementSibling) limitEl.nextElementSibling.textContent = fmtTradePrice(contract.mid || contract.mark);
+            const riskEl = Array.from(document.querySelectorAll('.trade-field-label')).find(el => el.textContent === 'Est. Risk');
+            const risk = Number(contract.mid || contract.mark);
+            if (riskEl && riskEl.nextElementSibling) riskEl.nextElementSibling.textContent = Number.isFinite(risk) ? '$' + (risk * 100).toFixed(0) : '—';
+        }
+        function renderTradeRail() {
+            const rail = document.getElementById('trade-rail');
+            if (!rail) return;
+            const list = rail.querySelector('[data-trade-chain-list]');
+            const meta = rail.querySelector('[data-trade-chain-meta]');
+            const warnings = rail.querySelector('[data-trade-chain-warnings]');
+            const payload = tradeRailState.payload;
+            rail.querySelectorAll('[data-trade-type]').forEach(btn => {
+                const active = btn.dataset.tradeType === tradeRailState.optionType;
+                btn.classList.toggle('active', active);
+                btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+            if (!payload) {
+                if (list) list.innerHTML = '<div class="trade-empty">' + (tradeRailState.loading ? 'Loading cached contracts...' : 'Run a chain update to load cached contracts.') + '</div>';
+                if (meta) meta.textContent = tradeRailState.loading ? 'Loading' : 'Cached chain';
+                renderTradeSelected(null);
+                return;
+            }
+            renderTradeExpiryOptions(payload);
+            const rows = getTradeContractsForView();
+            if (meta) {
+                const spot = payload.underlying_price == null ? '—' : fmtTradePrice(payload.underlying_price);
+                meta.textContent = (payload.ticker || tradeRailState.ticker || '—') + ' @ ' + spot + ' · ' + rows.length + ' shown';
+            }
+            if (warnings) warnings.textContent = (payload.warnings || []).join(' · ');
+            if (!rows.length) {
+                if (list) list.innerHTML = '<div class="trade-empty">No contracts match the selected filters.</div>';
+                renderTradeSelected(null);
+                return;
+            }
+            if (!rows.some(row => row.contract_symbol === tradeRailState.selectedSymbol)) {
+                tradeRailState.selectedSymbol = rows[0].contract_symbol;
+            }
+            if (list) {
+                list.innerHTML = rows.map(row => {
+                    const typeCls = row.option_type === 'PUT' ? 'put' : 'call';
+                    const warn = (row.warnings || []).length ? '<span class="trade-contract-warn">!</span>' : '';
+                    return '<button type="button" class="trade-contract-row ' + typeCls + (row.contract_symbol === tradeRailState.selectedSymbol ? ' active' : '') + '" data-trade-symbol="' + _escapeHtml(row.contract_symbol) + '">' +
+                        '<span class="trade-contract-strike">' + warn + ' ' + _escapeHtml(fmtTradePrice(row.strike)) + '</span>' +
+                        '<span>' + _escapeHtml(fmtTradePrice(row.bid)) + '</span>' +
+                        '<span>' + _escapeHtml(fmtTradePrice(row.ask)) + '</span>' +
+                        '<span>' + _escapeHtml(fmtTradePrice(row.mid || row.mark)) + '</span>' +
+                        '<span>' + _escapeHtml(fmtTradeInt(row.volume)) + '/' + _escapeHtml(fmtTradeInt(row.open_interest)) + '</span>' +
+                    '</button>';
+                }).join('');
+            }
+            const selected = rows.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || rows[0];
+            renderTradeSelected(selected);
+            rail.querySelectorAll('[data-trade-symbol]').forEach(btn => {
+                if (btn.__tradeSymbolBound) return;
+                btn.__tradeSymbolBound = true;
+                btn.addEventListener('click', () => {
+                    tradeRailState.selectedSymbol = btn.dataset.tradeSymbol || '';
+                    renderTradeRail();
+                });
+            });
+        }
+        function requestTradeChain(options = {}) {
+            const ticker = getTradeRailTicker();
+            if (!ticker) return;
+            const selectedExpiry = tradeRailState.expiry ? [tradeRailState.expiry] : getTradeRailSelectedDashboardExpiries();
+            const rangePct = Math.max(0.5, Math.min(20, Number(tradeRailState.strikeRangePct) || 2));
+            const key = ticker + '|' + selectedExpiry.join(',') + '|' + rangePct;
+            if (!options.force && tradeRailState.requestKey === key && tradeRailState.payload) return;
+            tradeRailState.loading = true;
+            tradeRailState.ticker = ticker;
+            tradeRailState.requestKey = key;
+            renderTradeRail();
+            fetch('/trade_chain', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    ticker,
+                    expiry: selectedExpiry,
+                    strike_range: rangePct / 100,
+                    contract_type: 'ALL',
+                }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, data: d })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || 'Trade chain request failed');
+                tradeRailState.payload = data;
+                tradeRailState.expiry = (data.selected_expiries && data.selected_expiries[0]) || tradeRailState.expiry || '';
+                tradeRailState.loading = false;
+                renderTradeRail();
+            })
+            .catch(err => {
+                tradeRailState.loading = false;
+                tradeRailState.payload = null;
+                const list = document.querySelector('[data-trade-chain-list]');
+                if (list) list.innerHTML = '<div class="trade-empty">' + _escapeHtml(err.message || 'Trade chain unavailable') + '</div>';
+                renderTradeSelected(null);
+            });
+        }
+        function wireTradeRailPickerControls(root = document.getElementById('trade-rail')) {
+            if (!root || root.__tradePickerWired) return;
+            root.__tradePickerWired = true;
+            root.querySelectorAll('[data-trade-type]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    tradeRailState.optionType = btn.dataset.tradeType === 'PUT' ? 'PUT' : 'CALL';
+                    tradeRailState.selectedSymbol = '';
+                    renderTradeRail();
+                });
+            });
+            const expirySelect = root.querySelector('[data-trade-expiry]');
+            if (expirySelect) {
+                expirySelect.addEventListener('change', () => {
+                    tradeRailState.expiry = expirySelect.value || '';
+                    tradeRailState.selectedSymbol = '';
+                    requestTradeChain({ force: true });
+                });
+            }
+            const rangeInput = root.querySelector('[data-trade-strike-range]');
+            if (rangeInput) {
+                rangeInput.addEventListener('change', () => {
+                    tradeRailState.strikeRangePct = Number(rangeInput.value) || 2;
+                    tradeRailState.selectedSymbol = '';
+                    requestTradeChain({ force: true });
+                });
+            }
+        }
 
         function scheduleTradeRailResizeRefresh() {
             requestAnimationFrame(() => {
@@ -25360,7 +25897,10 @@ def index():
                 btn.title = collapsed ? 'Expand trading rail' : 'Collapse trading rail';
                 btn.setAttribute('aria-label', btn.title);
             }
-            if (!collapsed) syncTradeRailWidth();
+            if (!collapsed) {
+                syncTradeRailWidth();
+                requestTradeChain();
+            }
             scheduleTradeRailResizeRefresh();
         }
         function ensureTradeRailControls(grid = document.getElementById('chart-grid')) {
@@ -29509,6 +30049,51 @@ def get_expirations(ticker):
         return jsonify(expirations)
     except Exception as e:
         return jsonify({'error': str(e)}), 400
+
+@app.route('/trade_chain', methods=['POST'])
+def trade_chain():
+    """Read-only contract picker snapshot built from the cached option chain."""
+    data = request.get_json(silent=True) or {}
+    ticker = format_ticker(data.get('ticker'))
+    if not ticker:
+        return jsonify({'error': 'Missing ticker'}), 400
+    cached = _options_cache.get(ticker)
+    if not cached:
+        return jsonify({'error': 'No cached option chain for ticker. Run a normal chain update first.'}), 409
+
+    expiry = data.get('expiry', data.get('expiries'))
+    if isinstance(expiry, str):
+        selected_expiries = [expiry]
+    elif isinstance(expiry, list):
+        selected_expiries = expiry
+    else:
+        selected_expiries = []
+
+    contract_type = str(data.get('contract_type', 'ALL') or 'ALL').upper()
+    if contract_type in ('CALLS', 'C'):
+        contract_type = 'CALL'
+    elif contract_type in ('PUTS', 'P'):
+        contract_type = 'PUT'
+    elif contract_type not in ('ALL', 'CALL', 'PUT'):
+        contract_type = 'ALL'
+
+    try:
+        strike_range = float(data.get('strike_range', 0.02))
+    except Exception:
+        strike_range = 0.02
+
+    payload = build_trading_chain_payload(
+        ticker=ticker,
+        calls=cached.get('calls'),
+        puts=cached.get('puts'),
+        S=cached.get('S'),
+        selected_expiries=selected_expiries,
+        strike_range=strike_range,
+        contract_type=contract_type,
+    )
+    if not payload.get('contracts'):
+        payload['warnings'] = sorted(set((payload.get('warnings') or []) + ['No contracts matched the cached chain filters.']))
+    return jsonify(payload)
 
 @app.route('/update', methods=['POST'])
 def update():
