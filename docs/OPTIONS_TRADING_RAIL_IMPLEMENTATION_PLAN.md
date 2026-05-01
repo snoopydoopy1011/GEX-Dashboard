@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Stage 3 complete / Stage 4 next
+**Status:** Stage 4 complete / Stage 5 next
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -115,6 +115,36 @@ Verification completed:
 - `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
 - `git diff --check` passed.
 - Flask test-client smoke tests mocked Schwab linked accounts/account details and confirmed masked account labels, no raw account number leakage, relevant position filtering, and clear token/client error handling.
+
+### 2026-05-01 Stage 4 Progress Update
+
+Stage 4 is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Added a server-side single-leg option DAY LIMIT order builder for preview-only orders.
+- Added `POST /trade/preview_order`, with no live placement endpoint and no cancel/replace behavior.
+- Restricted preview inputs to cached OPTION contracts, `LIMIT`, `DAY`, `NORMAL`, `SINGLE`, `BUY_TO_OPEN`, and `SELL_TO_CLOSE`.
+- Required selected contract symbols to exist exactly in the latest cached `_options_cache` trading-chain data.
+- Preserved Schwab-returned `contractSymbol`; no option symbol reconstruction was introduced.
+- Added preview token/order hash generation that binds account hash, ticker, and the exact order JSON for Stage 5.
+- Added the order ticket UI with Buy Ask / Sell Bid action buttons, quantity, limit price, bid/mid/ask/mark quick fills, debit/credit estimate, max-risk estimate, and Schwab preview response display.
+- Invalidated the prior preview when contract, account, action, quantity, limit price, expiry, strike range, or option type changes.
+- Added `SELL_TO_CLOSE` server validation against the selected-contract long position by reading account positions before preview.
+- Redacted plain account-number fields from Schwab preview response bodies before returning them to the browser.
+
+Tricky parts / implementation notes:
+
+- The trading rail DOM exists in both initial HTML and `buildTradeRailHtml()` because `ensurePriceChartDom()` can rebuild the rail after chart DOM churn.
+- The UI defaults to the user's directional workflow: `BUY_TO_OPEN` quick-fills ask and `SELL_TO_CLOSE` quick-fills bid, while still exposing bid/mid/ask/mark presets.
+- Preview failures from Schwab are surfaced as preview responses; they still do not enable any live order path.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- Flask test-client smoke tests for `/trade/preview_order` confirmed missing account rejection, missing/unknown contract rejection, invalid quantity/price/action rejection, expected Schwab preview payload for `BUY_TO_OPEN`, `SELL_TO_CLOSE` position validation, and account-number redaction.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
 
 ---
 
@@ -1110,11 +1140,11 @@ Stage 3:
 
 Stage 4:
 
-- [ ] Add server-side order builder.
-- [ ] Add preview endpoint.
-- [ ] Add strict validation.
-- [ ] Add preview UI.
-- [ ] Keep live order disabled.
+- [x] Add server-side order builder.
+- [x] Add preview endpoint.
+- [x] Add strict validation.
+- [x] Add preview UI.
+- [x] Keep live order disabled.
 
 Stage 5:
 

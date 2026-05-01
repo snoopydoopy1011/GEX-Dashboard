@@ -32,6 +32,8 @@ import warnings
 import json
 import threading
 import queue
+import hashlib
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
 # Load environment variables
@@ -4792,6 +4794,122 @@ def build_trade_account_details_payload(raw_details, account_hash, ticker=None, 
         'balances': _pick_balance_fields(account),
         'positions': _normalize_trade_positions(account, ticker=ticker, contract_symbol=contract_symbol),
     }
+
+
+ALLOWED_TRADE_INSTRUCTIONS = {'BUY_TO_OPEN', 'SELL_TO_CLOSE'}
+MAX_TRADE_PREVIEW_QTY = 100
+
+
+def _find_cached_trade_contract(ticker, contract_symbol):
+    """Return a normalized cached contract row for the exact Schwab contract symbol."""
+    ticker = format_ticker(ticker or '')
+    contract_symbol = str(contract_symbol or '').strip()
+    cached = _options_cache.get(ticker)
+    if not cached or not contract_symbol:
+        return None
+    for option_type, df in (('CALL', cached.get('calls')), ('PUT', cached.get('puts'))):
+        if df is None or getattr(df, 'empty', True) or 'contractSymbol' not in df.columns:
+            continue
+        exact = df[df['contractSymbol'].astype(str) == contract_symbol]
+        if exact.empty:
+            continue
+        payload = build_trading_chain_payload(
+            ticker=ticker,
+            calls=exact if option_type == 'CALL' else None,
+            puts=exact if option_type == 'PUT' else None,
+            S=cached.get('S'),
+            selected_expiries=None,
+            strike_range=0,
+            contract_type=option_type,
+        )
+        contracts = payload.get('contracts') or []
+        if contracts:
+            return contracts[0]
+    return None
+
+
+def _parse_trade_quantity(value):
+    try:
+        quantity = int(value)
+    except Exception:
+        raise ValueError('Quantity must be a positive whole number.')
+    if quantity <= 0:
+        raise ValueError('Quantity must be greater than zero.')
+    if quantity > MAX_TRADE_PREVIEW_QTY:
+        raise ValueError(f'Quantity must be {MAX_TRADE_PREVIEW_QTY} or less for preview.')
+    return quantity
+
+
+def _parse_limit_price(value):
+    try:
+        price = Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        raise ValueError('Limit price must be a positive number.')
+    if price <= 0:
+        raise ValueError('Limit price must be greater than zero.')
+    if price > Decimal('9999.99'):
+        raise ValueError('Limit price is outside the supported preview range.')
+    return price
+
+
+def build_single_option_limit_order(contract_symbol, instruction, quantity, limit_price):
+    """Build the only supported Stage 4 order shape: single-leg option DAY LIMIT."""
+    instruction = str(instruction or '').upper()
+    if instruction not in ALLOWED_TRADE_INSTRUCTIONS:
+        raise ValueError('Unsupported order action.')
+    quantity = _parse_trade_quantity(quantity)
+    price = _parse_limit_price(limit_price)
+    return {
+        'complexOrderStrategyType': 'NONE',
+        'orderType': 'LIMIT',
+        'session': 'NORMAL',
+        'price': f'{price:.2f}',
+        'duration': 'DAY',
+        'orderStrategyType': 'SINGLE',
+        'orderLegCollection': [
+            {
+                'instruction': instruction,
+                'quantity': quantity,
+                'instrument': {
+                    'symbol': str(contract_symbol or '').strip(),
+                    'assetType': 'OPTION',
+                },
+            }
+        ],
+    }
+
+
+def _order_preview_fingerprint(account_hash, ticker, order):
+    canonical = json.dumps({
+        'account_hash': str(account_hash or ''),
+        'ticker': format_ticker(ticker or ''),
+        'order': order,
+    }, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _redact_trade_payload(value):
+    if isinstance(value, dict):
+        redacted = {}
+        for key, child in value.items():
+            key_text = str(key)
+            if key_text.lower() in {'accountnumber', 'account_number'}:
+                redacted[key] = '[redacted]'
+            else:
+                redacted[key] = _redact_trade_payload(child)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_trade_payload(child) for child in value]
+    return value
+
+
+def _selected_contract_position_quantity(raw_details, contract_symbol):
+    payload = build_trade_account_details_payload(raw_details or {}, account_hash='', contract_symbol=contract_symbol)
+    for position in payload.get('positions') or []:
+        if position.get('selected_contract_match'):
+            quantity = position.get('quantity')
+            return float(quantity or 0)
+    return 0.0
 
 
 def _expiration_for_dte(df, target_dte, selected_expiries=None):
@@ -10261,6 +10379,31 @@ def index():
             cursor: not-allowed;
             opacity: 0.55;
         }
+        .trade-action-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+        .trade-action-button {
+            min-height: 34px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            color: var(--fg-1);
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .trade-action-button.active.buy {
+            color: var(--call);
+            border-color: color-mix(in srgb, var(--call) 50%, var(--border));
+            background: color-mix(in srgb, var(--call) 11%, transparent);
+        }
+        .trade-action-button.active.sell {
+            color: var(--put);
+            border-color: color-mix(in srgb, var(--put) 50%, var(--border));
+            background: color-mix(in srgb, var(--put) 11%, transparent);
+        }
         .trade-segment button.active.call {
             color: var(--call);
             border-color: color-mix(in srgb, var(--call) 45%, var(--border));
@@ -10451,6 +10594,18 @@ def index():
             padding: 0 8px;
             font-size: 12px;
         }
+        .trade-ticket-input {
+            width: 100%;
+            min-height: 30px;
+            margin-top: 4px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            color: var(--fg-1);
+            border-radius: 6px;
+            padding: 0 8px;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+        }
         .trade-price-presets {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -10468,8 +10623,25 @@ def index():
             font-weight: 700;
             letter-spacing: 0.04em;
             text-transform: uppercase;
+            cursor: pointer;
+        }
+        .trade-preview-button:disabled {
             opacity: 0.55;
             cursor: not-allowed;
+        }
+        .trade-preview-response {
+            margin-top: 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            font-size: 11px;
+            line-height: 1.35;
+            max-height: 190px;
+            overflow: auto;
+            padding: 8px;
+            white-space: pre-wrap;
+            word-break: break-word;
         }
 
         .rail-flow-shell {
@@ -15075,36 +15247,41 @@ def index():
                     <section class="trade-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Order Ticket</div>
-                            <div class="trade-panel-note">Read only</div>
+                            <div class="trade-panel-note" data-trade-ticket-note>Preview only</div>
+                        </div>
+                        <div class="trade-action-grid" aria-label="Order action">
+                            <button type="button" class="trade-action-button buy active" data-trade-action="BUY_TO_OPEN">Buy Ask</button>
+                            <button type="button" class="trade-action-button sell" data-trade-action="SELL_TO_CLOSE">Sell Bid</button>
                         </div>
                         <div class="trade-ticket-grid">
-                            <div class="trade-field">
-                                <div class="trade-field-label">Action</div>
-                                <div class="trade-field-value">Buy to Open</div>
-                            </div>
-                            <div class="trade-field">
+                            <label class="trade-field">
                                 <div class="trade-field-label">Quantity</div>
-                                <div class="trade-field-value">1</div>
-                            </div>
-                            <div class="trade-field">
+                                <input class="trade-ticket-input" data-trade-quantity type="number" min="1" max="100" step="1" value="1">
+                            </label>
+                            <label class="trade-field">
                                 <div class="trade-field-label">Limit</div>
-                                <div class="trade-field-value">—</div>
+                                <input class="trade-ticket-input" data-trade-limit type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00">
+                            </label>
+                            <div class="trade-field">
+                                <div class="trade-field-label">Debit / Credit</div>
+                                <div class="trade-field-value" data-trade-est-notional>—</div>
                             </div>
                             <div class="trade-field">
-                                <div class="trade-field-label">Est. Risk</div>
-                                <div class="trade-field-value">—</div>
+                                <div class="trade-field-label">Max Risk</div>
+                                <div class="trade-field-value" data-trade-est-risk>—</div>
                             </div>
                         </div>
                         <div class="trade-price-presets">
-                            <button type="button" class="trade-price-preset" disabled>Bid</button>
-                            <button type="button" class="trade-price-preset" disabled>Mid</button>
-                            <button type="button" class="trade-price-preset" disabled>Ask</button>
-                            <button type="button" class="trade-price-preset" disabled>Mark</button>
+                            <button type="button" class="trade-price-preset" data-trade-price-preset="bid">Bid</button>
+                            <button type="button" class="trade-price-preset" data-trade-price-preset="mid">Mid</button>
+                            <button type="button" class="trade-price-preset" data-trade-price-preset="ask">Ask</button>
+                            <button type="button" class="trade-price-preset" data-trade-price-preset="mark">Mark</button>
                         </div>
+                        <div class="trade-warning-list" data-trade-ticket-warnings></div>
                     </section>
                     <section class="trade-panel">
-                        <button type="button" class="trade-preview-button" disabled>Preview Disabled</button>
-                        <div class="trade-empty">Stage 1 does not call account, preview, or order endpoints.</div>
+                        <button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>
+                        <div class="trade-preview-response" data-trade-preview-response>Preview required before any future live placement. Live orders are not available in this stage.</div>
                     </section>
                 </div>
             </aside>
@@ -25323,23 +25500,28 @@ def index():
                         '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
                     '</section>' +
                     '<section class="trade-panel">' +
-                        '<div class="trade-panel-head"><div class="trade-panel-title">Order Ticket</div><div class="trade-panel-note">Read only</div></div>' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Order Ticket</div><div class="trade-panel-note" data-trade-ticket-note>Preview only</div></div>' +
+                        '<div class="trade-action-grid" aria-label="Order action">' +
+                            '<button type="button" class="trade-action-button buy active" data-trade-action="BUY_TO_OPEN">Buy Ask</button>' +
+                            '<button type="button" class="trade-action-button sell" data-trade-action="SELL_TO_CLOSE">Sell Bid</button>' +
+                        '</div>' +
                         '<div class="trade-ticket-grid">' +
-                            '<div class="trade-field"><div class="trade-field-label">Action</div><div class="trade-field-value">Buy to Open</div></div>' +
-                            '<div class="trade-field"><div class="trade-field-label">Quantity</div><div class="trade-field-value">1</div></div>' +
-                            '<div class="trade-field"><div class="trade-field-label">Limit</div><div class="trade-field-value">—</div></div>' +
-                            '<div class="trade-field"><div class="trade-field-label">Est. Risk</div><div class="trade-field-value">—</div></div>' +
+                            '<label class="trade-field"><div class="trade-field-label">Quantity</div><input class="trade-ticket-input" data-trade-quantity type="number" min="1" max="100" step="1" value="1"></label>' +
+                            '<label class="trade-field"><div class="trade-field-label">Limit</div><input class="trade-ticket-input" data-trade-limit type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00"></label>' +
+                            '<div class="trade-field"><div class="trade-field-label">Debit / Credit</div><div class="trade-field-value" data-trade-est-notional>—</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">Max Risk</div><div class="trade-field-value" data-trade-est-risk>—</div></div>' +
                         '</div>' +
                         '<div class="trade-price-presets">' +
-                            '<button type="button" class="trade-price-preset" disabled>Bid</button>' +
-                            '<button type="button" class="trade-price-preset" disabled>Mid</button>' +
-                            '<button type="button" class="trade-price-preset" disabled>Ask</button>' +
-                            '<button type="button" class="trade-price-preset" disabled>Mark</button>' +
+                            '<button type="button" class="trade-price-preset" data-trade-price-preset="bid">Bid</button>' +
+                            '<button type="button" class="trade-price-preset" data-trade-price-preset="mid">Mid</button>' +
+                            '<button type="button" class="trade-price-preset" data-trade-price-preset="ask">Ask</button>' +
+                            '<button type="button" class="trade-price-preset" data-trade-price-preset="mark">Mark</button>' +
                         '</div>' +
+                        '<div class="trade-warning-list" data-trade-ticket-warnings></div>' +
                     '</section>' +
                     '<section class="trade-panel">' +
-                        '<button type="button" class="trade-preview-button" disabled>Preview Disabled</button>' +
-                        '<div class="trade-empty">Stage 1 does not call account, preview, or order endpoints.</div>' +
+                        '<button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>' +
+                        '<div class="trade-preview-response" data-trade-preview-response>Preview required before any future live placement. Live orders are not available in this stage.</div>' +
                     '</section>' +
                 '</div>'
             );
@@ -25867,6 +26049,13 @@ def index():
             accountDetailsLoading: false,
             accountError: '',
             accountRequestKey: '',
+            action: 'BUY_TO_OPEN',
+            quantity: 1,
+            limitPrice: '',
+            preview: null,
+            previewToken: '',
+            previewLoading: false,
+            previewError: '',
         };
 
         function fmtTradePrice(value) {
@@ -25918,6 +26107,69 @@ def index():
             const payload = tradeRailState.payload || {};
             const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
             return contracts.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || null;
+        }
+        function invalidateTradePreview(message = '') {
+            tradeRailState.preview = null;
+            tradeRailState.previewToken = '';
+            tradeRailState.previewError = message;
+            renderTradeTicket();
+        }
+        function getTradePresetPrice(contract, preset) {
+            if (!contract) return '';
+            const key = preset === 'bid' ? 'bid' : preset === 'ask' ? 'ask' : preset === 'mark' ? 'mark' : 'mid';
+            const value = Number(contract[key]);
+            return Number.isFinite(value) && value > 0 ? value.toFixed(2) : '';
+        }
+        function getTradeTicketEstimate() {
+            const qty = Math.max(0, Math.floor(Number(tradeRailState.quantity) || 0));
+            const price = Number(tradeRailState.limitPrice);
+            if (!qty || !Number.isFinite(price) || price <= 0) return null;
+            return price * qty * 100;
+        }
+        function renderTradeTicket() {
+            const selected = getSelectedTradeContract();
+            const qtyInput = document.querySelector('[data-trade-quantity]');
+            const limitInput = document.querySelector('[data-trade-limit]');
+            const note = document.querySelector('[data-trade-ticket-note]');
+            const warnings = document.querySelector('[data-trade-ticket-warnings]');
+            const previewButton = document.querySelector('[data-trade-preview]');
+            const previewResponse = document.querySelector('[data-trade-preview-response]');
+            if (qtyInput && String(qtyInput.value) !== String(tradeRailState.quantity)) qtyInput.value = tradeRailState.quantity;
+            if (limitInput && String(limitInput.value) !== String(tradeRailState.limitPrice || '')) limitInput.value = tradeRailState.limitPrice || '';
+            document.querySelectorAll('[data-trade-action]').forEach(btn => {
+                const active = btn.dataset.tradeAction === tradeRailState.action;
+                btn.classList.toggle('active', active);
+                btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+            document.querySelectorAll('[data-trade-price-preset]').forEach(btn => {
+                const value = getTradePresetPrice(selected, btn.dataset.tradePricePreset);
+                btn.disabled = !value;
+                btn.title = value ? fmtTradePrice(value) : '';
+            });
+            const estimate = getTradeTicketEstimate();
+            const isSell = tradeRailState.action === 'SELL_TO_CLOSE';
+            setTradeField('est-notional', estimate == null ? '—' : (isSell ? 'Credit ' : 'Debit ') + fmtTradeMoney(estimate));
+            setTradeField('est-risk', estimate == null ? '—' : (isSell ? 'Position risk reduces on close' : fmtTradeMoney(estimate)));
+            if (note) note.textContent = tradeRailState.previewToken ? 'Previewed' : (tradeRailState.previewLoading ? 'Previewing' : 'Preview only');
+            const localWarnings = [];
+            if (!tradeRailState.accountHash) localWarnings.push('Select an account.');
+            if (!selected) localWarnings.push('Select a contract.');
+            if (!tradeRailState.limitPrice) localWarnings.push('Set a limit price.');
+            if (isSell) localWarnings.push('Sell to close is capped by the selected-contract long position when positions are available.');
+            if (warnings) warnings.textContent = localWarnings.join(' · ');
+            if (previewButton) {
+                previewButton.disabled = tradeRailState.previewLoading || !tradeRailState.accountHash || !selected || !tradeRailState.limitPrice || !(Number(tradeRailState.quantity) > 0);
+                previewButton.textContent = tradeRailState.previewLoading ? 'Previewing...' : 'Preview Order';
+            }
+            if (previewResponse) {
+                if (tradeRailState.preview) {
+                    previewResponse.textContent = JSON.stringify(tradeRailState.preview, null, 2);
+                } else if (tradeRailState.previewError) {
+                    previewResponse.textContent = tradeRailState.previewError;
+                } else {
+                    previewResponse.textContent = 'Preview required before any future live placement. Live orders are not available in this stage.';
+                }
+            }
         }
         function getBestBuyingPower(details) {
             const balances = (details && details.balances) || {};
@@ -26082,6 +26334,7 @@ def index():
                 setTradeField('selected-greeks', '—');
                 setTradeField('selected-time', '—');
                 if (warningEl) warningEl.textContent = '';
+                renderTradeTicket();
                 return;
             }
             setTradeField('selected-symbol', contract.contract_symbol || '—');
@@ -26096,17 +26349,11 @@ def index():
             if ((contract.warnings || []).includes('stale_quote')) warnings.push('Stale quote');
             if ((contract.warnings || []).includes('wide_spread')) warnings.push('Wide spread');
             if (warningEl) warningEl.textContent = warnings.join(' · ');
-            document.querySelectorAll('.trade-price-preset').forEach(btn => {
-                btn.disabled = true;
-                const label = btn.textContent.trim().toLowerCase();
-                const value = label === 'bid' ? contract.bid : label === 'mid' ? contract.mid : label === 'ask' ? contract.ask : contract.mark;
-                btn.title = Number.isFinite(Number(value)) ? fmtTradePrice(value) : '';
-            });
-            const limitEl = Array.from(document.querySelectorAll('.trade-field-label')).find(el => el.textContent === 'Limit');
-            if (limitEl && limitEl.nextElementSibling) limitEl.nextElementSibling.textContent = fmtTradePrice(contract.mid || contract.mark);
-            const riskEl = Array.from(document.querySelectorAll('.trade-field-label')).find(el => el.textContent === 'Est. Risk');
-            const risk = Number(contract.mid || contract.mark);
-            if (riskEl && riskEl.nextElementSibling) riskEl.nextElementSibling.textContent = Number.isFinite(risk) ? '$' + (risk * 100).toFixed(0) : '—';
+            if (!tradeRailState.limitPrice) {
+                const preset = tradeRailState.action === 'SELL_TO_CLOSE' ? 'bid' : 'ask';
+                tradeRailState.limitPrice = getTradePresetPrice(contract, preset);
+            }
+            renderTradeTicket();
         }
         function renderTradeRail() {
             const rail = document.getElementById('trade-rail');
@@ -26144,8 +26391,10 @@ def index():
                 const previousSymbol = tradeRailState.selectedSymbol;
                 tradeRailState.selectedSymbol = rows[0].contract_symbol;
                 if (previousSymbol !== tradeRailState.selectedSymbol) {
+                    tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    invalidateTradePreview('Contract changed. Preview again.');
                 }
             }
             if (list) {
@@ -26169,8 +26418,10 @@ def index():
                 btn.__tradeSymbolBound = true;
                 btn.addEventListener('click', () => {
                     tradeRailState.selectedSymbol = btn.dataset.tradeSymbol || '';
+                    tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    invalidateTradePreview('Contract changed. Preview again.');
                     renderTradeRail();
                 });
             });
@@ -26212,6 +26463,44 @@ def index():
                 renderTradeSelected(null);
             });
         }
+        function previewTradeOrder() {
+            const selected = getSelectedTradeContract();
+            if (!selected || !tradeRailState.accountHash) {
+                invalidateTradePreview('Select an account and contract before preview.');
+                return;
+            }
+            tradeRailState.previewLoading = true;
+            tradeRailState.previewError = '';
+            renderTradeTicket();
+            fetch('/trade/preview_order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    account_hash: tradeRailState.accountHash,
+                    ticker: tradeRailState.ticker || getTradeRailTicker(),
+                    contract_symbol: selected.contract_symbol,
+                    instruction: tradeRailState.action,
+                    quantity: tradeRailState.quantity,
+                    limit_price: tradeRailState.limitPrice,
+                }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                tradeRailState.previewLoading = false;
+                if (!ok || data.error) throw new Error(data.error || 'Preview failed');
+                tradeRailState.preview = data;
+                tradeRailState.previewToken = data.preview_token || '';
+                tradeRailState.previewError = '';
+                renderTradeTicket();
+            })
+            .catch(err => {
+                tradeRailState.previewLoading = false;
+                tradeRailState.preview = null;
+                tradeRailState.previewToken = '';
+                tradeRailState.previewError = err.message || 'Preview failed';
+                renderTradeTicket();
+            });
+        }
         function wireTradeRailPickerControls(root = document.getElementById('trade-rail')) {
             if (!root || root.__tradePickerWired) return;
             root.__tradePickerWired = true;
@@ -26224,6 +26513,7 @@ def index():
                     tradeRailState.accountLabel = account.display_label || '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    invalidateTradePreview('Account changed. Preview again.');
                     renderTradeAccounts();
                     requestTradeAccountDetails({ force: true });
                 });
@@ -26236,8 +26526,10 @@ def index():
                 btn.addEventListener('click', () => {
                     tradeRailState.optionType = btn.dataset.tradeType === 'PUT' ? 'PUT' : 'CALL';
                     tradeRailState.selectedSymbol = '';
+                    tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    invalidateTradePreview('Contract filter changed. Preview again.');
                     renderTradeRail();
                 });
             });
@@ -26246,8 +26538,10 @@ def index():
                 expirySelect.addEventListener('change', () => {
                     tradeRailState.expiry = expirySelect.value || '';
                     tradeRailState.selectedSymbol = '';
+                    tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    invalidateTradePreview('Expiry changed. Preview again.');
                     requestTradeChain({ force: true });
                 });
             }
@@ -26256,11 +26550,47 @@ def index():
                 rangeInput.addEventListener('change', () => {
                     tradeRailState.strikeRangePct = Number(rangeInput.value) || 2;
                     tradeRailState.selectedSymbol = '';
+                    tradeRailState.limitPrice = '';
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
+                    invalidateTradePreview('Strike range changed. Preview again.');
                     requestTradeChain({ force: true });
                 });
             }
+            root.querySelectorAll('[data-trade-action]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    tradeRailState.action = btn.dataset.tradeAction === 'SELL_TO_CLOSE' ? 'SELL_TO_CLOSE' : 'BUY_TO_OPEN';
+                    const selected = getSelectedTradeContract();
+                    tradeRailState.limitPrice = getTradePresetPrice(selected, tradeRailState.action === 'SELL_TO_CLOSE' ? 'bid' : 'ask') || tradeRailState.limitPrice;
+                    invalidateTradePreview('Action changed. Preview again.');
+                    renderTradeTicket();
+                });
+            });
+            const qtyInput = root.querySelector('[data-trade-quantity]');
+            if (qtyInput) {
+                qtyInput.addEventListener('input', () => {
+                    tradeRailState.quantity = qtyInput.value || 1;
+                    invalidateTradePreview('Quantity changed. Preview again.');
+                });
+            }
+            const limitInput = root.querySelector('[data-trade-limit]');
+            if (limitInput) {
+                limitInput.addEventListener('input', () => {
+                    tradeRailState.limitPrice = limitInput.value || '';
+                    invalidateTradePreview('Limit price changed. Preview again.');
+                });
+            }
+            root.querySelectorAll('[data-trade-price-preset]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const value = getTradePresetPrice(getSelectedTradeContract(), btn.dataset.tradePricePreset);
+                    if (!value) return;
+                    tradeRailState.limitPrice = value;
+                    invalidateTradePreview('Limit price changed. Preview again.');
+                    renderTradeTicket();
+                });
+            });
+            const previewButton = root.querySelector('[data-trade-preview]');
+            if (previewButton) previewButton.addEventListener('click', previewTradeOrder);
         }
 
         function scheduleTradeRailResizeRefresh() {
@@ -30571,6 +30901,79 @@ def trade_account_details():
         contract_symbol=contract_symbol,
     )
     return jsonify(payload)
+
+
+@app.route('/trade/preview_order', methods=['POST'])
+def trade_preview_order():
+    """Preview-only single-leg option LIMIT orders. This endpoint never places orders."""
+    client_error = _require_schwab_client()
+    if client_error:
+        return _trade_api_error(client_error, 503)
+
+    data = request.get_json(silent=True) or {}
+    account_hash = str(data.get('account_hash') or data.get('accountHash') or '').strip()
+    if not account_hash:
+        return _trade_api_error('Missing account hash.', 400)
+
+    ticker = format_ticker(data.get('ticker') or '')
+    if not ticker:
+        return _trade_api_error('Missing ticker.', 400)
+
+    contract_symbol = str(data.get('contract_symbol') or data.get('contractSymbol') or '').strip()
+    contract = _find_cached_trade_contract(ticker, contract_symbol)
+    if not contract:
+        return _trade_api_error('Selected contract is not in the latest cached trading chain.', 400)
+
+    instruction = str(data.get('instruction') or data.get('action') or '').upper()
+    if instruction not in ALLOWED_TRADE_INSTRUCTIONS:
+        return _trade_api_error('Unsupported order action. Use BUY_TO_OPEN or SELL_TO_CLOSE.', 400)
+
+    try:
+        quantity = _parse_trade_quantity(data.get('quantity'))
+        limit_price = _parse_limit_price(data.get('limit_price') if 'limit_price' in data else data.get('limitPrice'))
+        order = build_single_option_limit_order(contract_symbol, instruction, quantity, limit_price)
+    except ValueError as e:
+        return _trade_api_error(str(e), 400)
+
+    if instruction == 'SELL_TO_CLOSE':
+        try:
+            details_response = client.account_details(account_hash, fields='positions')
+        except Exception as e:
+            return _trade_api_error('Position check failed before preview.', 502, e)
+        if not getattr(details_response, 'ok', False):
+            return _trade_api_error(
+                f"Position check failed with Schwab status {getattr(details_response, 'status_code', 'unknown')}.",
+                502,
+                getattr(details_response, 'reason', None),
+            )
+        available_qty = _selected_contract_position_quantity(_safe_response_json(details_response) or {}, contract_symbol)
+        if available_qty < quantity:
+            return _trade_api_error('SELL_TO_CLOSE quantity exceeds the selected-contract long position.', 400)
+
+    try:
+        response = client.preview_order(account_hash, order)
+    except Exception as e:
+        return _trade_api_error('Schwab order preview failed.', 502, e)
+
+    status_code = getattr(response, 'status_code', None)
+    preview_body = _redact_trade_payload(_safe_response_json(response))
+    preview_token = _order_preview_fingerprint(account_hash, ticker, order)
+    schwab_ok = bool(getattr(response, 'ok', False))
+    result = {
+        'ok': schwab_ok,
+        'preview_token': preview_token,
+        'order_hash': preview_token,
+        'order': order,
+        'contract': contract,
+        'estimated_notional': float(limit_price * Decimal(quantity) * Decimal('100')),
+        'schwab_status': status_code,
+        'schwab_response': preview_body,
+        'warnings': [],
+    }
+    if not schwab_ok:
+        result['warnings'].append(f"Schwab preview returned status {status_code or 'unknown'}.")
+        return jsonify(result), 502
+    return jsonify(result)
 
 @app.route('/update', methods=['POST'])
 def update():
