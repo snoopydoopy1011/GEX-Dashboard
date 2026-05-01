@@ -6856,8 +6856,10 @@ def _filter_profile_candles(candles, settings, tz):
                 selected.append(c)
             return selected
         mode = 'days'
+    rth_only = False
     if mode == 'session':
         days = 1
+        rth_only = True
     else:
         try:
             days = int((settings or {}).get('days') or 5)
@@ -6870,7 +6872,21 @@ def _filter_profile_candles(candles, settings, tz):
         if key and (not session_keys or session_keys[-1] != key):
             session_keys.append(key)
     allowed = set(session_keys[-days:])
-    return [c for c in candles if _profile_session_key(c, tz) in allowed]
+    filtered = [c for c in candles if _profile_session_key(c, tz) in allowed]
+    if not rth_only:
+        return filtered
+    rth = []
+    for c in filtered:
+        try:
+            dt = datetime.fromtimestamp(c['datetime'] / 1000, tz)
+            mins = dt.hour * 60 + dt.minute
+        except Exception:
+            continue
+        if dt.weekday() >= 5:
+            continue
+        if 570 <= mins < 960:
+            rth.append(c)
+    return rth
 
 
 def _build_modeled_volume_bins(candles, bin_size=0.10, method='triangular'):
@@ -7026,6 +7042,12 @@ def build_tpo_profile_payload(candles, settings=None, tz=None):
         value_area_pct = 70.0
     value_area_pct = max(50.0, min(95.0, value_area_pct))
     show_single_prints = bool(settings.get('show_single_prints'))
+    show_initial_balance = bool(settings.get('show_initial_balance'))
+    try:
+        ib_minutes = int(settings.get('initial_balance_minutes') or 60)
+    except Exception:
+        ib_minutes = 60
+    ib_minutes = max(15, min(240, ib_minutes))
 
     if mode == 'days':
         selected = _filter_profile_candles(candles, {'mode': 'days', 'days': days}, tz)
@@ -7121,6 +7143,38 @@ def build_tpo_profile_payload(candles, settings=None, tz=None):
         if is_single:
             single_print_count += 1
     total_tpo = sum(row['count'] for row in output)
+    initial_balance = None
+    if show_initial_balance and session_candles:
+        try:
+            ib_start_ms = int(session_candles[0].get('datetime') or 0)
+            ib_cutoff_ms = ib_start_ms + (ib_minutes * 60 * 1000)
+            ib_high = None
+            ib_low = None
+            for c in session_candles:
+                try:
+                    t = int(c.get('datetime') or 0)
+                except Exception:
+                    continue
+                if t < ib_start_ms or t >= ib_cutoff_ms:
+                    continue
+                try:
+                    h = float(c.get('high'))
+                    l = float(c.get('low'))
+                except Exception:
+                    continue
+                if not (np.isfinite(h) and np.isfinite(l)):
+                    continue
+                ib_high = h if ib_high is None else max(ib_high, h)
+                ib_low = l if ib_low is None else min(ib_low, l)
+            if ib_high is not None and ib_low is not None:
+                initial_balance = {
+                    'high': ib_high,
+                    'low': ib_low,
+                    'mid': (ib_high + ib_low) / 2.0,
+                    'minutes': ib_minutes,
+                }
+        except Exception:
+            initial_balance = None
     summary = {
         'total_tpo': total_tpo,
         'period_count': len(set().union(*block_period_keys_per_price.values())) if block_period_keys_per_price else 0,
@@ -7150,6 +7204,9 @@ def build_tpo_profile_payload(candles, settings=None, tz=None):
         'rows': output,
         'single_prints': single_prints,
         'summary': summary,
+        'show_initial_balance': show_initial_balance,
+        'initial_balance_minutes': ib_minutes,
+        'initial_balance': initial_balance,
     }
 
 
@@ -13659,6 +13716,14 @@ def index():
                             <label for="tpo_show_summary">Show TPO Summary</label>
                         </div>
                         <div class="control-group">
+                            <input type="checkbox" id="tpo_show_initial_balance">
+                            <label for="tpo_show_initial_balance">Show Initial Balance (TPO drawings + right-edge)</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_initial_balance_minutes">IB Minutes:</label>
+                            <input type="number" id="tpo_initial_balance_minutes" min="15" max="240" value="60" step="15" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
                             <label for="tpo_color">TPO Color:</label>
                             <input type="color" id="tpo_color" value="#A78BFA">
                         </div>
@@ -16183,7 +16248,7 @@ def index():
         });
         syncVolumeProfileSettingsVisibility();
         syncTpoProfileSettingsVisibility();
-        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_show_level_labels', 'tpo_show_summary', 'tpo_color', 'tpo_opacity', 'vp_level_line_style', 'vp_level_line_width', 'tpo_level_line_style', 'tpo_level_line_width'].forEach(id => {
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_show_level_labels', 'tpo_show_summary', 'tpo_show_initial_balance', 'tpo_initial_balance_minutes', 'tpo_color', 'tpo_opacity', 'vp_level_line_style', 'vp_level_line_width', 'tpo_level_line_style', 'tpo_level_line_width'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             el.addEventListener('input', () => {
@@ -20162,6 +20227,8 @@ def index():
             const compactEl = document.getElementById('tpo_compact_labels');
             const levelLabelsEl = document.getElementById('tpo_show_level_labels');
             const summaryEl = document.getElementById('tpo_show_summary');
+            const ibEl = document.getElementById('tpo_show_initial_balance');
+            const ibMinEl = document.getElementById('tpo_initial_balance_minutes');
             const lineStyleEl = document.getElementById('tpo_level_line_style');
             const lineWidthEl = document.getElementById('tpo_level_line_width');
             const colorFallback = resolveCssColor('var(--accent)') || '#A78BFA';
@@ -20181,6 +20248,8 @@ def index():
                 compact_labels: !!(compactEl && compactEl.checked),
                 show_level_labels: !!(levelLabelsEl && levelLabelsEl.checked),
                 show_summary: !summaryEl || summaryEl.checked,
+                show_initial_balance: !!(ibEl && ibEl.checked),
+                initial_balance_minutes: ibMinEl ? Math.max(15, Math.min(240, parseInt(ibMinEl.value) || 60)) : 60,
                 color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
                 opacity: opacityEl ? Math.max(0.05, Math.min(0.60, parseFloat(opacityEl.value) || 0.18)) : 0.18,
                 level_line_style: lineStyleEl && ['solid', 'dashed', 'dotted'].includes(lineStyleEl.value) ? lineStyleEl.value : 'dashed',
@@ -20510,6 +20579,7 @@ def index():
             const width = Number(options.width) || 0;
             const binSize = Number(options.binSize) || 0.25;
             const compactLabels = options.compactLabels !== false;
+            const side = options.side === 'left' ? 'left' : 'right';
             const xStart = Number.isFinite(Number(options.xStart)) ? Number(options.xStart) : Math.max(0, width - 226);
             const xEnd = Number.isFinite(Number(options.xEnd)) ? Number(options.xEnd) : Math.max(xStart + 24, width - 78);
             const charStep = 6.4;
@@ -20526,9 +20596,9 @@ def index():
                 const yBin = tvCandleSeries.priceToCoordinate(price + binSize);
                 const rowH = Math.max(3, Math.min(18, Math.abs(Number.isFinite(yBin) ? yBin - y : 8)));
                 const lettersOriginal = String(row.letters || '');
-                const lettersReversed = lettersOriginal.split('').reverse().join('');
-                const useCount = (compactLabels && rowH < 8) || !lettersReversed;
-                let display = useCount ? `(${count})` : lettersReversed;
+                const lettersForSide = side === 'left' ? lettersOriginal : lettersOriginal.split('').reverse().join('');
+                const useCount = (compactLabels && rowH < 8) || !lettersForSide;
+                let display = useCount ? `(${count})` : lettersForSide;
                 if (!useCount && display.length > maxChars) {
                     display = display.slice(0, Math.max(1, maxChars - 1)) + '+';
                 }
@@ -20540,7 +20610,9 @@ def index():
                 maxChars,
                 maxDisplayChars,
                 maxDisplayWidth,
-                textLeftX: xEnd - maxDisplayWidth,
+                textLeftX: side === 'left' ? xStart : (xEnd - maxDisplayWidth),
+                textRightX: side === 'left' ? (xStart + maxDisplayWidth) : xEnd,
+                side,
                 xStart,
                 xEnd,
             };
@@ -20551,9 +20623,10 @@ def index():
             const maxValue = Math.max(1, Number(options.maxValue) || 1);
             const binSize = Number(options.binSize) || 0.25;
             const compactLabels = options.compactLabels !== false;
+            const side = options.side === 'left' ? 'left' : 'right';
             const xStart = Number.isFinite(Number(options.xStart)) ? Number(options.xStart) : Math.max(0, width - 226);
             const xEnd = Number.isFinite(Number(options.xEnd)) ? Number(options.xEnd) : Math.max(xStart + 24, width - 78);
-            const metrics = getTpoLetterDisplayMetrics(rows, { ...options, width, binSize, compactLabels, xStart, xEnd });
+            const metrics = getTpoLetterDisplayMetrics(rows, { ...options, side, width, binSize, compactLabels, xStart, xEnd });
             const charStep = metrics.charStep;
             const maxChars = metrics.maxChars;
             const fill = options.fill || 'var(--accent)';
@@ -20576,17 +20649,18 @@ def index():
                 const rowFill = isPoc ? pocFill : (row.in_value_area ? fill : outsideFill);
                 const rowOpacity = isPoc ? 0.98 : row.in_value_area ? Math.min(0.94, opacity + 0.42) : 0.52;
                 const lettersOriginal = String(row.letters || '');
-                const lettersReversed = lettersOriginal.split('').reverse().join('');
-                const useCount = (compactLabels && rowH < 8) || !lettersReversed;
-                let display = useCount ? `(${count})` : lettersReversed;
+                const lettersForSide = side === 'left' ? lettersOriginal : lettersOriginal.split('').reverse().join('');
+                const useCount = (compactLabels && rowH < 8) || !lettersForSide;
+                let display = useCount ? `(${count})` : lettersForSide;
                 if (!useCount && display.length > maxChars) {
                     display = display.slice(0, Math.max(1, maxChars - 1)) + '+';
                 }
+                const anchorX = side === 'left' ? xStart : xEnd;
                 const text = createSvgEl('text', {
                     class: 'tv-profile-tpo-letter',
-                    x: xEnd,
+                    x: anchorX,
                     y,
-                    'text-anchor': 'end',
+                    'text-anchor': side === 'left' ? 'start' : 'end',
                     fill: rowFill,
                     opacity: rowOpacity,
                 });
@@ -20594,12 +20668,14 @@ def index():
                 group.appendChild(text);
                 if (hoverKind) {
                     const hitWidth = Math.max(18, Math.min(xEnd - xStart, display.length * charStep));
+                    const hitX1 = side === 'left' ? anchorX - 4 : anchorX - hitWidth - 4;
+                    const hitX2 = side === 'left' ? anchorX + hitWidth + 4 : anchorX + 4;
                     tvProfileHoverRows.push({
                         kind: hoverKind,
                         label: hoverLabel,
                         row,
-                        x1: xEnd - hitWidth - 4,
-                        x2: xEnd + 4,
+                        x1: hitX1,
+                        x2: hitX2,
                         y1: Math.max(0, y - rowH / 2),
                         y2: y + rowH / 2,
                         maxValue,
@@ -20941,6 +21017,21 @@ def index():
                     valueAreaPct: tpo.value_area_pct,
                     compactLabels: tpoSettings.compact_labels !== false,
                 });
+                if (tpo.initial_balance && tpoSettings.show_initial_balance) {
+                    const ib = tpo.initial_balance;
+                    appendProfileLevelLine(group, ib.high, showTpoLevelLabels ? 'IBH' : '', {
+                        x1: tpoLevelX1, x2: tpoLevelX2, labelX: tpoLabelX, labelAnchor: 'start',
+                        style: 'stroke:var(--call);stroke-width:1.25;',
+                    });
+                    appendProfileLevelLine(group, ib.low, showTpoLevelLabels ? 'IBL' : '', {
+                        x1: tpoLevelX1, x2: tpoLevelX2, labelX: tpoLabelX, labelAnchor: 'start',
+                        style: 'stroke:var(--put);stroke-width:1.25;',
+                    });
+                    appendProfileLevelLine(group, ib.mid, showTpoLevelLabels ? 'IBM' : '', {
+                        x1: tpoLevelX1, x2: tpoLevelX2, labelX: tpoLabelX, labelAnchor: 'start',
+                        style: 'stroke:var(--warn);stroke-width:1;stroke-dasharray:3,3;',
+                    });
+                }
                 svg.appendChild(group);
             }
             tvDrawingDefs.forEach(def => {
@@ -20958,19 +21049,44 @@ def index():
                 const boxRight = Math.max(screen.x1, screen.x2);
                 const profileSide = def.profileSide || (isTpoDrawing ? 'right' : (vpSettings.fixed_vp_side || 'right'));
                 const profileMaxWidth = Math.max(36, Math.min(130, Math.abs(screen.x2 - screen.x1) * 0.72));
+                let tpoLineX1 = boxX;
+                let tpoLineX2 = boxRight;
+                let tpoLabelXForLines = null;
+                let tpoLabelAnchor = 'start';
                 if (isTpoDrawing) {
                     const tpoXStart = profileSide === 'left' ? boxX + 6 : Math.max(boxX + 6, boxRight - profileMaxWidth);
                     const tpoXEnd = profileSide === 'left' ? Math.min(boxRight - 6, tpoXStart + profileMaxWidth) : boxRight - 6;
+                    const drawingTpoBin = screen.profile.bin_size || def.binSize;
+                    const drawingMetrics = getTpoLetterDisplayMetrics(screen.profile.rows, {
+                        width,
+                        xStart: tpoXStart,
+                        xEnd: Math.max(tpoXStart + 24, tpoXEnd),
+                        binSize: drawingTpoBin,
+                        side: profileSide,
+                        compactLabels: true,
+                    });
+                    if (profileSide === 'left') {
+                        tpoLineX1 = Math.min(boxRight - 4, drawingMetrics.textRightX + 6);
+                        tpoLineX2 = boxRight;
+                        tpoLabelXForLines = Math.max(boxX + 4, drawingMetrics.textRightX + 6);
+                        tpoLabelAnchor = 'start';
+                    } else {
+                        tpoLineX1 = boxX;
+                        tpoLineX2 = Math.max(boxX + 4, drawingMetrics.textLeftX - 6);
+                        tpoLabelXForLines = Math.min(boxRight - 4, drawingMetrics.textLeftX - 6);
+                        tpoLabelAnchor = 'end';
+                    }
                     appendTpoLetterRows(group, screen.profile.rows, {
                         width,
                         maxValue: screen.profile.max_count,
                         xStart: tpoXStart,
                         xEnd: Math.max(tpoXStart + 24, tpoXEnd),
+                        side: profileSide,
                         fill: def.color || 'var(--accent)',
                         outsideFill: 'var(--fg-2)',
                         pocFill: 'var(--rvol-hot)',
                         opacity: 0.62,
-                        binSize: screen.profile.bin_size || def.binSize,
+                        binSize: drawingTpoBin,
                         poc: screen.profile.poc,
                         total: screen.profile.summary && screen.profile.summary.total_tpo,
                         hoverKind: def.type,
@@ -20995,9 +21111,13 @@ def index():
                         });
                     }
                     if (screen.ib) {
-                        appendProfileLevelLine(group, screen.ib.high, 'IBH', { x1: boxX, x2: boxRight, style: 'stroke:var(--call)' });
-                        appendProfileLevelLine(group, screen.ib.low, 'IBL', { x1: boxX, x2: boxRight, style: 'stroke:var(--put)' });
-                        appendProfileLevelLine(group, screen.ib.mid, 'IBM', { x1: boxX, x2: boxRight, style: 'stroke:var(--warn);stroke-dasharray:3,3;' });
+                        const ibShowLabels = !!tpoSettings.show_level_labels;
+                        const ibLabelOpts = tpoLabelXForLines != null
+                            ? { labelX: tpoLabelXForLines, labelAnchor: tpoLabelAnchor }
+                            : {};
+                        appendProfileLevelLine(group, screen.ib.high, ibShowLabels ? 'IBH' : '', { x1: tpoLineX1, x2: tpoLineX2, style: 'stroke:var(--call)', ...ibLabelOpts });
+                        appendProfileLevelLine(group, screen.ib.low, ibShowLabels ? 'IBL' : '', { x1: tpoLineX1, x2: tpoLineX2, style: 'stroke:var(--put)', ...ibLabelOpts });
+                        appendProfileLevelLine(group, screen.ib.mid, ibShowLabels ? 'IBM' : '', { x1: tpoLineX1, x2: tpoLineX2, style: 'stroke:var(--warn);stroke-dasharray:3,3;', ...ibLabelOpts });
                     }
                 } else {
                     appendProfileRows(group, screen.profile.bins, {
@@ -21024,22 +21144,31 @@ def index():
                 const drawingLineWidth = isTpoDrawing ? tpoSettings.level_line_width : vpSettings.level_line_width;
                 const drawingVaStyle = buildLevelLineStyle(def.color, drawingLineStyle, drawingLineWidth);
                 const drawingPocStyle = buildLevelLineStyle('var(--rvol-hot)', drawingLineStyle, drawingLineWidth);
-                appendProfileLevelLine(group, screen.profile.value_area_high, isTpoDrawing ? 'TPO VAH' : 'VAH', {
-                    x1: boxX,
-                    x2: boxRight,
+                const lineX1 = isTpoDrawing ? tpoLineX1 : boxX;
+                const lineX2 = isTpoDrawing ? tpoLineX2 : boxRight;
+                const showDrawingLevelLabels = isTpoDrawing ? !!tpoSettings.show_level_labels : true;
+                const drawingLabelOpts = isTpoDrawing && tpoLabelXForLines != null
+                    ? { labelX: tpoLabelXForLines, labelAnchor: tpoLabelAnchor }
+                    : {};
+                appendProfileLevelLine(group, screen.profile.value_area_high, showDrawingLevelLabels ? (isTpoDrawing ? 'TPO VAH' : 'VAH') : '', {
+                    x1: lineX1,
+                    x2: lineX2,
                     style: drawingVaStyle,
+                    ...drawingLabelOpts,
                 });
-                appendProfileLevelLine(group, screen.profile.value_area_low, isTpoDrawing ? 'TPO VAL' : 'VAL', {
-                    x1: boxX,
-                    x2: boxRight,
+                appendProfileLevelLine(group, screen.profile.value_area_low, showDrawingLevelLabels ? (isTpoDrawing ? 'TPO VAL' : 'VAL') : '', {
+                    x1: lineX1,
+                    x2: lineX2,
                     style: drawingVaStyle,
+                    ...drawingLabelOpts,
                 });
                 if (Number.isFinite(Number(screen.profile.poc))) {
-                    appendProfileLevelLine(group, screen.profile.poc, isTpoDrawing ? 'TPO POC' : 'POC', {
+                    appendProfileLevelLine(group, screen.profile.poc, showDrawingLevelLabels ? (isTpoDrawing ? 'TPO POC' : 'POC') : '', {
                         className: 'tv-profile-poc',
-                        x1: boxX,
-                        x2: boxRight,
+                        x1: lineX1,
+                        x2: lineX2,
                         style: drawingPocStyle,
+                        ...drawingLabelOpts,
                     });
                 }
                 svg.appendChild(group);
@@ -22428,8 +22557,8 @@ def index():
                     blockMinutes: tpoSettings.block_minutes,
                     valueAreaPct: tpoSettings.value_area_pct,
                     showSinglePrints: tpoSettings.show_single_prints,
-                    showInitialBalance: false,
-                    initialBalanceMinutes: 60,
+                    showInitialBalance: !!tpoSettings.show_initial_balance,
+                    initialBalanceMinutes: tpoSettings.initial_balance_minutes || 60,
                     label: 'Anchored TPO',
                 });
                 return;
@@ -22502,8 +22631,8 @@ def index():
                             blockMinutes: tpoSettings.block_minutes,
                             valueAreaPct: tpoSettings.value_area_pct,
                             showSinglePrints: tpoSettings.show_single_prints,
-                            showInitialBalance: false,
-                            initialBalanceMinutes: 60,
+                            showInitialBalance: !!tpoSettings.show_initial_balance,
+                            initialBalanceMinutes: tpoSettings.initial_balance_minutes || 60,
                             label: 'TPO Range',
                         });
                     }
@@ -27612,6 +27741,8 @@ def index():
                 if (document.getElementById('tpo_compact_labels')) document.getElementById('tpo_compact_labels').checked = tpo.compact_labels !== false;
                 if (document.getElementById('tpo_show_level_labels')) document.getElementById('tpo_show_level_labels').checked = !!tpo.show_level_labels;
                 if (document.getElementById('tpo_show_summary')) document.getElementById('tpo_show_summary').checked = tpo.show_summary !== false;
+                if (document.getElementById('tpo_show_initial_balance')) document.getElementById('tpo_show_initial_balance').checked = !!tpo.show_initial_balance;
+                if (document.getElementById('tpo_initial_balance_minutes')) document.getElementById('tpo_initial_balance_minutes').value = Math.max(15, Math.min(240, parseInt(tpo.initial_balance_minutes) || 60));
                 if (document.getElementById('tpo_color')) document.getElementById('tpo_color').value = normalizeTVIndicatorColor(tpo.color, resolveCssColor('var(--accent)') || '#A78BFA');
                 if (document.getElementById('tpo_opacity')) document.getElementById('tpo_opacity').value = tpo.opacity || 0.18;
                 if (document.getElementById('tpo_level_line_style')) document.getElementById('tpo_level_line_style').value = ['solid', 'dashed', 'dotted'].includes(tpo.level_line_style) ? tpo.level_line_style : 'dashed';

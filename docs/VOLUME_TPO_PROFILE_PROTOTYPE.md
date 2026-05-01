@@ -349,3 +349,14 @@ Tricky parts of this iteration:
   - [x] Drawer exposes `VP Line Style` / `VP Line Width` and `TPO Line Style` / `TPO Line Width` (solid/dashed/dotted, 0.5–5).
   - [x] Applied at right-edge VP, right-edge TPO, fixed-VP, fixed-TPO, and anchored-TPO drawings via `buildLevelLineStyle()`.
   - [x] Defaults preserve current visual (dashed, width 1); persists through `volume_profile` / `tpo_profile` save/load.
+
+## TPO Cleanup Pass (post-Phase 1 review)
+
+After live current-session review on real candles, three issues remained:
+
+- Right-axis `Current Session` TPO included after-hours/pre-market candles because `_filter_profile_candles` keyed on calendar date alone. A 17:00 ET wick produced a long tail of `P` letters at prices the visible RTH range never traded.
+  - Fix: `_filter_profile_candles` now restricts mode `session` to RTH (9:30–16:00 ET, weekdays). Other modes (`days`, `custom`, `bars_back`, `anchor`) still respect their full window.
+- Initial-balance lines existed only inside the per-drawing TPO editor, so users without a fixed/anchored TPO drawing had no way to see IB on the right-edge profile.
+  - Fix: drawer now exposes `Show Initial Balance` and `IB Minutes`. Persists through `tpo_profile` save/load. Server computes `initial_balance` from the first N minutes of the selected TPO candle window and the right-edge renderer draws IBH/IBL/IBM with the same clipping/labelling rules as VAH/VAL/POC. New fixed/anchored TPO drawings inherit these as defaults; the per-drawing editor still overrides.
+- Fixed-range / anchored TPO drawings ignored `profileSide='left'` (letters stayed in the box middle), and never clipped VAH/VAL/POC/IB lines off the letter column. Level labels were always drawn.
+  - Fix: `appendTpoLetterRows` and `getTpoLetterDisplayMetrics` accept `side`. For `left`, letters anchor at the box's left edge with `text-anchor='start'` and are not reversed (latest period grows toward the candles on the right). For `right`, the existing reversed/end-anchored layout is preserved. Drawings clip VAH/VAL/POC and IB lines past the letter column on whichever side and place labels just outside the cluster. The drawer's `Show TPO Level Labels` toggle now also gates labels on TPO drawings, matching right-edge behavior.
