@@ -5297,8 +5297,12 @@ def _compute_session_deltas(ticker, net_gex, net_dex, scope_id=None):
     if ticker is None or net_gex is None:
         return None
     try:
-        today = datetime.now(pytz.timezone('US/Eastern')).date()
+        now_et = datetime.now(pytz.timezone('US/Eastern'))
+        today = now_et.date()
     except Exception:
+        return None
+    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now_et < market_open:
         return None
     key = (ticker, today, scope_id or 'default')
     if key not in _SESSION_BASELINE:
@@ -6805,13 +6809,420 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     return out
 
 
+def _normalize_profile_bin_size(value, current_price=None, default=0.10):
+    try:
+        size = float(value)
+    except Exception:
+        size = default
+    if not np.isfinite(size) or size <= 0:
+        size = default
+    # Keep runaway settings from producing thousands of SVG rows.
+    return max(0.01, min(10.0, size))
+
+
+def _profile_session_key(candle, tz):
+    try:
+        return datetime.fromtimestamp(candle['datetime'] / 1000, tz).date().isoformat()
+    except Exception:
+        return ''
+
+
+def _filter_profile_candles(candles, settings, tz):
+    if not candles:
+        return []
+    mode = str((settings or {}).get('mode') or 'days').lower()
+    if mode == 'visible':
+        # Visible-range mode is recomputed in JS from the currently displayed
+        # candles. Server still returns a sane seed for first paint.
+        mode = 'days'
+    if mode == 'custom':
+        start_raw = str((settings or {}).get('start_date') or '').strip()
+        end_raw = str((settings or {}).get('end_date') or '').strip()
+        try:
+            start_date = datetime.strptime(start_raw, '%Y-%m-%d').date() if start_raw else None
+            end_date = datetime.strptime(end_raw, '%Y-%m-%d').date() if end_raw else None
+        except Exception:
+            start_date = None
+            end_date = None
+        if start_date and end_date and end_date < start_date:
+            start_date, end_date = end_date, start_date
+        if start_date or end_date:
+            selected = []
+            for c in candles:
+                try:
+                    candle_date = datetime.fromtimestamp(c['datetime'] / 1000, tz).date()
+                except Exception:
+                    continue
+                if start_date and candle_date < start_date:
+                    continue
+                if end_date and candle_date > end_date:
+                    continue
+                selected.append(c)
+            return selected
+        mode = 'days'
+    rth_only = False
+    if mode == 'session':
+        days = 1
+        rth_only = True
+    else:
+        try:
+            days = int((settings or {}).get('days') or 5)
+        except Exception:
+            days = 5
+    days = max(1, min(20, days))
+    session_keys = []
+    for c in candles:
+        key = _profile_session_key(c, tz)
+        if key and (not session_keys or session_keys[-1] != key):
+            session_keys.append(key)
+    allowed = set(session_keys[-days:])
+    filtered = [c for c in candles if _profile_session_key(c, tz) in allowed]
+    if not rth_only:
+        return filtered
+    rth = []
+    for c in filtered:
+        try:
+            dt = datetime.fromtimestamp(c['datetime'] / 1000, tz)
+            mins = dt.hour * 60 + dt.minute
+        except Exception:
+            continue
+        if dt.weekday() >= 5:
+            continue
+        if 570 <= mins < 960:
+            rth.append(c)
+    return rth
+
+
+def _build_modeled_volume_bins(candles, bin_size=0.10, method='triangular'):
+    bins = {}
+    total_volume = 0.0
+    method = str(method or 'triangular').lower()
+    for c in candles or []:
+        try:
+            low = float(c.get('low'))
+            high = float(c.get('high'))
+            close = float(c.get('close'))
+            volume = float(c.get('volume') or 0)
+        except Exception:
+            continue
+        if not all(np.isfinite(v) for v in [low, high, close, volume]) or volume <= 0:
+            continue
+        if high < low:
+            low, high = high, low
+        if high == low:
+            key = round(round(close / bin_size) * bin_size, 4)
+            bins[key] = bins.get(key, 0.0) + volume
+            total_volume += volume
+            continue
+        start = int(np.floor(low / bin_size))
+        end = int(np.ceil(high / bin_size))
+        prices = [round(i * bin_size, 4) for i in range(start, end + 1)
+                  if (i * bin_size) >= low - bin_size * 0.5 and (i * bin_size) <= high + bin_size * 0.5]
+        if not prices:
+            prices = [round(round(close / bin_size) * bin_size, 4)]
+        center = (high + low + close) / 3.0
+        weights = []
+        for price in prices:
+            if method == 'uniform' or len(prices) == 1:
+                weight = 1.0
+            elif method == 'close':
+                weight = 1.0 if abs(price - close) <= bin_size / 2 else 0.0
+            else:
+                span = max(high - low, bin_size)
+                weight = max(0.05, 1.0 - abs(price - center) / span)
+            weights.append(weight)
+        denom = sum(weights) or len(prices)
+        for price, weight in zip(prices, weights):
+            bins[price] = bins.get(price, 0.0) + volume * (weight / denom)
+        total_volume += volume
+    return bins, total_volume
+
+
+def _profile_value_area(rows, value_key, price_key='price', target=0.70):
+    try:
+        target = float(target)
+    except Exception:
+        target = 0.70
+    target = max(0.05, min(0.99, target))
+    clean_rows = []
+    for row in rows or []:
+        try:
+            price = float(row.get(price_key))
+            value = float(row.get(value_key) or 0)
+        except Exception:
+            continue
+        if np.isfinite(price) and np.isfinite(value) and value > 0:
+            clean_rows.append({'price': price, 'value': value})
+    if not clean_rows:
+        return None, None, None, set()
+    clean_rows.sort(key=lambda row: row['price'])
+    total = sum(row['value'] for row in clean_rows)
+    if total <= 0:
+        return None, None, None, set()
+    poc_idx = max(range(len(clean_rows)), key=lambda idx: clean_rows[idx]['value'])
+    included = {poc_idx}
+    included_value = clean_rows[poc_idx]['value']
+    lo = hi = poc_idx
+    while included_value < total * target and (lo > 0 or hi < len(clean_rows) - 1):
+        lower_val = clean_rows[lo - 1]['value'] if lo > 0 else -1
+        upper_val = clean_rows[hi + 1]['value'] if hi < len(clean_rows) - 1 else -1
+        if upper_val >= lower_val:
+            hi += 1
+            included.add(hi)
+            included_value += clean_rows[hi]['value']
+        else:
+            lo -= 1
+            included.add(lo)
+            included_value += clean_rows[lo]['value']
+    prices = {clean_rows[idx]['price'] for idx in included}
+    return clean_rows[lo]['price'], clean_rows[hi]['price'], clean_rows[poc_idx]['price'], prices
+
+
+def build_volume_profile_payload(candles, settings=None, tz=None, current_price=None):
+    settings = settings or {}
+    if not settings.get('enabled'):
+        return {'enabled': False, 'bins': []}
+    tz = tz or pytz.timezone('US/Eastern')
+    bin_size = _normalize_profile_bin_size(settings.get('bin_size'), current_price)
+    selected = _filter_profile_candles(candles, settings, tz)
+    bins, total_volume = _build_modeled_volume_bins(
+        selected,
+        bin_size=bin_size,
+        method=settings.get('method') or 'triangular',
+    )
+    rows = [{'price': price, 'volume': vol} for price, vol in sorted(bins.items()) if vol > 0]
+    max_vol = max((row['volume'] for row in rows), default=0.0)
+    val, vah, poc, va_prices = _profile_value_area(rows, 'volume')
+    for row in rows:
+        try:
+            row['in_value_area'] = float(row['price']) in va_prices
+        except Exception:
+            row['in_value_area'] = False
+    return {
+        'enabled': True,
+        'mode': settings.get('mode') or 'days',
+        'days': int(settings.get('days') or 5),
+        'start_date': settings.get('start_date') or '',
+        'end_date': settings.get('end_date') or '',
+        'bin_size': bin_size,
+        'method': settings.get('method') or 'triangular',
+        'total_volume': total_volume,
+        'max_volume': max_vol,
+        'poc': poc,
+        'value_area_low': val,
+        'value_area_high': vah,
+        'value_area_pct': 70,
+        'bins': rows,
+    }
+
+
+def build_tpo_profile_payload(candles, settings=None, tz=None):
+    settings = settings or {}
+    if not settings.get('enabled'):
+        return {'enabled': False, 'rows': []}
+    tz = tz or pytz.timezone('US/Eastern')
+    bin_size = _normalize_profile_bin_size(settings.get('bin_size'), default=0.25)
+    mode = str(settings.get('mode') or 'session').lower()
+    valid_modes = ('session', 'days', 'custom', 'bars_back', 'anchor')
+    if mode not in valid_modes:
+        mode = 'session'
+    try:
+        days = max(1, min(20, int(settings.get('days') or 3)))
+    except Exception:
+        days = 3
+    try:
+        bars_back = max(10, min(500, int(settings.get('bars_back') or 200)))
+    except Exception:
+        bars_back = 200
+    try:
+        block_minutes = int(settings.get('block_minutes') or 30)
+    except Exception:
+        block_minutes = 30
+    if block_minutes not in (15, 30, 60, 240):
+        block_minutes = 30
+    try:
+        value_area_pct = float(settings.get('value_area_pct') or 70)
+    except Exception:
+        value_area_pct = 70.0
+    value_area_pct = max(50.0, min(95.0, value_area_pct))
+    show_single_prints = bool(settings.get('show_single_prints'))
+    show_initial_balance = bool(settings.get('show_initial_balance'))
+    try:
+        ib_minutes = int(settings.get('initial_balance_minutes') or 60)
+    except Exception:
+        ib_minutes = 60
+    ib_minutes = max(15, min(240, ib_minutes))
+
+    if mode == 'days':
+        selected = _filter_profile_candles(candles, {'mode': 'days', 'days': days}, tz)
+    elif mode == 'custom':
+        selected = _filter_profile_candles(candles, {'mode': 'custom', 'start_date': settings.get('start_date'), 'end_date': settings.get('end_date')}, tz)
+    elif mode == 'bars_back':
+        selected = list(candles or [])[-bars_back:]
+    elif mode == 'anchor':
+        anchor_raw = str(settings.get('anchor_datetime') or '').strip()
+        anchor_ms = None
+        if anchor_raw:
+            for fmt in ('%Y-%m-%dT%H:%M', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+                try:
+                    dt_anchor = datetime.strptime(anchor_raw, fmt)
+                    if dt_anchor.tzinfo is None:
+                        dt_anchor = tz.localize(dt_anchor)
+                    anchor_ms = int(dt_anchor.timestamp() * 1000)
+                    break
+                except Exception:
+                    continue
+        if anchor_ms is None:
+            selected = _filter_profile_candles(candles, {'mode': 'session'}, tz)
+        else:
+            selected = [c for c in (candles or []) if int(c.get('datetime') or 0) >= anchor_ms]
+    else:
+        selected = _filter_profile_candles(candles, {'mode': 'session'}, tz)
+
+    session_candles = selected
+    letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    rows = {}
+    session_keys = []
+    block_period_keys_per_price = {}
+    for c in session_candles:
+        try:
+            dt = datetime.fromtimestamp(c['datetime'] / 1000, tz)
+            session_key = dt.date().isoformat()
+            minute_of_day = dt.hour * 60 + dt.minute
+            block_index = (minute_of_day - 570) // block_minutes if block_minutes > 0 else 0
+            letter = letters[max(0, min(len(letters) - 1, block_index))]
+            block_period_key = (session_key, block_index)
+            low = float(c.get('low'))
+            high = float(c.get('high'))
+        except Exception:
+            continue
+        if not np.isfinite(low) or not np.isfinite(high):
+            continue
+        if session_key not in session_keys:
+            session_keys.append(session_key)
+        if high < low:
+            low, high = high, low
+        start = int(np.floor(low / bin_size))
+        end = int(np.ceil(high / bin_size))
+        for i in range(start, end + 1):
+            price = round(i * bin_size, 4)
+            bucket = rows.setdefault(price, {})
+            bucket.setdefault(session_key, set()).add(letter)
+            block_period_keys_per_price.setdefault(price, set()).add(block_period_key)
+    output = []
+    for price, session_map in sorted(rows.items()):
+        latest_key = session_keys[-1] if session_keys else ''
+        latest_letters = session_map.get(latest_key, set())
+        count = len(block_period_keys_per_price.get(price, set()))
+        output.append({
+            'price': price,
+            'letters': ''.join(sorted(latest_letters, key=letters.index)),
+            'count': count,
+            'session_count': len(session_map),
+            'sessions': [
+                {'date': key, 'letters': ''.join(sorted(vals, key=letters.index)), 'count': len(vals)}
+                for key, vals in sorted(session_map.items())
+            ],
+        })
+    max_count = max((row['count'] for row in output), default=0)
+    val, vah, poc, va_prices = _profile_value_area(output, 'count', target=value_area_pct / 100.0)
+    for row in output:
+        try:
+            row['in_value_area'] = float(row['price']) in va_prices
+        except Exception:
+            row['in_value_area'] = False
+    single_prints = []
+    single_print_count = 0
+    for row in output:
+        is_single = row['count'] == 1
+        if show_single_prints:
+            row['is_single_print'] = is_single
+            if is_single:
+                single_prints.append({
+                    'price': row['price'],
+                    'price_top': round(float(row['price']) + bin_size, 4),
+                })
+        else:
+            row['is_single_print'] = False
+        if is_single:
+            single_print_count += 1
+    total_tpo = sum(row['count'] for row in output)
+    initial_balance = None
+    if show_initial_balance and session_candles:
+        try:
+            ib_start_ms = int(session_candles[0].get('datetime') or 0)
+            ib_cutoff_ms = ib_start_ms + (ib_minutes * 60 * 1000)
+            ib_high = None
+            ib_low = None
+            for c in session_candles:
+                try:
+                    t = int(c.get('datetime') or 0)
+                except Exception:
+                    continue
+                if t < ib_start_ms or t >= ib_cutoff_ms:
+                    continue
+                try:
+                    h = float(c.get('high'))
+                    l = float(c.get('low'))
+                except Exception:
+                    continue
+                if not (np.isfinite(h) and np.isfinite(l)):
+                    continue
+                ib_high = h if ib_high is None else max(ib_high, h)
+                ib_low = l if ib_low is None else min(ib_low, l)
+            if ib_high is not None and ib_low is not None:
+                initial_balance = {
+                    'high': ib_high,
+                    'low': ib_low,
+                    'mid': (ib_high + ib_low) / 2.0,
+                    'minutes': ib_minutes,
+                }
+        except Exception:
+            initial_balance = None
+    summary = {
+        'total_tpo': total_tpo,
+        'period_count': len(set().union(*block_period_keys_per_price.values())) if block_period_keys_per_price else 0,
+        'single_print_count': single_print_count,
+        'price_high': max((row['price'] for row in output), default=None),
+        'price_low': min((row['price'] for row in output), default=None),
+        'session_count': len(session_keys),
+    }
+    return {
+        'enabled': True,
+        'mode': mode,
+        'days': days,
+        'bars_back': bars_back,
+        'anchor_datetime': str(settings.get('anchor_datetime') or ''),
+        'start_date': settings.get('start_date') or '',
+        'end_date': settings.get('end_date') or '',
+        'bin_size': bin_size,
+        'period_minutes': block_minutes,
+        'block_minutes': block_minutes,
+        'value_area_pct': value_area_pct,
+        'show_single_prints': show_single_prints,
+        'poc': poc,
+        'value_area_low': val,
+        'value_area_high': vah,
+        'sessions': session_keys,
+        'max_count': max_count,
+        'rows': output,
+        'single_prints': single_prints,
+        'summary': summary,
+        'show_initial_balance': show_initial_balance,
+        'initial_balance_minutes': ib_minutes,
+        'initial_balance': initial_balance,
+    }
+
+
 def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_types=[],
                               exposure_levels_count=3, call_color=CALL_COLOR, put_color=PUT_COLOR,
                               strike_range=0.1, use_heikin_ashi=False,
                               highlight_max_level=False, max_level_color='#800080',
                               coloring_mode='Linear Intensity', ticker=None,
                               selected_expiries=None, timeframe=1,
-                              rvol_lookback_days=None):
+                              rvol_lookback_days=None,
+                              volume_profile_settings=None,
+                              tpo_profile_settings=None):
     """Return raw OHLCV + overlay data as JSON for TradingView Lightweight Charts rendering."""
     import json as _json
 
@@ -6894,7 +7305,8 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     for i, c in enumerate(display_candles):
         ts = int(c['datetime'] / 1000)
         lc_candles.append({'time': ts, 'open': c['open'], 'high': c['high'],
-                           'low': c['low'], 'close': c['close']})
+                           'low': c['low'], 'close': c['close'],
+                           'volume': c.get('volume', 0)})
         is_up = c['close'] >= c['open'] if i == 0 else c['close'] >= display_candles[i - 1]['close']
         bar = {'time': ts, 'value': c['volume'],
                'color': call_color if is_up else put_color,
@@ -6936,6 +7348,17 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     current_price = display_candles[-1]['close'] if display_candles else 0
     last_candle = display_candles[-1] if display_candles else None
     last_candle_up = (last_candle['close'] >= last_candle['open']) if last_candle else True
+    volume_profile_payload = build_volume_profile_payload(
+        display_candles,
+        volume_profile_settings,
+        est,
+        current_price=current_price,
+    )
+    tpo_profile_payload = build_tpo_profile_payload(
+        sorted_candles,
+        tpo_profile_settings,
+        est,
+    )
 
     historical_exposure_levels, historical_expected_moves = build_historical_levels_overlay(
         ticker=ticker,
@@ -7073,6 +7496,8 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
         'expected_moves': expected_moves,
         'historical_exposure_levels': historical_exposure_levels,
         'historical_expected_moves': historical_expected_moves,
+        'volume_profile': volume_profile_payload,
+        'tpo_profile': tpo_profile_payload,
         'indicator_candles': lc_indicator_candles,
         'vwap_candles': lc_vwap_candles,
         'current_day_start_time': current_day_start_time,
@@ -8631,7 +9056,7 @@ def index():
             --border:#2A313B; --border-strong:#3A424F;
             --fg-0:#E5E7EB; --fg-1:#9CA3AF; --fg-2:#6B7280;
             --call:#10B981; --put:#EF4444; --accent:#3B82F6;
-            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37; --rvol-hot:#EC4899;
+            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37; --rvol-hot:#EC4899; --tpo-single:#A855F7;
             --radius:6px; --radius-lg:10px;
             --font-ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
             --font-mono:"SF Mono","JetBrains Mono",Menlo,monospace;
@@ -8724,7 +9149,16 @@ def index():
         }
         .drawer-content .control-group label { font-size: 12px; color: var(--fg-1); }
         .drawer-content input[type="text"],
+        .drawer-content input[type="date"],
+        .drawer-content input[type="color"],
         .drawer-content select { width: 100%; min-width: 0; }
+        .drawer-content input[type="color"] {
+            height: 26px;
+            padding: 0;
+            border: 1px solid var(--border);
+            background: var(--bg-1);
+            border-radius: 4px;
+        }
         .drawer-content .expiry-dropdown,
         .drawer-content .levels-dropdown { width: 100%; min-width: 0; }
         .drawer-brand {
@@ -9670,6 +10104,116 @@ def index():
         }
         .market-state-metrics .rail-card-header {
             margin-bottom: 3px;
+        }
+        .rail-drift-wrap {
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--border, #2a2f3a);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .rail-drift-row {
+            display: grid;
+            grid-template-columns: 30px minmax(0, 1fr) 68px;
+            align-items: center;
+            gap: 7px;
+            min-height: 14px;
+        }
+        .rail-drift-label,
+        .rail-drift-value,
+        .rail-drift-scale,
+        .rail-drift-read {
+            font-variant-numeric: tabular-nums;
+        }
+        .rail-drift-label {
+            color: var(--fg-2);
+            font-size: 9px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .rail-drift-track {
+            position: relative;
+            height: 7px;
+            border-radius: 999px;
+            background: var(--bg-2);
+            overflow: hidden;
+        }
+        .rail-drift-track::before {
+            content: '';
+            position: absolute;
+            top: -2px;
+            bottom: -2px;
+            left: 50%;
+            width: 1px;
+            background: var(--fg-2);
+            opacity: 0.68;
+        }
+        .rail-drift-fill {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            width: 0;
+            border-radius: 999px;
+            background: var(--fg-2);
+            opacity: 0.9;
+            transform-origin: left center;
+            transition: left 160ms ease, width 160ms ease;
+        }
+        .rail-drift-fill.pos { background: var(--call); }
+        .rail-drift-fill.neg { background: var(--put); }
+        .rail-drift-value {
+            color: var(--fg-1);
+            font-size: 10px;
+            text-align: right;
+            white-space: nowrap;
+        }
+        .rail-drift-value.pos,
+        .rail-drift-read.pos { color: var(--call); }
+        .rail-drift-value.neg,
+        .rail-drift-read.neg { color: var(--put); }
+        .rail-drift-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            font-size: 9.5px;
+            color: var(--fg-2, #98a2b3);
+        }
+        .rail-drift-scale {
+            white-space: nowrap;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .rail-drift-read {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            text-align: right;
+            white-space: nowrap;
+        }
+        /* Override .chart-container > div { flex:1; width:100%; height:100% }
+           so this chip stays a small floating pill instead of filling the chart. */
+        .chart-container > .tv-axis-countdown,
+        .tv-axis-countdown {
+            position: absolute;
+            z-index: 5;
+            flex: none;
+            width: auto;
+            height: auto;
+            pointer-events: none;
+            background: rgba(20, 24, 33, 0.92);
+            color: var(--fg-1, #d1d5db);
+            border: 1px solid var(--border, #2a2f3a);
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-size: 10.5px;
+            font-family: 'JetBrains Mono', 'Menlo', monospace;
+            font-variant-numeric: tabular-nums;
+            text-align: center;
+            line-height: 1.4;
+            opacity: 0.95;
         }
         .market-state-range .rail-range-caption,
         .market-state-range .rail-range-labels {
@@ -11256,6 +11800,108 @@ def index():
             height: 100%;
             overflow: visible;
         }
+        .tv-profile-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 5;
+            pointer-events: none;
+            overflow: hidden;
+        }
+        .tv-profile-overlay svg {
+            width: 100%;
+            height: 100%;
+            overflow: visible;
+        }
+        .tv-profile-label {
+            fill: var(--fg-2);
+            font-size: 10px;
+            dominant-baseline: middle;
+            paint-order: stroke;
+            stroke: var(--bg-0);
+            stroke-width: 3px;
+        }
+        .tv-profile-tpo-letter {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+            font-size: 11px;
+            dominant-baseline: middle;
+            paint-order: stroke;
+            stroke: var(--bg-0);
+            stroke-width: 2.5px;
+        }
+        .tv-profile-poc {
+            stroke: var(--warn);
+            stroke-width: 1.5;
+            stroke-dasharray: 5 5;
+            opacity: 0.9;
+        }
+        .tv-profile-va {
+            stroke: var(--fg-2);
+            stroke-width: 1;
+            stroke-dasharray: 3 5;
+            opacity: 0.72;
+        }
+        .tv-profile-tooltip {
+            position: absolute;
+            z-index: 58;
+            display: none;
+            flex: none !important;
+            align-self: flex-start !important;
+            width: auto !important;
+            height: auto !important;
+            min-width: 0 !important;
+            min-height: 0 !important;
+            max-width: 220px;
+            padding: 5px 7px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: color-mix(in srgb, var(--bg-1) 94%, transparent);
+            color: var(--fg-0);
+            font-size: 11px;
+            line-height: 1.25;
+            pointer-events: none;
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.36);
+            white-space: normal;
+        }
+        .tv-profile-tooltip .tt-row {
+            display: grid;
+            grid-template-columns: auto auto;
+            justify-content: start;
+            column-gap: 12px;
+            row-gap: 2px;
+        }
+        .tv-profile-tooltip .muted {
+            color: var(--fg-2);
+        }
+        .tv-profile-summary {
+            position: absolute;
+            top: 8px;
+            right: 72px;
+            z-index: 57;
+            display: none;
+            min-width: 180px;
+            max-width: 260px;
+            padding: 6px 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: color-mix(in srgb, var(--bg-1) 90%, transparent);
+            color: var(--fg-1);
+            font-size: 11px;
+            line-height: 1.25;
+            pointer-events: none;
+            box-shadow: 0 10px 28px rgba(0, 0, 0, 0.30);
+        }
+        .tv-profile-summary-title {
+            color: var(--fg-0);
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .tv-profile-summary-grid {
+            display: grid;
+            grid-template-columns: auto auto;
+            justify-content: start;
+            column-gap: 12px;
+            row-gap: 2px;
+        }
         .tv-drawing-layer {
             pointer-events: none;
         }
@@ -11303,6 +11949,9 @@ def index():
         }
         .tv-drawing-handle--vertical {
             cursor: ns-resize;
+        }
+        .tv-drawing-handle--horizontal {
+            cursor: ew-resize;
         }
         .tv-drawing-handle--vertical.dragging {
             cursor: grabbing;
@@ -11556,6 +12205,9 @@ def index():
         }
         .tv-toolbar-group[data-group="strike-overlay"] {
             background: rgba(16, 185, 129, 0.06);
+        }
+        .tv-toolbar-group[data-group="profiles"] {
+            background: rgba(167, 139, 250, 0.06);
         }
         .strike-overlay-toggle {
             min-width: 66px;
@@ -12763,6 +13415,18 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section">
+                    <summary>Price Axis Countdown</summary>
+                    <div class="drawer-content">
+                        <p class="chart-history-help">TradingView-style countdown chip pinned just below the live price label on the right price axis, showing time until the current candle closes (driven by the active timeframe).</p>
+                        <div class="control-group">
+                            <label for="axis_countdown_enabled" style="display:flex;align-items:center;gap:8px;">
+                                <input type="checkbox" id="axis_countdown_enabled">
+                                <span>Show countdown below price label</span>
+                            </label>
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section">
                     <summary>Volume Coloring (RVOL)</summary>
                     <div class="drawer-content">
                         <p class="chart-history-help">Compare each bar's volume to a robust average for that time-of-day across prior RTH sessions (half-days excluded). Volume bars keep up/down direction; stronger RVOL increases opacity and the dotted line shows expected volume.</p>
@@ -13045,6 +13709,176 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section" open>
+                    <summary>Volume / Market Profile</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="vp_enabled">
+                            <label for="vp_enabled">Right-axis Volume Profile</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_mode">Profile Range:</label>
+                            <select id="vp_mode" title="Composite uses the last N sessions; visible range rebuilds from the candles currently on screen.">
+                                <option value="days" selected>Composite Days</option>
+                                <option value="session">Current Session</option>
+                                <option value="visible">Visible Range</option>
+                                <option value="custom">Custom Date Range</option>
+                            </select>
+                        </div>
+                        <div class="control-group" id="vp_days_row">
+                            <label for="vp_days">Composite Days:</label>
+                            <input type="number" id="vp_days" min="1" max="20" value="5" style="width: 72px;">
+                        </div>
+                        <div class="control-group" id="vp_custom_start_row">
+                            <label for="vp_start_date">Start Date:</label>
+                            <input type="date" id="vp_start_date">
+                        </div>
+                        <div class="control-group" id="vp_custom_end_row">
+                            <label for="vp_end_date">End Date:</label>
+                            <input type="date" id="vp_end_date">
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_color">VP Color:</label>
+                            <input type="color" id="vp_color" value="#3B82F6">
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_bin_size">VP Bin:</label>
+                            <input type="number" id="vp_bin_size" min="0.01" max="10" value="0.10" step="0.01" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <label for="fixed_vp_side">Fixed VP Side:</label>
+                            <select id="fixed_vp_side">
+                                <option value="right" selected>Right</option>
+                                <option value="left">Left</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_method">Allocation:</label>
+                            <select id="vp_method">
+                                <option value="triangular" selected>Triangular</option>
+                                <option value="uniform">Uniform</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_level_line_style">VP Line Style:</label>
+                            <select id="vp_level_line_style">
+                                <option value="solid">Solid</option>
+                                <option value="dashed" selected>Dashed</option>
+                                <option value="dotted">Dotted</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="vp_level_line_width">VP Line Width:</label>
+                            <input type="number" id="vp_level_line_width" min="0.5" max="5" step="0.5" value="1" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_enabled">
+                            <label for="tpo_enabled">TPO Market Profile</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_bin_size">TPO Bin:</label>
+                            <input type="number" id="tpo_bin_size" min="0.01" max="10" value="0.25" step="0.01" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <label for="fixed_tpo_side">Fixed TPO Side:</label>
+                            <select id="fixed_tpo_side">
+                                <option value="right" selected>Right</option>
+                                <option value="left">Left</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_mode">TPO Sessions:</label>
+                            <select id="tpo_mode">
+                                <option value="session" selected>Current Session</option>
+                                <option value="days">Composite Days</option>
+                                <option value="custom">Custom Date Range</option>
+                                <option value="bars_back">Bars Back</option>
+                                <option value="anchor">Anchor</option>
+                            </select>
+                        </div>
+                        <div class="control-group" id="tpo_days_row">
+                            <label for="tpo_days">TPO Days:</label>
+                            <input type="number" id="tpo_days" min="1" max="20" value="3" style="width: 72px;">
+                        </div>
+                        <div class="control-group" id="tpo_custom_start_row">
+                            <label for="tpo_start_date">TPO Start:</label>
+                            <input type="date" id="tpo_start_date">
+                        </div>
+                        <div class="control-group" id="tpo_custom_end_row">
+                            <label for="tpo_end_date">TPO End:</label>
+                            <input type="date" id="tpo_end_date">
+                        </div>
+                        <div class="control-group" id="tpo_bars_back_row">
+                            <label for="tpo_bars_back">TPO Bars Back:</label>
+                            <input type="number" id="tpo_bars_back" min="10" max="500" value="200" step="10" style="width: 72px;">
+                        </div>
+                        <div class="control-group" id="tpo_anchor_row">
+                            <label for="tpo_anchor_datetime">TPO Anchor:</label>
+                            <input type="datetime-local" id="tpo_anchor_datetime">
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_block_minutes">TPO Block:</label>
+                            <select id="tpo_block_minutes">
+                                <option value="15">15 min</option>
+                                <option value="30" selected>30 min</option>
+                                <option value="60">60 min</option>
+                                <option value="240">240 min</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_value_area_pct">TPO Value Area %:</label>
+                            <input type="number" id="tpo_value_area_pct" min="50" max="95" value="70" step="1" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_show_single_prints">
+                            <label for="tpo_show_single_prints">Show Single Prints</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_single_print_boxes">
+                            <label for="tpo_single_print_boxes">Box Single Prints</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_compact_labels" checked>
+                            <label for="tpo_compact_labels">Compact Labels (hide letters when crowded)</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_show_level_labels">
+                            <label for="tpo_show_level_labels">Show TPO Level Labels</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_show_summary" checked>
+                            <label for="tpo_show_summary">Show TPO Summary</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="tpo_show_initial_balance">
+                            <label for="tpo_show_initial_balance">Show Initial Balance (TPO drawings + right-edge)</label>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_initial_balance_minutes">IB Minutes:</label>
+                            <input type="number" id="tpo_initial_balance_minutes" min="15" max="240" value="60" step="15" style="width: 72px;">
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_color">TPO Color:</label>
+                            <input type="color" id="tpo_color" value="#A78BFA">
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_opacity">TPO Opacity:</label>
+                            <input type="range" id="tpo_opacity" min="0.05" max="0.60" value="0.18" step="0.01">
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_level_line_style">TPO Line Style:</label>
+                            <select id="tpo_level_line_style">
+                                <option value="solid">Solid</option>
+                                <option value="dashed" selected>Dashed</option>
+                                <option value="dotted">Dotted</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label for="tpo_level_line_width">TPO Line Width:</label>
+                            <input type="number" id="tpo_level_line_width" min="0.5" max="5" step="0.5" value="1" style="width: 72px;">
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section" open>
                     <summary>Alerts</summary>
                     <div class="drawer-content">
                         <div class="control-group">
@@ -13081,13 +13915,20 @@ def index():
         </aside>
 
         <dialog class="settings-modal" id="settings-modal">
-            <h3>Color &amp; Coloring</h3>
+            <h3>Display &amp; Coloring</h3>
             <div class="modal-row">
                 <label for="coloring_mode">Coloring Mode</label>
                 <select id="coloring_mode" title="Solid: All bars same color | Linear: Gradual fade by value | Ranked: Only highest exposures are bright, others heavily muted">
                     <option value="Solid" selected>Solid</option>
                     <option value="Linear Intensity">Linear Intensity</option>
                     <option value="Ranked Intensity">Ranked Intensity</option>
+                </select>
+            </div>
+            <div class="modal-row">
+                <label for="netex_spark_anchor">Drift Anchor</label>
+                <select id="netex_spark_anchor" title="Open: anchor the Net GEX / Net DEX drift bars to the 9:30 AM ET session open when available. First sample: anchor to the first sample captured in the browser for the day.">
+                    <option value="open" selected>9:30 AM ET Open</option>
+                    <option value="first">First Sample</option>
                 </select>
             </div>
             <div class="modal-row">
@@ -13209,6 +14050,22 @@ def index():
                                     <div class="rail-card-header">Net DEX</div>
                                     <div class="v" data-met="net_dex">—</div>
                                     <div class="d" data-met="net_dex_delta"></div>
+                                </div>
+                            </div>
+                            <div class="rail-drift-wrap" id="rail-spark-netex" title="Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — centered at unchanged">
+                                <div class="rail-drift-row" data-drift-row="gex">
+                                    <span class="rail-drift-label">GEX</span>
+                                    <div class="rail-drift-track" aria-hidden="true"><div class="rail-drift-fill" data-drift-fill="gex"></div></div>
+                                    <span class="rail-drift-value" data-drift-value="gex">—</span>
+                                </div>
+                                <div class="rail-drift-row" data-drift-row="dex">
+                                    <span class="rail-drift-label">DEX</span>
+                                    <div class="rail-drift-track" aria-hidden="true"><div class="rail-drift-fill" data-drift-fill="dex"></div></div>
+                                    <span class="rail-drift-value" data-drift-value="dex">—</span>
+                                </div>
+                                <div class="rail-drift-footer">
+                                    <span class="rail-drift-scale">Δ open</span>
+                                    <span class="rail-drift-read" data-met="netex_read">Exposure drift unavailable</span>
                                 </div>
                             </div>
                             <div class="gex-scope-pill" id="gex-scope-pill">
@@ -13779,7 +14636,7 @@ def index():
         // Time-scale sync state
         let tvSyncHandlers = [], tvSyncingTimeScale = false;
         // Drawing state
-        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'text' | 'avwap'
+        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'fib' | 'fixed_vp' | 'fixed_tpo' | 'anchored_tpo' | 'text' | 'avwap'
         let tvDrawStart = null;         // {price, time, x, y} of first click
         let tvDrawingDefs = [];         // serializable drawing definitions — survive full re-renders
         let tvDrawingUndoStack = [];    // snapshots for user drawing actions: create, clear, delete, hide/show
@@ -13806,6 +14663,11 @@ def index():
         let tvIndicatorEditorTargetKey = '';
         let tvCurrentDayStartTime = 0;  // unix seconds of current day's first candle (for daily VWAP)
         let tvLastPriceData = null;     // cache of full priceData for redraw
+        let tvVolumeProfilePayload = null;
+        let tvTpoProfilePayload = null;
+        let tvProfileOverlayPending = false;
+        let tvProfileHoverRows = [];
+        let tvProfileAnchorDragState = null;
         // All overlay level prices (exposure, EM, drawn H-lines) — used by autoscaleInfoProvider
         let tvAllLevelPrices = [];
         // Session focus keeps the Y-axis tighter; Reset / auto-range can still fit everything.
@@ -13830,6 +14692,15 @@ def index():
         let tvSessionLevelPrices = [];
         let tvTopOIPrices = [];
         let gexScope = (() => { try { return localStorage.getItem('gexScope') || 'all'; } catch(e) { return 'all'; } })();
+        const NETEX_SPARK_ANCHOR_KEY = 'netexSparkAnchor';
+        let netexSparkAnchorMode = (() => {
+            try {
+                const saved = localStorage.getItem(NETEX_SPARK_ANCHOR_KEY);
+                return saved === 'first' ? 'first' : 'open';
+            } catch (e) {
+                return 'open';
+            }
+        })();
         let tvHistoricalPoints = [];
         let tvHistoricalExpectedMoveSeries = [];
         let tvHistoricalOverlayPending = false;
@@ -14314,6 +15185,21 @@ def index():
             }
         }
 
+        function tvGetSessionCandlePriceRange() {
+            if (!tvLastCandles.length) return null;
+            const fromIndex = tvGetCurrentSessionStartIndex();
+            const toIndex = tvLastCandles.length - 1;
+            let minValue = Infinity, maxValue = -Infinity;
+            for (let index = fromIndex; index <= toIndex; index += 1) {
+                const candle = tvLastCandles[index];
+                if (!candle) continue;
+                if (Number.isFinite(candle.low)) minValue = Math.min(minValue, candle.low);
+                if (Number.isFinite(candle.high)) maxValue = Math.max(maxValue, candle.high);
+            }
+            if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return null;
+            return { minValue, maxValue };
+        }
+
         function tvGetVisibleCandlePriceRange(trimLeftBars = 0) {
             if (!tvLastCandles.length) return null;
             let fromIndex = 0;
@@ -14355,17 +15241,26 @@ def index():
                     let minVal = res.priceRange.minValue;
                     let maxVal = res.priceRange.maxValue;
                     if (yAxisMode !== 'fit-all') {
-                        let trimLeftBars = 0;
-                        try {
-                            const visibleRange = tvPriceChart && tvPriceChart.timeScale
-                                ? tvPriceChart.timeScale().getVisibleLogicalRange()
-                                : null;
-                            if (visibleRange) {
-                                const visibleBars = Math.max(1, Math.ceil(visibleRange.to) - Math.floor(visibleRange.from) + 1);
-                                trimLeftBars = Math.min(48, Math.max(0, Math.round(visibleBars * 0.12)));
-                            }
-                        } catch (e) {}
-                        const candleRange = tvGetVisibleCandlePriceRange(trimLeftBars);
+                        let candleRange;
+                        if (yAxisMode === 'session' && tvCurrentDayStartTime) {
+                            // Anchor strictly to today's bars so the Y-axis can't be
+                            // dragged out by far-off level lines (max pain, prior-day
+                            // OI, expected moves) before the timeScale visible-range
+                            // change has propagated to this provider.
+                            candleRange = tvGetSessionCandlePriceRange();
+                        } else {
+                            let trimLeftBars = 0;
+                            try {
+                                const visibleRange = tvPriceChart && tvPriceChart.timeScale
+                                    ? tvPriceChart.timeScale().getVisibleLogicalRange()
+                                    : null;
+                                if (visibleRange) {
+                                    const visibleBars = Math.max(1, Math.ceil(visibleRange.to) - Math.floor(visibleRange.from) + 1);
+                                    trimLeftBars = Math.min(48, Math.max(0, Math.round(visibleBars * 0.12)));
+                                }
+                            } catch (e) {}
+                            candleRange = tvGetVisibleCandlePriceRange(trimLeftBars);
+                        }
                         if (candleRange) {
                             const span = Math.max(0.01, candleRange.maxValue - candleRange.minValue);
                             const focusPad = Math.min(1.0, Math.max(span * 0.28, candleRange.maxValue * 0.0009, 0.18));
@@ -15540,6 +16435,29 @@ def index():
             normalizeTopOICountInput();
             updateData();
         });
+        syncVolumeProfileSettingsVisibility();
+        syncTpoProfileSettingsVisibility();
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'fixed_tpo_side', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_show_level_labels', 'tpo_show_summary', 'tpo_show_initial_balance', 'tpo_initial_balance_minutes', 'tpo_color', 'tpo_opacity', 'vp_level_line_style', 'vp_level_line_width', 'tpo_level_line_style', 'tpo_level_line_width'].forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('input', () => {
+                syncVolumeProfileSettingsVisibility();
+                syncTpoProfileSettingsVisibility();
+                syncTVProfileToolbarButtons();
+                scheduleTVProfileOverlayDraw();
+                _priceHistoryLastKey = '';
+                updateData();
+            });
+            el.addEventListener('change', () => {
+                syncVolumeProfileSettingsVisibility();
+                syncTpoProfileSettingsVisibility();
+                syncTVProfileToolbarButtons();
+                scheduleTVProfileOverlayDraw();
+                _priceHistoryLastKey = '';
+                updateData();
+            });
+        });
+        syncTVProfileToolbarButtons();
 
         // Levels dropdown handlers
         function updateLevelsDisplay() {
@@ -17235,6 +18153,23 @@ def index():
                 delete normalized.fillColor;
                 delete normalized.midlineColor;
             }
+            if (normalized.type === 'fixed_vp') {
+                normalized.binSize = Math.max(0.01, Math.min(10, Number(normalized.binSize) || 0.10));
+                normalized.method = ['uniform', 'triangular'].includes(normalized.method) ? normalized.method : 'triangular';
+                normalized.profileSide = normalized.profileSide === 'left' ? 'left' : (normalized.profileSide === 'right' ? 'right' : '');
+                normalized.label = normalized.label || 'Fixed VP';
+            } else if (normalized.type === 'fixed_tpo' || normalized.type === 'anchored_tpo') {
+                normalized.binSize = Math.max(0.01, Math.min(10, Number(normalized.binSize) || 0.25));
+                normalized.blockMinutes = [15, 30, 60, 240].includes(Number(normalized.blockMinutes)) ? Number(normalized.blockMinutes) : 30;
+                normalized.valueAreaPct = Math.max(50, Math.min(95, Number(normalized.valueAreaPct) || 70));
+                normalized.showSinglePrints = normalized.showSinglePrints === true;
+                normalized.showInitialBalance = normalized.showInitialBalance === true;
+                normalized.initialBalanceMinutes = Math.max(15, Math.min(240, Number(normalized.initialBalanceMinutes) || 60));
+                normalized.profileSide = normalized.profileSide === 'left' ? 'left' : (normalized.profileSide === 'right' ? 'right' : '');
+                normalized.label = normalized.label || (normalized.type === 'anchored_tpo' ? 'Anchored TPO' : 'TPO Range');
+            } else {
+                delete normalized.profileSide;
+            }
             if (normalized.type === 'avwap') {
                 const rawAnchor = Number(normalized.anchorTime);
                 normalized.anchorTime = Number.isFinite(rawAnchor) ? rawAnchor : null;
@@ -17248,10 +18183,10 @@ def index():
                 if (Number.isFinite(Number(normalized.time))) {
                     normalized.logical = null;
                 }
-                if (Number.isFinite(Number(normalized.t1))) {
+                if (!isTVProfileDrawingType(normalized.type) && Number.isFinite(Number(normalized.t1))) {
                     normalized.l1 = null;
                 }
-                if (Number.isFinite(Number(normalized.t2))) {
+                if (!isTVProfileDrawingType(normalized.type) && Number.isFinite(Number(normalized.t2))) {
                     normalized.l2 = null;
                 }
                 if (Number.isFinite(Number(normalized.t3))) {
@@ -17608,6 +18543,66 @@ def index():
             if (state) {
                 persistTVDrawings();
                 scheduleTVDrawingOverlayDraw();
+            }
+        }
+
+        function isTVProfileDrawingType(type) {
+            return type === 'fixed_vp' || type === 'fixed_tpo' || type === 'anchored_tpo';
+        }
+
+        function tvBeginProfileAnchorDrag(event, def, anchorKey, handleEl) {
+            if (!def || !isTVProfileDrawingType(def.type)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            tvSelectedDrawingId = def.id;
+            tvProfileAnchorDragState = {
+                defId: def.id,
+                anchor: anchorKey === 'end' ? 'end' : 'start',
+                handleEl: handleEl || null,
+            };
+            if (handleEl && handleEl.classList) handleEl.classList.add('dragging');
+            window.addEventListener('mousemove', tvHandleProfileAnchorDragMove);
+            window.addEventListener('mouseup', tvEndProfileAnchorDrag);
+        }
+
+        function tvHandleProfileAnchorDragMove(event) {
+            if (!tvProfileAnchorDragState) return;
+            const def = tvFindDrawingById(tvProfileAnchorDragState.defId);
+            if (!def || !isTVProfileDrawingType(def.type)) {
+                tvEndProfileAnchorDrag();
+                return;
+            }
+            const point = tvOverlayPointFromEvent(event);
+            if (!point) return;
+            const logical = tvCoordinateToLogical(point.x);
+            if (!Number.isFinite(logical)) return;
+            let time = null;
+            try { time = tvPriceChart.timeScale().coordinateToTime(point.x); } catch (e) { time = null; }
+            if (!time) time = tvLogicalToTime(logical);
+            if (tvProfileAnchorDragState.anchor === 'start') {
+                def.l1 = logical;
+                def.t1 = time || null;
+            } else {
+                if (def.type === 'anchored_tpo') return;
+                def.l2 = logical;
+                def.t2 = time || null;
+            }
+            scheduleTVDrawingOverlayDraw();
+            scheduleTVProfileOverlayDraw();
+        }
+
+        function tvEndProfileAnchorDrag() {
+            window.removeEventListener('mousemove', tvHandleProfileAnchorDragMove);
+            window.removeEventListener('mouseup', tvEndProfileAnchorDrag);
+            const state = tvProfileAnchorDragState;
+            tvProfileAnchorDragState = null;
+            if (state && state.handleEl && state.handleEl.classList) {
+                state.handleEl.classList.remove('dragging');
+            }
+            if (state) {
+                persistTVDrawings();
+                scheduleTVDrawingOverlayDraw();
+                scheduleTVProfileOverlayDraw();
             }
         }
 
@@ -18863,6 +19858,50 @@ def index():
                         '<label for="tv-selected-draw-extend-right">Extend Right</label>' +
                         '<input type="checkbox" id="tv-selected-draw-extend-right" />' +
                     '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-profile-side-row">' +
+                        '<label for="tv-selected-draw-profile-side">Profile Side</label>' +
+                        '<select id="tv-selected-draw-profile-side">' +
+                            '<option value="">Use Setting</option>' +
+                            '<option value="right">Right</option>' +
+                            '<option value="left">Left</option>' +
+                        '</select>' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-profile-bin-row">' +
+                        '<label for="tv-selected-draw-profile-bin">VP Bin</label>' +
+                        '<input type="number" id="tv-selected-draw-profile-bin" min="0.01" max="10" step="0.01" />' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-profile-method-row">' +
+                        '<label for="tv-selected-draw-profile-method">Allocation</label>' +
+                        '<select id="tv-selected-draw-profile-method">' +
+                            '<option value="triangular">Triangular</option>' +
+                            '<option value="uniform">Uniform</option>' +
+                        '</select>' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-block-row">' +
+                        '<label for="tv-selected-draw-tpo-block">TPO Block</label>' +
+                        '<select id="tv-selected-draw-tpo-block">' +
+                            '<option value="15">15m</option>' +
+                            '<option value="30">30m</option>' +
+                            '<option value="60">1h</option>' +
+                            '<option value="240">4h</option>' +
+                        '</select>' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-va-row">' +
+                        '<label for="tv-selected-draw-tpo-va">TPO VA %</label>' +
+                        '<input type="number" id="tv-selected-draw-tpo-va" min="50" max="95" step="1" />' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-single-row">' +
+                        '<label for="tv-selected-draw-tpo-single">Single Prints</label>' +
+                        '<input type="checkbox" id="tv-selected-draw-tpo-single" />' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-ib-row">' +
+                        '<label for="tv-selected-draw-tpo-ib">IB Levels</label>' +
+                        '<input type="checkbox" id="tv-selected-draw-tpo-ib" />' +
+                    '</div>' +
+                    '<div class="tv-drawing-editor-row" id="tv-drawing-tpo-ib-min-row">' +
+                        '<label for="tv-selected-draw-tpo-ib-min">IB Minutes</label>' +
+                        '<input type="number" id="tv-selected-draw-tpo-ib-min" min="15" max="240" step="15" />' +
+                    '</div>' +
                     '<div class="tv-drawing-editor-row" id="tv-drawing-fill-color-row">' +
                         '<label for="tv-selected-draw-fill-color">Fill</label>' +
                         '<input type="color" id="tv-selected-draw-fill-color" />' +
@@ -18914,6 +19953,7 @@ def index():
                     }
                     syncTVUserDrawingAxisLabelLines();
                     if (def.type === 'avwap') applyTVAvwapDrawings();
+                    if (isTVProfileDrawingType(def.type)) scheduleTVProfileOverlayDraw();
                     if (def.type === 'hline' || def.type === 'channel') {
                         updateTVDrawingEditor();
                     }
@@ -18992,6 +20032,66 @@ def index():
                     persistTVDrawings();
                     scheduleTVDrawingOverlayDraw();
                 });
+                editor.querySelector('#tv-selected-draw-profile-side').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || !isTVProfileDrawingType(def.type)) return;
+                    def.profileSide = event.target.value === 'left' || event.target.value === 'right' ? event.target.value : '';
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                    scheduleTVDrawingOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-profile-bin').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || !isTVProfileDrawingType(def.type)) return;
+                    const fallback = def.type === 'fixed_vp' ? getVolumeProfileSettingsFromDom().bin_size : getTpoProfileSettingsFromDom().bin_size;
+                    def.binSize = Math.max(0.01, Math.min(10, Number(event.target.value) || fallback));
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-profile-method').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || def.type !== 'fixed_vp') return;
+                    def.method = event.target.value === 'uniform' ? 'uniform' : 'triangular';
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-block').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    const next = Number(event.target.value);
+                    def.blockMinutes = [15, 30, 60, 240].includes(next) ? next : 30;
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-va').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    def.valueAreaPct = Math.max(50, Math.min(95, Number(event.target.value) || 70));
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-single').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    def.showSinglePrints = !!event.target.checked;
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-ib').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    def.showInitialBalance = !!event.target.checked;
+                    persistTVDrawings();
+                    updateTVDrawingEditor();
+                    scheduleTVProfileOverlayDraw();
+                });
+                editor.querySelector('#tv-selected-draw-tpo-ib-min').addEventListener('change', event => {
+                    const def = tvFindDrawingById();
+                    if (!def || (def.type !== 'fixed_tpo' && def.type !== 'anchored_tpo')) return;
+                    def.initialBalanceMinutes = Math.max(15, Math.min(240, Number(event.target.value) || 60));
+                    persistTVDrawings();
+                    scheduleTVProfileOverlayDraw();
+                });
                 editor.querySelector('#tv-selected-draw-fill-color').addEventListener('input', event => {
                     const def = tvFindDrawingById();
                     if (!def || def.type !== 'channel') return;
@@ -19046,12 +20146,22 @@ def index():
             const midlineInput = editor.querySelector('#tv-selected-draw-midline');
             const extendRightRow = editor.querySelector('#tv-drawing-extend-right-row');
             const extendRightInput = editor.querySelector('#tv-selected-draw-extend-right');
+            const profileSideRow = editor.querySelector('#tv-drawing-profile-side-row');
+            const profileSideSelect = editor.querySelector('#tv-selected-draw-profile-side');
+            const profileBinRow = editor.querySelector('#tv-drawing-profile-bin-row');
+            const profileBinInput = editor.querySelector('#tv-selected-draw-profile-bin');
+            const profileMethodRow = editor.querySelector('#tv-drawing-profile-method-row');
+            const profileMethodSelect = editor.querySelector('#tv-selected-draw-profile-method');
             if (titleEl) {
                 const typeLabel = def.type === 'hline' ? 'H-Line'
                     : def.type === 'trendline' ? 'Trend Line'
                     : def.type === 'channel' ? 'Channel'
                     : def.type === 'rect' ? 'Box'
+                    : def.type === 'fib' ? 'Fibonacci'
                     : def.type === 'avwap' ? 'Anchored VWAP'
+                    : def.type === 'fixed_vp' ? 'Fixed VP'
+                    : def.type === 'fixed_tpo' ? 'TPO Range'
+                    : def.type === 'anchored_tpo' ? 'Anchored TPO'
                     : 'Text Label';
                 titleEl.textContent = typeLabel;
             }
@@ -19100,6 +20210,63 @@ def index():
                 extendRightRow.style.display = isChannel ? 'flex' : 'none';
                 extendRightInput.checked = isChannel ? normalizeTVDrawingExtendRight(def.extendRight) : false;
                 extendRightInput.disabled = !isChannel;
+            }
+            if (profileSideRow && profileSideSelect) {
+                const isProfile = isTVProfileDrawingType(def.type);
+                profileSideRow.style.display = isProfile ? 'flex' : 'none';
+                profileSideSelect.value = isProfile ? (def.profileSide || '') : '';
+                profileSideSelect.disabled = !isProfile;
+            }
+            if (profileBinRow && profileBinInput) {
+                const isProfile = isTVProfileDrawingType(def.type);
+                const isTpo = def.type === 'fixed_tpo' || def.type === 'anchored_tpo';
+                const label = profileBinRow.querySelector('label');
+                if (label) label.textContent = isTpo ? 'TPO Bin' : 'VP Bin';
+                profileBinRow.style.display = isProfile ? 'flex' : 'none';
+                profileBinInput.value = isProfile ? (def.binSize || (isTpo ? getTpoProfileSettingsFromDom().bin_size : getVolumeProfileSettingsFromDom().bin_size) || 0.10) : '';
+                profileBinInput.disabled = !isProfile;
+            }
+            if (profileMethodRow && profileMethodSelect) {
+                const isFixedVp = def.type === 'fixed_vp';
+                profileMethodRow.style.display = isFixedVp ? 'flex' : 'none';
+                profileMethodSelect.value = isFixedVp ? (def.method || 'triangular') : 'triangular';
+                profileMethodSelect.disabled = !isFixedVp;
+            }
+            const tpoBlockRow = editor.querySelector('#tv-drawing-tpo-block-row');
+            const tpoBlockSelect = editor.querySelector('#tv-selected-draw-tpo-block');
+            const tpoVaRow = editor.querySelector('#tv-drawing-tpo-va-row');
+            const tpoVaInput = editor.querySelector('#tv-selected-draw-tpo-va');
+            const tpoSingleRow = editor.querySelector('#tv-drawing-tpo-single-row');
+            const tpoSingleInput = editor.querySelector('#tv-selected-draw-tpo-single');
+            const tpoIbRow = editor.querySelector('#tv-drawing-tpo-ib-row');
+            const tpoIbInput = editor.querySelector('#tv-selected-draw-tpo-ib');
+            const tpoIbMinRow = editor.querySelector('#tv-drawing-tpo-ib-min-row');
+            const tpoIbMinInput = editor.querySelector('#tv-selected-draw-tpo-ib-min');
+            const isTpoProfile = def.type === 'fixed_tpo' || def.type === 'anchored_tpo';
+            if (tpoBlockRow && tpoBlockSelect) {
+                tpoBlockRow.style.display = isTpoProfile ? 'flex' : 'none';
+                tpoBlockSelect.value = String([15, 30, 60, 240].includes(Number(def.blockMinutes)) ? Number(def.blockMinutes) : 30);
+                tpoBlockSelect.disabled = !isTpoProfile;
+            }
+            if (tpoVaRow && tpoVaInput) {
+                tpoVaRow.style.display = isTpoProfile ? 'flex' : 'none';
+                tpoVaInput.value = isTpoProfile ? (def.valueAreaPct || 70) : '';
+                tpoVaInput.disabled = !isTpoProfile;
+            }
+            if (tpoSingleRow && tpoSingleInput) {
+                tpoSingleRow.style.display = isTpoProfile ? 'flex' : 'none';
+                tpoSingleInput.checked = isTpoProfile ? !!def.showSinglePrints : false;
+                tpoSingleInput.disabled = !isTpoProfile;
+            }
+            if (tpoIbRow && tpoIbInput) {
+                tpoIbRow.style.display = isTpoProfile ? 'flex' : 'none';
+                tpoIbInput.checked = isTpoProfile ? !!def.showInitialBalance : false;
+                tpoIbInput.disabled = !isTpoProfile;
+            }
+            if (tpoIbMinRow && tpoIbMinInput) {
+                tpoIbMinRow.style.display = isTpoProfile && def.showInitialBalance ? 'flex' : 'none';
+                tpoIbMinInput.value = isTpoProfile ? (def.initialBalanceMinutes || 60) : '';
+                tpoIbMinInput.disabled = !isTpoProfile;
             }
             const fillColorRow = editor.querySelector('#tv-drawing-fill-color-row');
             const fillColorInput = editor.querySelector('#tv-selected-draw-fill-color');
@@ -19161,6 +20328,1049 @@ def index():
                 if (value !== undefined && value !== null) el.setAttribute(key, String(value));
             });
             return el;
+        }
+
+        function ensureTVProfileOverlay() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let overlay = container.querySelector('.tv-profile-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.className = 'tv-profile-overlay';
+                overlay.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg><div class="tv-profile-summary" aria-hidden="true"></div>';
+                const drawingOverlay = container.querySelector('.tv-drawing-overlay');
+                if (drawingOverlay) container.insertBefore(overlay, drawingOverlay);
+                else container.appendChild(overlay);
+            } else if (!overlay.querySelector('.tv-profile-summary')) {
+                const summary = document.createElement('div');
+                summary.className = 'tv-profile-summary';
+                summary.setAttribute('aria-hidden', 'true');
+                overlay.appendChild(summary);
+            }
+            return overlay;
+        }
+
+        function getVolumeProfileSettingsFromDom() {
+            const modeEl = document.getElementById('vp_mode');
+            const daysEl = document.getElementById('vp_days');
+            const startEl = document.getElementById('vp_start_date');
+            const endEl = document.getElementById('vp_end_date');
+            const binEl = document.getElementById('vp_bin_size');
+            const methodEl = document.getElementById('vp_method');
+            const colorEl = document.getElementById('vp_color');
+            const fixedSideEl = document.getElementById('fixed_vp_side');
+            const lineStyleEl = document.getElementById('vp_level_line_style');
+            const lineWidthEl = document.getElementById('vp_level_line_width');
+            const colorFallback = resolveCssColor('var(--info)') || '#3B82F6';
+            const fixedSide = fixedSideEl && fixedSideEl.value === 'left' ? 'left' : 'right';
+            return {
+                enabled: !!(document.getElementById('vp_enabled') && document.getElementById('vp_enabled').checked),
+                mode: modeEl ? modeEl.value : 'days',
+                days: daysEl ? Math.max(1, Math.min(20, parseInt(daysEl.value) || 5)) : 5,
+                start_date: startEl ? String(startEl.value || '') : '',
+                end_date: endEl ? String(endEl.value || '') : '',
+                bin_size: binEl ? Math.max(0.01, Math.min(10, parseFloat(binEl.value) || 0.10)) : 0.10,
+                method: methodEl ? methodEl.value : 'triangular',
+                color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
+                fixed_vp_side: fixedSide,
+                level_line_style: lineStyleEl && ['solid', 'dashed', 'dotted'].includes(lineStyleEl.value) ? lineStyleEl.value : 'dashed',
+                level_line_width: lineWidthEl ? Math.max(0.5, Math.min(5, parseFloat(lineWidthEl.value) || 1)) : 1,
+            };
+        }
+
+        function buildLevelLineStyle(color, lineStyle, lineWidth) {
+            const parts = [];
+            if (color) parts.push(`stroke:${color}`);
+            const w = Math.max(0.5, Math.min(5, Number(lineWidth) || 1));
+            parts.push(`stroke-width:${w}`);
+            const ls = lineStyle || 'dashed';
+            if (ls === 'solid') parts.push('stroke-dasharray:none');
+            else if (ls === 'dotted') parts.push('stroke-dasharray:1 3');
+            else parts.push('stroke-dasharray:4 4');
+            return parts.join(';');
+        }
+
+        function syncVolumeProfileSettingsVisibility() {
+            const mode = (document.getElementById('vp_mode') || {}).value || 'days';
+            const daysRow = document.getElementById('vp_days_row');
+            const startRow = document.getElementById('vp_custom_start_row');
+            const endRow = document.getElementById('vp_custom_end_row');
+            if (daysRow) daysRow.style.display = mode === 'days' ? 'flex' : 'none';
+            if (startRow) startRow.style.display = mode === 'custom' ? 'flex' : 'none';
+            if (endRow) endRow.style.display = mode === 'custom' ? 'flex' : 'none';
+        }
+
+        function getTpoProfileSettingsFromDom() {
+            const binEl = document.getElementById('tpo_bin_size');
+            const sideEl = document.getElementById('fixed_tpo_side');
+            const modeEl = document.getElementById('tpo_mode');
+            const daysEl = document.getElementById('tpo_days');
+            const startEl = document.getElementById('tpo_start_date');
+            const endEl = document.getElementById('tpo_end_date');
+            const colorEl = document.getElementById('tpo_color');
+            const opacityEl = document.getElementById('tpo_opacity');
+            const barsBackEl = document.getElementById('tpo_bars_back');
+            const anchorEl = document.getElementById('tpo_anchor_datetime');
+            const blockEl = document.getElementById('tpo_block_minutes');
+            const vaPctEl = document.getElementById('tpo_value_area_pct');
+            const singleEl = document.getElementById('tpo_show_single_prints');
+            const singleBoxesEl = document.getElementById('tpo_single_print_boxes');
+            const compactEl = document.getElementById('tpo_compact_labels');
+            const levelLabelsEl = document.getElementById('tpo_show_level_labels');
+            const summaryEl = document.getElementById('tpo_show_summary');
+            const ibEl = document.getElementById('tpo_show_initial_balance');
+            const ibMinEl = document.getElementById('tpo_initial_balance_minutes');
+            const lineStyleEl = document.getElementById('tpo_level_line_style');
+            const lineWidthEl = document.getElementById('tpo_level_line_width');
+            const colorFallback = resolveCssColor('var(--accent)') || '#A78BFA';
+            return {
+                enabled: !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked),
+                bin_size: binEl ? Math.max(0.01, Math.min(10, parseFloat(binEl.value) || 0.25)) : 0.25,
+                fixed_tpo_side: sideEl && sideEl.value === 'left' ? 'left' : 'right',
+                mode: modeEl ? modeEl.value : 'session',
+                days: daysEl ? Math.max(1, Math.min(20, parseInt(daysEl.value) || 3)) : 3,
+                start_date: startEl ? String(startEl.value || '') : '',
+                end_date: endEl ? String(endEl.value || '') : '',
+                bars_back: barsBackEl ? Math.max(10, Math.min(500, parseInt(barsBackEl.value) || 200)) : 200,
+                anchor_datetime: anchorEl ? String(anchorEl.value || '') : '',
+                block_minutes: blockEl ? (parseInt(blockEl.value) || 30) : 30,
+                value_area_pct: vaPctEl ? Math.max(50, Math.min(95, parseFloat(vaPctEl.value) || 70)) : 70,
+                show_single_prints: !!(singleEl && singleEl.checked),
+                single_print_boxes: !!(singleBoxesEl && singleBoxesEl.checked),
+                compact_labels: !!(compactEl && compactEl.checked),
+                show_level_labels: !!(levelLabelsEl && levelLabelsEl.checked),
+                show_summary: !summaryEl || summaryEl.checked,
+                show_initial_balance: !!(ibEl && ibEl.checked),
+                initial_balance_minutes: ibMinEl ? Math.max(15, Math.min(240, parseInt(ibMinEl.value) || 60)) : 60,
+                color: colorEl ? normalizeTVIndicatorColor(colorEl.value, colorFallback) : colorFallback,
+                opacity: opacityEl ? Math.max(0.05, Math.min(0.60, parseFloat(opacityEl.value) || 0.18)) : 0.18,
+                level_line_style: lineStyleEl && ['solid', 'dashed', 'dotted'].includes(lineStyleEl.value) ? lineStyleEl.value : 'dashed',
+                level_line_width: lineWidthEl ? Math.max(0.5, Math.min(5, parseFloat(lineWidthEl.value) || 1)) : 1,
+            };
+        }
+
+        function syncTpoProfileSettingsVisibility() {
+            const mode = (document.getElementById('tpo_mode') || {}).value || 'session';
+            const daysRow = document.getElementById('tpo_days_row');
+            const startRow = document.getElementById('tpo_custom_start_row');
+            const endRow = document.getElementById('tpo_custom_end_row');
+            const barsRow = document.getElementById('tpo_bars_back_row');
+            const anchorRow = document.getElementById('tpo_anchor_row');
+            if (daysRow) daysRow.style.display = mode === 'days' ? 'flex' : 'none';
+            if (startRow) startRow.style.display = mode === 'custom' ? 'flex' : 'none';
+            if (endRow) endRow.style.display = mode === 'custom' ? 'flex' : 'none';
+            if (barsRow) barsRow.style.display = mode === 'bars_back' ? 'flex' : 'none';
+            if (anchorRow) anchorRow.style.display = mode === 'anchor' ? 'flex' : 'none';
+        }
+
+        function syncTVProfileToolbarButtons() {
+            const vpEnabled = !!(document.getElementById('vp_enabled') && document.getElementById('vp_enabled').checked);
+            const tpoEnabled = !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked);
+            document.querySelectorAll('[data-profile-toggle="vp"]').forEach(btn => {
+                btn.classList.toggle('active', vpEnabled);
+                btn.setAttribute('aria-pressed', vpEnabled ? 'true' : 'false');
+            });
+            document.querySelectorAll('[data-profile-toggle="tpo"]').forEach(btn => {
+                btn.classList.toggle('active', tpoEnabled);
+                btn.setAttribute('aria-pressed', tpoEnabled ? 'true' : 'false');
+            });
+        }
+
+        function setTVProfileToggle(kind, enabled) {
+            const id = kind === 'tpo' ? 'tpo_enabled' : 'vp_enabled';
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.checked = !!enabled;
+            syncTVProfileToolbarButtons();
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        function buildModeledProfileFromCandles(candles, settings, fromLogical = null, toLogical = null, fromTime = null, toTime = null) {
+            settings = settings || {};
+            const binSize = Math.max(0.01, Math.min(10, Number(settings.bin_size) || 0.10));
+            const method = settings.method || 'triangular';
+            const bins = new Map();
+            let total = 0;
+            const minTime = Math.min(Number(fromTime), Number(toTime));
+            const maxTime = Math.max(Number(fromTime), Number(toTime));
+            const useTimeRange = Number.isFinite(minTime) && Number.isFinite(maxTime) && maxTime >= minTime;
+            const rows = (candles || []).filter((c, idx) => {
+                if (useTimeRange) {
+                    const candleTime = Number(c && c.time);
+                    return Number.isFinite(candleTime) && candleTime >= minTime && candleTime <= maxTime;
+                }
+                if (fromLogical == null || toLogical == null) return true;
+                return idx >= Math.floor(fromLogical) && idx <= Math.ceil(toLogical);
+            });
+            rows.forEach(c => {
+                const low = Number(c.low), high = Number(c.high), close = Number(c.close), vol = Number(c.volume || c.value || 0);
+                if (![low, high, close, vol].every(Number.isFinite) || vol <= 0) return;
+                const lo = Math.min(low, high), hi = Math.max(low, high);
+                const start = Math.floor(lo / binSize);
+                const end = Math.ceil(hi / binSize);
+                const prices = [];
+                for (let i = start; i <= end; i += 1) {
+                    const price = Number((i * binSize).toFixed(4));
+                    if (price >= lo - binSize * 0.5 && price <= hi + binSize * 0.5) prices.push(price);
+                }
+                if (!prices.length) prices.push(Number((Math.round(close / binSize) * binSize).toFixed(4)));
+                const center = (hi + lo + close) / 3;
+                const weights = prices.map(price => method === 'uniform' ? 1 : Math.max(0.05, 1 - Math.abs(price - center) / Math.max(hi - lo, binSize)));
+                const denom = weights.reduce((sum, v) => sum + v, 0) || prices.length;
+                prices.forEach((price, idx) => {
+                    bins.set(price, (bins.get(price) || 0) + vol * weights[idx] / denom);
+                });
+                total += vol;
+            });
+            const out = Array.from(bins.entries()).map(([price, volume]) => ({ price, volume })).sort((a, b) => a.price - b.price);
+            const maxVolume = out.reduce((m, r) => Math.max(m, r.volume), 0);
+            const va = computeProfileValueArea(out, 'volume');
+            out.forEach(row => { row.in_value_area = va.prices.has(Number(row.price)); });
+            return {
+                enabled: true,
+                bins: out,
+                max_volume: maxVolume,
+                total_volume: total,
+                poc: va.poc,
+                value_area_low: va.val,
+                value_area_high: va.vah,
+                value_area_pct: 70,
+            };
+        }
+
+        function computeProfileValueArea(rows, valueKey, targetPct = 70) {
+            const clean = (rows || [])
+                .map((row, idx) => ({ idx, price: Number(row.price), value: Number(row[valueKey] || 0) }))
+                .filter(row => Number.isFinite(row.price) && Number.isFinite(row.value) && row.value > 0)
+                .sort((a, b) => a.price - b.price);
+            if (!clean.length) return { poc: null, val: null, vah: null, prices: new Set() };
+            const total = clean.reduce((sum, row) => sum + row.value, 0);
+            const target = Math.max(0.50, Math.min(0.95, (Number(targetPct) || 70) / 100));
+            let pocIdx = 0;
+            clean.forEach((row, idx) => { if (row.value > clean[pocIdx].value) pocIdx = idx; });
+            let lo = pocIdx, hi = pocIdx, sum = clean[pocIdx].value;
+            const included = new Set([clean[pocIdx].price]);
+            while (sum < total * target && (lo > 0 || hi < clean.length - 1)) {
+                const lower = lo > 0 ? clean[lo - 1].value : -1;
+                const upper = hi < clean.length - 1 ? clean[hi + 1].value : -1;
+                if (upper >= lower) {
+                    hi += 1;
+                    sum += clean[hi].value;
+                    included.add(clean[hi].price);
+                } else {
+                    lo -= 1;
+                    sum += clean[lo].value;
+                    included.add(clean[lo].price);
+                }
+            }
+            return { poc: clean[pocIdx].price, val: clean[lo].price, vah: clean[hi].price, prices: included };
+        }
+
+        function selectProfileCandles(candles, fromLogical = null, toLogical = null, fromTime = null, toTime = null) {
+            const minTime = Math.min(Number(fromTime), Number(toTime));
+            const maxTime = Math.max(Number(fromTime), Number(toTime));
+            const useTimeRange = Number.isFinite(minTime) && Number.isFinite(maxTime) && maxTime >= minTime;
+            return (candles || []).filter((c, idx) => {
+                if (useTimeRange) {
+                    const candleTime = Number(c && c.time);
+                    return Number.isFinite(candleTime) && candleTime >= minTime && candleTime <= maxTime;
+                }
+                if (fromLogical == null || toLogical == null) return true;
+                return idx >= Math.floor(fromLogical) && idx <= Math.ceil(toLogical);
+            });
+        }
+
+        function getEasternCandleParts(timeSeconds) {
+            const d = new Date(Number(timeSeconds) * 1000);
+            const parts = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+            }).formatToParts(d).reduce((acc, part) => {
+                if (part.type !== 'literal') acc[part.type] = part.value;
+                return acc;
+            }, {});
+            const hour = Number(parts.hour === '24' ? 0 : parts.hour);
+            return {
+                sessionKey: `${parts.year}-${parts.month}-${parts.day}`,
+                minuteOfDay: (hour * 60) + Number(parts.minute || 0),
+            };
+        }
+
+        function buildTpoProfileFromCandles(candles, settings, fromLogical = null, toLogical = null, fromTime = null, toTime = null) {
+            settings = settings || {};
+            const binSize = Math.max(0.01, Math.min(10, Number(settings.bin_size || settings.binSize) || 0.25));
+            const blockMinutes = [15, 30, 60, 240].includes(Number(settings.block_minutes || settings.blockMinutes))
+                ? Number(settings.block_minutes || settings.blockMinutes)
+                : 30;
+            const valueAreaPct = Math.max(50, Math.min(95, Number(settings.value_area_pct || settings.valueAreaPct) || 70));
+            const showSinglePrints = settings.show_single_prints === true || settings.showSinglePrints === true;
+            const rowsByPrice = new Map();
+            const periodKeysByPrice = new Map();
+            const sessionKeys = [];
+            const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+            const selected = selectProfileCandles(candles, fromLogical, toLogical, fromTime, toTime);
+            selected.forEach(c => {
+                const low = Number(c && c.low), high = Number(c && c.high);
+                const time = Number(c && c.time);
+                if (![low, high, time].every(Number.isFinite)) return;
+                const parts = getEasternCandleParts(time);
+                if (!sessionKeys.includes(parts.sessionKey)) sessionKeys.push(parts.sessionKey);
+                const blockIndex = Math.max(0, Math.floor((parts.minuteOfDay - 570) / blockMinutes));
+                const letter = letters[Math.max(0, Math.min(letters.length - 1, blockIndex))];
+                const periodKey = `${parts.sessionKey}:${blockIndex}`;
+                const lo = Math.min(low, high), hi = Math.max(low, high);
+                for (let i = Math.floor(lo / binSize); i <= Math.ceil(hi / binSize); i += 1) {
+                    const price = Number((i * binSize).toFixed(4));
+                    const bucket = rowsByPrice.get(price) || new Map();
+                    const letterSet = bucket.get(parts.sessionKey) || new Set();
+                    letterSet.add(letter);
+                    bucket.set(parts.sessionKey, letterSet);
+                    rowsByPrice.set(price, bucket);
+                    const periodSet = periodKeysByPrice.get(price) || new Set();
+                    periodSet.add(periodKey);
+                    periodKeysByPrice.set(price, periodSet);
+                }
+            });
+            const latestSession = sessionKeys[sessionKeys.length - 1] || '';
+            const rows = Array.from(rowsByPrice.entries()).sort((a, b) => a[0] - b[0]).map(([price, sessionMap]) => {
+                const latestLetters = sessionMap.get(latestSession) || new Set();
+                const count = (periodKeysByPrice.get(price) || new Set()).size;
+                return {
+                    price,
+                    letters: Array.from(latestLetters).sort((a, b) => letters.indexOf(a) - letters.indexOf(b)).join(''),
+                    count,
+                    session_count: sessionMap.size,
+                    sessions: Array.from(sessionMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, vals]) => ({
+                        date,
+                        letters: Array.from(vals).sort((a, b) => letters.indexOf(a) - letters.indexOf(b)).join(''),
+                        count: vals.size,
+                    })),
+                };
+            });
+            const va = computeProfileValueArea(rows, 'count', valueAreaPct);
+            rows.forEach(row => {
+                row.in_value_area = va.prices.has(Number(row.price));
+                row.is_single_print = row.count === 1;
+            });
+            const singlePrints = showSinglePrints
+                ? rows.filter(row => row.is_single_print).map(row => ({ price: row.price, price_top: Number((Number(row.price) + binSize).toFixed(4)) }))
+                : [];
+            return {
+                enabled: true,
+                rows,
+                max_count: rows.reduce((max, row) => Math.max(max, Number(row.count) || 0), 0),
+                poc: va.poc,
+                value_area_low: va.val,
+                value_area_high: va.vah,
+                value_area_pct: valueAreaPct,
+                bin_size: binSize,
+                block_minutes: blockMinutes,
+                single_prints: singlePrints,
+                summary: {
+                    total_tpo: rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0),
+                    period_count: new Set(Array.from(periodKeysByPrice.values()).flatMap(set => Array.from(set))).size,
+                    single_print_count: rows.filter(row => row.count === 1).length,
+                    session_count: sessionKeys.length,
+                    price_low: rows.length ? rows[0].price : null,
+                    price_high: rows.length ? rows[rows.length - 1].price : null,
+                },
+            };
+        }
+
+        function computeInitialBalanceFromCandles(candles, minutes = 60) {
+            const selected = (candles || []).filter(c => c && Number.isFinite(Number(c.time)));
+            if (!selected.length) return null;
+            const start = Number(selected[0].time);
+            const cutoff = start + (Math.max(15, Math.min(240, Number(minutes) || 60)) * 60);
+            let high = null, low = null;
+            selected.forEach(c => {
+                const t = Number(c.time);
+                if (!Number.isFinite(t) || t < start || t >= cutoff) return;
+                const h = Number(c.high), l = Number(c.low);
+                if (!Number.isFinite(h) || !Number.isFinite(l)) return;
+                high = high == null ? h : Math.max(high, h);
+                low = low == null ? l : Math.min(low, l);
+            });
+            if (!Number.isFinite(high) || !Number.isFinite(low)) return null;
+            return { high, low, mid: (high + low) / 2 };
+        }
+
+        function getVisibleRangeProfilePayload() {
+            if (!tvPriceChart || !tvPriceChart.timeScale) return null;
+            let range = null;
+            try { range = tvPriceChart.timeScale().getVisibleLogicalRange(); } catch (e) {}
+            if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return null;
+            return buildModeledProfileFromCandles(tvLastCandles, getVolumeProfileSettingsFromDom(), range.from, range.to);
+        }
+
+        function appendProfileRows(group, rows, options) {
+            const width = options.width, height = options.height;
+            const maxValue = Math.max(1, Number(options.maxValue) || 1);
+            const maxBarWidth = options.maxBarWidth || 120;
+            const rightPad = options.rightPad || 64;
+            const side = options.side === 'left' ? 'left' : 'right';
+            const xRight = Number.isFinite(Number(options.xRight)) ? Number(options.xRight) : width - rightPad;
+            const xLeft = Number.isFinite(Number(options.xLeft)) ? Number(options.xLeft) : Math.max(0, width - rightPad - maxBarWidth);
+            const fill = options.fill || 'var(--info)';
+            const valueAreaFill = options.valueAreaFill || fill;
+            const outsideFill = options.outsideFill || 'var(--fg-2)';
+            const pocFill = options.pocFill || 'var(--rvol-hot)';
+            const opacity = options.opacity == null ? 0.24 : options.opacity;
+            const hoverKind = options.hoverKind || '';
+            const hoverLabel = options.hoverLabel || hoverKind;
+            const pocPrice = Number(options.poc);
+            rows.forEach(row => {
+                const price = Number(row.price);
+                const value = Number(row.volume != null ? row.volume : row.count);
+                if (!Number.isFinite(price) || !Number.isFinite(value) || value <= 0) return;
+                const isPoc = Number.isFinite(pocPrice) && Math.abs(price - pocPrice) <= (options.binSize || 0.10) * 0.5;
+                const y = tvCandleSeries.priceToCoordinate(price);
+                const y2 = tvCandleSeries.priceToCoordinate(price + (options.binSize || 0.10));
+                if (y == null || Number.isNaN(y)) return;
+                const h = Math.max(2, Math.min(18, Math.abs((y2 == null || Number.isNaN(y2)) ? 8 : y2 - y)));
+                const w = Math.max(2, (value / maxValue) * maxBarWidth);
+                const x = side === 'left' ? xLeft : xRight - w;
+                const yTop = Math.max(0, y - h / 2);
+                const rowFill = isPoc ? pocFill : (row.in_value_area ? valueAreaFill : outsideFill);
+                const rowOpacity = isPoc ? Math.min(0.92, opacity + 0.42)
+                    : row.in_value_area ? Math.min(0.78, opacity + 0.16)
+                    : Math.max(0.18, Math.min(0.42, opacity));
+                group.appendChild(createSvgEl('rect', {
+                    x,
+                    y: yTop,
+                    width: w,
+                    height: h,
+                    fill: rowFill,
+                    opacity: rowOpacity,
+                    rx: 1,
+                }));
+                if (hoverKind) {
+                    tvProfileHoverRows.push({
+                        kind: hoverKind,
+                        label: hoverLabel,
+                        row,
+                        x1: Math.min(x, x + w),
+                        x2: Math.max(x, x + w),
+                        y1: yTop,
+                        y2: yTop + h,
+                        maxValue,
+                        total: options.total || 0,
+                        binSize: options.binSize || 0,
+                        valueAreaPct: options.valueAreaPct,
+                    });
+                }
+            });
+        }
+
+        function getTpoLetterDisplayMetrics(rows, options = {}) {
+            const width = Number(options.width) || 0;
+            const binSize = Number(options.binSize) || 0.25;
+            const compactLabels = options.compactLabels !== false;
+            const side = options.side === 'left' ? 'left' : 'right';
+            const xStart = Number.isFinite(Number(options.xStart)) ? Number(options.xStart) : Math.max(0, width - 226);
+            const xEnd = Number.isFinite(Number(options.xEnd)) ? Number(options.xEnd) : Math.max(xStart + 24, width - 78);
+            const charStep = 6.4;
+            const maxChars = Math.max(1, Math.floor((xEnd - xStart) / charStep));
+            let maxDisplayChars = 0;
+            let maxDisplayWidth = 0;
+            (Array.isArray(rows) ? rows : []).forEach(row => {
+                if (!row) return;
+                const price = Number(row.price);
+                const count = Number(row.count) || 0;
+                if (!Number.isFinite(price) || count <= 0) return;
+                const y = tvCandleSeries.priceToCoordinate(price);
+                if (!Number.isFinite(y)) return;
+                const yBin = tvCandleSeries.priceToCoordinate(price + binSize);
+                const rowH = Math.max(3, Math.min(18, Math.abs(Number.isFinite(yBin) ? yBin - y : 8)));
+                const lettersOriginal = String(row.letters || '');
+                const lettersForSide = side === 'left' ? lettersOriginal : lettersOriginal.split('').reverse().join('');
+                const useCount = (compactLabels && rowH < 8) || !lettersForSide;
+                let display = useCount ? `(${count})` : lettersForSide;
+                if (!useCount && display.length > maxChars) {
+                    display = display.slice(0, Math.max(1, maxChars - 1)) + '+';
+                }
+                maxDisplayChars = Math.max(maxDisplayChars, display.length);
+                maxDisplayWidth = Math.max(maxDisplayWidth, display.length * charStep);
+            });
+            return {
+                charStep,
+                maxChars,
+                maxDisplayChars,
+                maxDisplayWidth,
+                textLeftX: side === 'left' ? xStart : (xEnd - maxDisplayWidth),
+                textRightX: side === 'left' ? (xStart + maxDisplayWidth) : xEnd,
+                side,
+                xStart,
+                xEnd,
+            };
+        }
+
+        function appendTpoLetterRows(group, rows, options = {}) {
+            const width = Number(options.width) || 0;
+            const maxValue = Math.max(1, Number(options.maxValue) || 1);
+            const binSize = Number(options.binSize) || 0.25;
+            const compactLabels = options.compactLabels !== false;
+            const side = options.side === 'left' ? 'left' : 'right';
+            const xStart = Number.isFinite(Number(options.xStart)) ? Number(options.xStart) : Math.max(0, width - 226);
+            const xEnd = Number.isFinite(Number(options.xEnd)) ? Number(options.xEnd) : Math.max(xStart + 24, width - 78);
+            const metrics = getTpoLetterDisplayMetrics(rows, { ...options, side, width, binSize, compactLabels, xStart, xEnd });
+            const charStep = metrics.charStep;
+            const maxChars = metrics.maxChars;
+            const fill = options.fill || 'var(--accent)';
+            const outsideFill = options.outsideFill || 'var(--fg-2)';
+            const pocFill = options.pocFill || 'var(--rvol-hot)';
+            const opacity = Number(options.opacity) || 0.24;
+            const pocPrice = Number(options.poc);
+            const hoverKind = options.hoverKind || '';
+            const hoverLabel = options.hoverLabel || hoverKind;
+            rows.forEach(row => {
+                if (!row) return;
+                const price = Number(row.price);
+                const count = Number(row.count) || 0;
+                if (!Number.isFinite(price) || count <= 0) return;
+                const y = tvCandleSeries.priceToCoordinate(price);
+                if (!Number.isFinite(y)) return;
+                const yBin = tvCandleSeries.priceToCoordinate(price + binSize);
+                const rowH = Math.max(3, Math.min(18, Math.abs(Number.isFinite(yBin) ? yBin - y : 8)));
+                const isPoc = Number.isFinite(pocPrice) && Math.abs(price - pocPrice) <= binSize * 0.5;
+                const rowFill = isPoc ? pocFill : (row.in_value_area ? fill : outsideFill);
+                const rowOpacity = isPoc ? 0.98 : row.in_value_area ? Math.min(0.94, opacity + 0.42) : 0.52;
+                const lettersOriginal = String(row.letters || '');
+                const lettersForSide = side === 'left' ? lettersOriginal : lettersOriginal.split('').reverse().join('');
+                const useCount = (compactLabels && rowH < 8) || !lettersForSide;
+                let display = useCount ? `(${count})` : lettersForSide;
+                if (!useCount && display.length > maxChars) {
+                    display = display.slice(0, Math.max(1, maxChars - 1)) + '+';
+                }
+                const anchorX = side === 'left' ? xStart : xEnd;
+                const text = createSvgEl('text', {
+                    class: 'tv-profile-tpo-letter',
+                    x: anchorX,
+                    y,
+                    'text-anchor': side === 'left' ? 'start' : 'end',
+                    fill: rowFill,
+                    opacity: rowOpacity,
+                });
+                text.textContent = display;
+                group.appendChild(text);
+                if (hoverKind) {
+                    const hitWidth = Math.max(18, Math.min(xEnd - xStart, display.length * charStep));
+                    const hitX1 = side === 'left' ? anchorX - 4 : anchorX - hitWidth - 4;
+                    const hitX2 = side === 'left' ? anchorX + hitWidth + 4 : anchorX + 4;
+                    tvProfileHoverRows.push({
+                        kind: hoverKind,
+                        label: hoverLabel,
+                        row,
+                        x1: hitX1,
+                        x2: hitX2,
+                        y1: Math.max(0, y - rowH / 2),
+                        y2: y + rowH / 2,
+                        maxValue,
+                        total: options.total || 0,
+                        binSize,
+                        valueAreaPct: options.valueAreaPct,
+                    });
+                }
+            });
+        }
+
+        function appendProfileLevelLine(group, price, label, options = {}) {
+            const y = tvCandleSeries.priceToCoordinate(Number(price));
+            if (!Number.isFinite(y)) return;
+            group.appendChild(createSvgEl('line', {
+                class: options.className || 'tv-profile-va',
+                x1: options.x1 || 0,
+                y1: y,
+                x2: options.x2 || 0,
+                y2: y,
+                style: options.style || null,
+            }));
+            if (label) {
+                const text = createSvgEl('text', {
+                    class: 'tv-profile-label',
+                    x: options.labelX != null ? options.labelX : (options.x2 || 0) + 4,
+                    y,
+                    'text-anchor': options.labelAnchor || 'start',
+                    style: options.labelStyle || null,
+                });
+                text.textContent = label;
+                group.appendChild(text);
+            }
+        }
+
+        function ensureTVProfileTooltip() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let tooltip = container.querySelector('.tv-profile-tooltip');
+            if (!tooltip) {
+                tooltip = document.createElement('div');
+                tooltip.className = 'tv-profile-tooltip';
+                container.appendChild(tooltip);
+            }
+            return tooltip;
+        }
+
+        function updateTpoProfileSummary(tpo, settings) {
+            const overlay = ensureTVProfileOverlay();
+            const summaryEl = overlay ? overlay.querySelector('.tv-profile-summary') : null;
+            if (!summaryEl) return;
+            if (!settings || !settings.enabled || settings.show_summary === false || !tpo || !tpo.enabled || !Array.isArray(tpo.rows) || !tpo.rows.length) {
+                summaryEl.style.display = 'none';
+                summaryEl.innerHTML = '';
+                return;
+            }
+            const summary = tpo.summary || {};
+            const totalTpo = Number(summary.total_tpo != null ? summary.total_tpo : tpo.rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0));
+            const periods = Number(summary.period_count);
+            const singles = Number(summary.single_print_count);
+            const sessions = Number(summary.session_count);
+            const priceLow = Number(summary.price_low);
+            const priceHigh = Number(summary.price_high);
+            const modeLabelMap = {
+                session: 'Current session',
+                days: 'Composite days',
+                custom: 'Custom range',
+                bars_back: 'Bars back',
+                anchor: 'Anchor',
+            };
+            const modeLabel = modeLabelMap[tpo.mode || settings.mode] || 'TPO';
+            const rangeText = Number.isFinite(priceLow) && Number.isFinite(priceHigh) ? `${priceLow.toFixed(2)}-${priceHigh.toFixed(2)}` : '--';
+            summaryEl.innerHTML =
+                `<div class="tv-profile-summary-title">${modeLabel} TPO</div>` +
+                '<div class="tv-profile-summary-grid">' +
+                    `<span>Total</span><span>${Number.isFinite(totalTpo) ? totalTpo.toFixed(0) : '--'}</span>` +
+                    `<span>Periods</span><span>${Number.isFinite(periods) ? periods.toFixed(0) : '--'}</span>` +
+                    `<span>Singles</span><span>${Number.isFinite(singles) ? singles.toFixed(0) : '--'}</span>` +
+                    `<span>Sessions</span><span>${Number.isFinite(sessions) ? sessions.toFixed(0) : '--'}</span>` +
+                    `<span>Range</span><span>${rangeText}</span>` +
+                '</div>';
+            summaryEl.style.display = 'block';
+        }
+
+        function formatProfileTooltip(rowInfo) {
+            if (!rowInfo || !rowInfo.row) return '';
+            const row = rowInfo.row;
+            const price = Number(row.price);
+            const value = Number(row.volume != null ? row.volume : row.count || 0);
+            const pctMax = rowInfo.maxValue ? (value / rowInfo.maxValue * 100) : 0;
+            const pctTotal = rowInfo.total ? (value / rowInfo.total * 100) : 0;
+            const lines = [
+                `<div class="tt-row"><strong>${rowInfo.label}</strong><span>${Number.isFinite(price) ? price.toFixed(2) : '--'}</span></div>`,
+            ];
+            if (row.volume != null) {
+                lines.push(`<div class="tt-row muted"><span>Modeled vol</span><span>${fmtVolumeCompact(value)}</span></div>`);
+                lines.push(`<div class="tt-row muted"><span>Share</span><span>${pctTotal.toFixed(1)}% total / ${pctMax.toFixed(0)}% max</span></div>`);
+            } else {
+                lines.push(`<div class="tt-row muted"><span>TPO count</span><span>${value.toFixed(0)} / ${pctMax.toFixed(0)}% max</span></div>`);
+                if (row.letters) lines.push(`<div class="tt-row muted"><span>Letters</span><span>${String(row.letters).slice(0, 24)}</span></div>`);
+                if (Array.isArray(row.sessions) && row.sessions.length) {
+                    const sessionText = row.sessions.slice(-3).map(s => `${s.date}:${s.letters}`).join(' ');
+                    lines.push(`<div class="tt-row muted"><span>Sessions</span><span>${sessionText}</span></div>`);
+                }
+                if (row.is_single_print) {
+                    lines.push('<div class="tt-row muted"><span>Single Print</span><span style="color:var(--tpo-single)">Yes</span></div>');
+                }
+            }
+            const vaPct = Number(rowInfo.valueAreaPct);
+            const vaPctText = Number.isFinite(vaPct) ? `${vaPct.toFixed(0)}%` : '70%';
+            if (row.in_value_area) lines.push(`<div class="tt-row muted"><span>Value area</span><span>Inside ${vaPctText}</span></div>`);
+            return lines.join('');
+        }
+
+        function updateTVProfileTooltip(event) {
+            const tooltip = ensureTVProfileTooltip();
+            const container = document.getElementById('price-chart');
+            if (!tooltip || !container || tvDrawMode) return false;
+            const rect = container.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            const best = findTVProfileHoverRow(x, y);
+            if (!best) {
+                tooltip.style.display = 'none';
+                return false;
+            }
+            tooltip.innerHTML = formatProfileTooltip(best);
+            tooltip.style.display = 'block';
+            const left = Math.min(rect.width - tooltip.offsetWidth - 8, Math.max(8, x + 14));
+            const top = Math.min(rect.height - tooltip.offsetHeight - 8, Math.max(8, y + 14));
+            tooltip.style.left = `${left}px`;
+            tooltip.style.top = `${top}px`;
+            return true;
+        }
+
+        function findTVProfileHoverRow(x, y) {
+            let best = null;
+            let bestDist = Infinity;
+            tvProfileHoverRows.forEach(item => {
+                const xPad = 8;
+                const yPad = 5;
+                if (x < item.x1 - xPad || x > item.x2 + xPad || y < item.y1 - yPad || y > item.y2 + yPad) return;
+                const dist = Math.abs(y - ((item.y1 + item.y2) / 2));
+                if (dist < bestDist) { best = item; bestDist = dist; }
+            });
+            return best;
+        }
+
+        function openProfileSettingsFromChart(kind = 'vp') {
+            if (typeof openDrawer === 'function') openDrawer();
+            const targetId = kind === 'tpo' ? 'tpo_enabled' : 'vp_enabled';
+            const target = document.getElementById(targetId);
+            const section = target ? target.closest('.drawer-section') : null;
+            if (section) section.open = true;
+            setTimeout(() => {
+                const scrollTarget = target || document.getElementById('vp_enabled');
+                if (scrollTarget && typeof scrollTarget.scrollIntoView === 'function') {
+                    scrollTarget.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    try { scrollTarget.focus({ preventScroll: true }); } catch (e) {}
+                }
+            }, 40);
+        }
+
+        function handleTVProfileClick(event) {
+            if (tvDrawMode) return false;
+            const container = document.getElementById('price-chart');
+            if (!container) return false;
+            const rect = container.getBoundingClientRect();
+            const hit = findTVProfileHoverRow(event.clientX - rect.left, event.clientY - rect.top);
+            if (!hit) return false;
+            event.preventDefault();
+            event.stopPropagation();
+            openProfileSettingsFromChart((hit.kind === 'tpo' || hit.kind === 'fixed_tpo' || hit.kind === 'anchored_tpo') ? 'tpo' : 'vp');
+            return true;
+        }
+
+        function drawTVProfileOverlay() {
+            tvProfileOverlayPending = false;
+            const overlay = ensureTVProfileOverlay();
+            if (!overlay) return;
+            const svg = overlay.querySelector('svg');
+            const width = overlay.clientWidth || 0;
+            const height = overlay.clientHeight || 0;
+            if (!svg || !width || !height || !tvCandleSeries) return;
+            svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+            svg.replaceChildren();
+            tvProfileHoverRows = [];
+            const vpSettings = getVolumeProfileSettingsFromDom();
+            let vp = tvVolumeProfilePayload;
+            if (vpSettings.enabled && vpSettings.mode === 'visible') {
+                vp = getVisibleRangeProfilePayload();
+            }
+            if (vpSettings.enabled && vp && Array.isArray(vp.bins) && vp.bins.length) {
+                const group = createSvgEl('g', {});
+                appendProfileRows(group, vp.bins, {
+                    width,
+                    height,
+                    maxValue: vp.max_volume,
+                    maxBarWidth: Math.min(150, Math.max(70, width * 0.14)),
+                    rightPad: 72,
+                    fill: vpSettings.color || 'var(--info)',
+                    opacity: 0.24,
+                    binSize: vp.bin_size || vpSettings.bin_size,
+                    poc: vp.poc,
+                    valueAreaFill: vpSettings.color || 'var(--info)',
+                    outsideFill: 'var(--fg-2)',
+                    pocFill: 'var(--rvol-hot)',
+                    total: vp.total_volume || 0,
+                    hoverKind: 'vp',
+                    hoverLabel: 'Volume Profile',
+                });
+                const vpVaStyle = buildLevelLineStyle(vpSettings.color, vpSettings.level_line_style, vpSettings.level_line_width);
+                const vpPocStyle = buildLevelLineStyle('var(--rvol-hot)', vpSettings.level_line_style, vpSettings.level_line_width);
+                appendProfileLevelLine(group, vp.value_area_high, 'VAH', {
+                    x1: Math.max(0, width - 230),
+                    x2: width - 84,
+                    style: vpVaStyle,
+                });
+                appendProfileLevelLine(group, vp.value_area_low, 'VAL', {
+                    x1: Math.max(0, width - 230),
+                    x2: width - 84,
+                    style: vpVaStyle,
+                });
+                if (Number.isFinite(Number(vp.poc))) {
+                    const y = tvCandleSeries.priceToCoordinate(Number(vp.poc));
+                    if (Number.isFinite(y)) {
+                        group.appendChild(createSvgEl('line', {
+                            class: 'tv-profile-poc',
+                            x1: Math.max(0, width - 230),
+                            y1: y,
+                            x2: width - 58,
+                            y2: y,
+                            style: vpPocStyle,
+                        }));
+                        const label = createSvgEl('text', { class: 'tv-profile-label', x: width - 56, y });
+                        label.textContent = 'VP POC';
+                        group.appendChild(label);
+                    }
+                }
+                svg.appendChild(group);
+            }
+            const tpoSettings = getTpoProfileSettingsFromDom();
+            const tpo = tvTpoProfilePayload;
+            updateTpoProfileSummary(tpo, tpoSettings);
+            if (tpoSettings.enabled && tpo && Array.isArray(tpo.rows) && tpo.rows.length) {
+                const group = createSvgEl('g', {});
+                const totalTpo = tpo.rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
+                const tpoTextX = Math.max(12, width - 282);
+                const tpoTextRight = Math.max(tpoTextX + 60, width - 132);
+                const tpoLabelX = Math.min(width - 56, tpoTextRight + 8);
+                const tpoBin = tpo.bin_size || tpoSettings.bin_size || 0.25;
+                const tpoLetterMetrics = getTpoLetterDisplayMetrics(tpo.rows, {
+                    width,
+                    xStart: tpoTextX,
+                    xEnd: tpoTextRight,
+                    binSize: tpoBin,
+                    compactLabels: tpoSettings.compact_labels !== false,
+                });
+                const tpoLevelStopX = Math.max(0, Math.min(tpoLabelX - 8, tpoLetterMetrics.textLeftX - 6));
+                const tpoLevelX1 = Math.max(0, tpoTextX - 150);
+                const tpoLevelX2 = Math.max(tpoLevelX1, tpoLevelStopX);
+                const showTpoLevelLabels = !!tpoSettings.show_level_labels;
+                const tpoVaStyle = buildLevelLineStyle(tpoSettings.color, tpoSettings.level_line_style, tpoSettings.level_line_width);
+                const tpoPocStyle = buildLevelLineStyle('var(--rvol-hot)', tpoSettings.level_line_style, tpoSettings.level_line_width);
+                appendProfileLevelLine(group, tpo.value_area_high, showTpoLevelLabels ? 'TPO VAH' : '', {
+                    x1: tpoLevelX1,
+                    x2: tpoLevelX2,
+                    labelX: tpoLabelX,
+                    labelAnchor: 'start',
+                    style: tpoVaStyle,
+                });
+                appendProfileLevelLine(group, tpo.value_area_low, showTpoLevelLabels ? 'TPO VAL' : '', {
+                    x1: tpoLevelX1,
+                    x2: tpoLevelX2,
+                    labelX: tpoLabelX,
+                    labelAnchor: 'start',
+                    style: tpoVaStyle,
+                });
+                if (Number.isFinite(Number(tpo.poc))) {
+                    appendProfileLevelLine(group, tpo.poc, showTpoLevelLabels ? 'TPO POC' : '', {
+                        className: 'tv-profile-poc',
+                        x1: tpoLevelX1,
+                        x2: tpoLevelX2,
+                        labelX: tpoLabelX,
+                        labelAnchor: 'start',
+                        style: tpoPocStyle,
+                    });
+                }
+                if (tpoSettings.show_single_prints && Array.isArray(tpo.single_prints) && tpo.single_prints.length) {
+                    tpo.single_prints.forEach(sp => {
+                        const yLow = tvCandleSeries.priceToCoordinate(Number(sp.price));
+                        const yHigh = tvCandleSeries.priceToCoordinate(Number(sp.price_top));
+                        if (!Number.isFinite(yLow) || !Number.isFinite(yHigh)) return;
+                        if (tpoSettings.single_print_boxes) {
+                            group.appendChild(createSvgEl('rect', {
+                                x: tpoLevelX1,
+                                y: Math.min(yLow, yHigh),
+                                width: Math.max(8, tpoTextRight - tpoLevelX1),
+                                height: Math.max(2, Math.abs(yHigh - yLow)),
+                                fill: 'var(--tpo-single)',
+                                opacity: 0.14,
+                                rx: 2,
+                            }));
+                        }
+                        [yLow, yHigh].forEach(yPos => {
+                            group.appendChild(createSvgEl('line', {
+                                x1: tpoLevelX1,
+                                y1: yPos,
+                                x2: tpoLevelX2,
+                                y2: yPos,
+                                style: 'stroke:var(--tpo-single);stroke-width:1.5;stroke-dasharray:4,3;',
+                            }));
+                        });
+                        const spLabel = createSvgEl('text', {
+                            class: 'tv-profile-label',
+                            x: tpoLabelX,
+                            y: (yLow + yHigh) / 2,
+                            'text-anchor': 'start',
+                            style: 'fill:var(--tpo-single);',
+                        });
+                        spLabel.textContent = 'SP';
+                        group.appendChild(spLabel);
+                    });
+                }
+                appendTpoLetterRows(group, tpo.rows, {
+                    width,
+                    maxValue: tpo.max_count,
+                    xStart: tpoTextX,
+                    xEnd: tpoTextRight,
+                    fill: tpoSettings.color || 'var(--accent)',
+                    outsideFill: 'var(--fg-2)',
+                    pocFill: 'var(--rvol-hot)',
+                    opacity: tpoSettings.opacity,
+                    binSize: tpoBin,
+                    poc: tpo.poc,
+                    total: totalTpo,
+                    hoverKind: 'tpo',
+                    hoverLabel: 'TPO Profile',
+                    valueAreaPct: tpo.value_area_pct,
+                    compactLabels: tpoSettings.compact_labels !== false,
+                });
+                if (tpo.initial_balance && tpoSettings.show_initial_balance) {
+                    const ib = tpo.initial_balance;
+                    appendProfileLevelLine(group, ib.high, showTpoLevelLabels ? 'IBH' : '', {
+                        x1: tpoLevelX1, x2: tpoLevelX2, labelX: tpoLabelX, labelAnchor: 'start',
+                        style: 'stroke:var(--call);stroke-width:1.25;',
+                    });
+                    appendProfileLevelLine(group, ib.low, showTpoLevelLabels ? 'IBL' : '', {
+                        x1: tpoLevelX1, x2: tpoLevelX2, labelX: tpoLabelX, labelAnchor: 'start',
+                        style: 'stroke:var(--put);stroke-width:1.25;',
+                    });
+                    appendProfileLevelLine(group, ib.mid, showTpoLevelLabels ? 'IBM' : '', {
+                        x1: tpoLevelX1, x2: tpoLevelX2, labelX: tpoLabelX, labelAnchor: 'start',
+                        style: 'stroke:var(--warn);stroke-width:1;stroke-dasharray:3,3;',
+                    });
+                }
+                svg.appendChild(group);
+            }
+            tvDrawingDefs.forEach(def => {
+                if (!def || def.hidden || !isTVProfileDrawingType(def.type)) return;
+                const screen = tvDrawingToScreen(def, width);
+                if (!screen || !screen.profile) return;
+                const isTpoDrawing = def.type === 'fixed_tpo' || def.type === 'anchored_tpo';
+                if (isTpoDrawing) {
+                    if (!Array.isArray(screen.profile.rows) || !screen.profile.rows.length) return;
+                } else if (!Array.isArray(screen.profile.bins) || !screen.profile.bins.length) {
+                    return;
+                }
+                const group = createSvgEl('g', {});
+                const boxX = Math.min(screen.x1, screen.x2);
+                const boxRight = Math.max(screen.x1, screen.x2);
+                const profileSide = def.profileSide || (isTpoDrawing ? (tpoSettings.fixed_tpo_side || 'right') : (vpSettings.fixed_vp_side || 'right'));
+                const profileMaxWidth = Math.max(36, Math.min(130, Math.abs(screen.x2 - screen.x1) * 0.72));
+                let tpoLineX1 = boxX;
+                let tpoLineX2 = boxRight;
+                let tpoLabelXForLines = null;
+                let tpoLabelAnchor = 'start';
+                if (isTpoDrawing) {
+                    const tpoXStart = profileSide === 'left' ? boxX + 6 : Math.max(boxX + 6, boxRight - profileMaxWidth);
+                    const tpoXEnd = profileSide === 'left' ? Math.min(boxRight - 6, tpoXStart + profileMaxWidth) : boxRight - 6;
+                    const drawingTpoBin = screen.profile.bin_size || def.binSize;
+                    const drawingMetrics = getTpoLetterDisplayMetrics(screen.profile.rows, {
+                        width,
+                        xStart: tpoXStart,
+                        xEnd: Math.max(tpoXStart + 24, tpoXEnd),
+                        binSize: drawingTpoBin,
+                        side: profileSide,
+                        compactLabels: true,
+                    });
+                    if (profileSide === 'left') {
+                        tpoLineX1 = Math.min(boxRight - 4, drawingMetrics.textRightX + 6);
+                        tpoLineX2 = boxRight;
+                        tpoLabelXForLines = Math.max(boxX + 4, drawingMetrics.textRightX + 6);
+                        tpoLabelAnchor = 'start';
+                    } else {
+                        tpoLineX1 = boxX;
+                        tpoLineX2 = Math.max(boxX + 4, drawingMetrics.textLeftX - 6);
+                        tpoLabelXForLines = Math.min(boxRight - 4, drawingMetrics.textLeftX - 6);
+                        tpoLabelAnchor = 'end';
+                    }
+                    appendTpoLetterRows(group, screen.profile.rows, {
+                        width,
+                        maxValue: screen.profile.max_count,
+                        xStart: tpoXStart,
+                        xEnd: Math.max(tpoXStart + 24, tpoXEnd),
+                        side: profileSide,
+                        fill: def.color || 'var(--accent)',
+                        outsideFill: 'var(--fg-2)',
+                        pocFill: 'var(--rvol-hot)',
+                        opacity: 0.62,
+                        binSize: drawingTpoBin,
+                        poc: screen.profile.poc,
+                        total: screen.profile.summary && screen.profile.summary.total_tpo,
+                        hoverKind: def.type,
+                        hoverLabel: def.label || (def.type === 'anchored_tpo' ? 'Anchored TPO' : 'TPO Range'),
+                        valueAreaPct: screen.profile.value_area_pct,
+                        compactLabels: true,
+                    });
+                    if (def.showSinglePrints && Array.isArray(screen.profile.single_prints)) {
+                        screen.profile.single_prints.forEach(sp => {
+                            const yLow = tvCandleSeries.priceToCoordinate(Number(sp.price));
+                            const yHigh = tvCandleSeries.priceToCoordinate(Number(sp.price_top));
+                            if (!Number.isFinite(yLow) || !Number.isFinite(yHigh)) return;
+                            group.appendChild(createSvgEl('rect', {
+                                x: boxX,
+                                y: Math.min(yLow, yHigh),
+                                width: Math.max(8, boxRight - boxX),
+                                height: Math.max(2, Math.abs(yHigh - yLow)),
+                                fill: 'var(--tpo-single)',
+                                opacity: 0.10,
+                                rx: 2,
+                            }));
+                        });
+                    }
+                    if (screen.ib) {
+                        const ibShowLabels = !!tpoSettings.show_level_labels;
+                        const ibLabelOpts = tpoLabelXForLines != null
+                            ? { labelX: tpoLabelXForLines, labelAnchor: tpoLabelAnchor }
+                            : {};
+                        appendProfileLevelLine(group, screen.ib.high, ibShowLabels ? 'IBH' : '', { x1: tpoLineX1, x2: tpoLineX2, style: 'stroke:var(--call)', ...ibLabelOpts });
+                        appendProfileLevelLine(group, screen.ib.low, ibShowLabels ? 'IBL' : '', { x1: tpoLineX1, x2: tpoLineX2, style: 'stroke:var(--put)', ...ibLabelOpts });
+                        appendProfileLevelLine(group, screen.ib.mid, ibShowLabels ? 'IBM' : '', { x1: tpoLineX1, x2: tpoLineX2, style: 'stroke:var(--warn);stroke-dasharray:3,3;', ...ibLabelOpts });
+                    }
+                } else {
+                    appendProfileRows(group, screen.profile.bins, {
+                        width,
+                        height,
+                        maxValue: screen.profile.max_volume,
+                        maxBarWidth: profileMaxWidth,
+                        side: profileSide,
+                        xLeft: boxX,
+                        xRight: boxRight,
+                        fill: def.color || 'var(--warn)',
+                        opacity: 0.28,
+                        binSize: def.binSize || vpSettings.bin_size,
+                        poc: screen.profile.poc,
+                        valueAreaFill: def.color || 'var(--warn)',
+                        outsideFill: 'var(--fg-2)',
+                        pocFill: 'var(--rvol-hot)',
+                        total: screen.profile.total_volume || 0,
+                        hoverKind: 'fixed_vp',
+                        hoverLabel: def.label || 'Fixed VP',
+                    });
+                }
+                const drawingLineStyle = isTpoDrawing ? tpoSettings.level_line_style : vpSettings.level_line_style;
+                const drawingLineWidth = isTpoDrawing ? tpoSettings.level_line_width : vpSettings.level_line_width;
+                const drawingVaStyle = buildLevelLineStyle(def.color, drawingLineStyle, drawingLineWidth);
+                const drawingPocStyle = buildLevelLineStyle('var(--rvol-hot)', drawingLineStyle, drawingLineWidth);
+                const lineX1 = isTpoDrawing ? tpoLineX1 : boxX;
+                const lineX2 = isTpoDrawing ? tpoLineX2 : boxRight;
+                const showDrawingLevelLabels = isTpoDrawing ? !!tpoSettings.show_level_labels : true;
+                const drawingLabelOpts = isTpoDrawing && tpoLabelXForLines != null
+                    ? { labelX: tpoLabelXForLines, labelAnchor: tpoLabelAnchor }
+                    : {};
+                appendProfileLevelLine(group, screen.profile.value_area_high, showDrawingLevelLabels ? (isTpoDrawing ? 'TPO VAH' : 'VAH') : '', {
+                    x1: lineX1,
+                    x2: lineX2,
+                    style: drawingVaStyle,
+                    ...drawingLabelOpts,
+                });
+                appendProfileLevelLine(group, screen.profile.value_area_low, showDrawingLevelLabels ? (isTpoDrawing ? 'TPO VAL' : 'VAL') : '', {
+                    x1: lineX1,
+                    x2: lineX2,
+                    style: drawingVaStyle,
+                    ...drawingLabelOpts,
+                });
+                if (Number.isFinite(Number(screen.profile.poc))) {
+                    appendProfileLevelLine(group, screen.profile.poc, showDrawingLevelLabels ? (isTpoDrawing ? 'TPO POC' : 'POC') : '', {
+                        className: 'tv-profile-poc',
+                        x1: lineX1,
+                        x2: lineX2,
+                        style: drawingPocStyle,
+                        ...drawingLabelOpts,
+                    });
+                }
+                svg.appendChild(group);
+            });
+        }
+
+        function scheduleTVProfileOverlayDraw() {
+            if (tvProfileOverlayPending) return;
+            tvProfileOverlayPending = true;
+            requestAnimationFrame(drawTVProfileOverlay);
         }
 
         function tvResolvePreviewPoint(param) {
@@ -19275,6 +21485,35 @@ def index():
                 }
                 return screen;
             }
+            if (def.type === 'fib') {
+                const x1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                const x2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
+                if ([x1, x2].some(v => v == null || Number.isNaN(v))) return null;
+                const high = Math.max(def.p1, def.p2);
+                const low  = Math.min(def.p1, def.p2);
+                const range = high - low;
+                if (!Number.isFinite(range) || range <= 0) return null;
+                const levels = (Array.isArray(def.levels) && def.levels.length)
+                    ? def.levels
+                    : [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+                const segments = [];
+                levels.forEach(level => {
+                    const price = high - (range * level);
+                    const y = tvCandleSeries.priceToCoordinate(price);
+                    if (y == null || Number.isNaN(y)) return;
+                    segments.push({ level, price, y });
+                });
+                if (!segments.length) return null;
+                return {
+                    type: 'fib',
+                    x1: Math.min(x1, x2),
+                    x2: Math.max(x1, x2),
+                    width,
+                    high,
+                    low,
+                    segments,
+                };
+            }
             if (def.type === 'rect') {
                 const startY = tvCandleSeries.priceToCoordinate(def.startPrice != null ? def.startPrice : def.top);
                 const yTop = def.previewY2 != null && startY != null ? Math.min(startY, def.previewY2) : tvCandleSeries.priceToCoordinate(def.top);
@@ -19296,6 +21535,64 @@ def index():
                     w: Math.max(1, x2 - x1),
                     h: Math.max(1, Math.abs(yBot - yTop)),
                 };
+            }
+            if (def.type === 'fixed_vp') {
+                const rawX1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                const rawX2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
+                if ([rawX1, rawX2].some(v => v == null || Number.isNaN(v))) return null;
+                const x1 = Math.min(rawX1, rawX2);
+                const x2 = Math.max(rawX1, rawX2);
+                const fromLogical = Number.isFinite(Number(def.l1)) ? Number(def.l1) : tvTimeToLogical(def.t1);
+                const toLogical = Number.isFinite(Number(def.l2)) ? Number(def.l2) : tvTimeToLogical(def.t2);
+                const profile = buildModeledProfileFromCandles(
+                    tvLastCandles,
+                    { bin_size: def.binSize || getVolumeProfileSettingsFromDom().bin_size, method: def.method || getVolumeProfileSettingsFromDom().method },
+                    Math.min(fromLogical, toLogical),
+                    Math.max(fromLogical, toLogical),
+                    def.t1,
+                    def.t2
+                );
+                return { type: 'fixed_vp', x1, x2, profile };
+            }
+            if (def.type === 'fixed_tpo' || def.type === 'anchored_tpo') {
+                const rawX1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                let rawX2 = null;
+                let endTime = def.t2;
+                let endLogical = Number.isFinite(Number(def.l2)) ? Number(def.l2) : tvTimeToLogical(def.t2);
+                if (def.type === 'anchored_tpo') {
+                    const last = tvLastCandles && tvLastCandles.length ? tvLastCandles[tvLastCandles.length - 1] : null;
+                    endTime = last && Number.isFinite(Number(last.time)) ? Number(last.time) : def.t1;
+                    endLogical = tvLastCandles && tvLastCandles.length ? tvLastCandles.length - 1 : endLogical;
+                    rawX2 = tvResolveDrawingAnchorX(endTime, endLogical, null);
+                } else {
+                    rawX2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
+                }
+                if ([rawX1, rawX2].some(v => v == null || Number.isNaN(v))) return null;
+                const x1 = Math.min(rawX1, rawX2);
+                const x2 = Math.max(rawX1, rawX2);
+                const fromLogical = Number.isFinite(Number(def.l1)) ? Number(def.l1) : tvTimeToLogical(def.t1);
+                const selected = selectProfileCandles(
+                    tvLastCandles,
+                    Math.min(fromLogical, endLogical),
+                    Math.max(fromLogical, endLogical),
+                    def.t1,
+                    endTime
+                );
+                const profile = buildTpoProfileFromCandles(
+                    tvLastCandles,
+                    {
+                        binSize: def.binSize || getTpoProfileSettingsFromDom().bin_size,
+                        blockMinutes: def.blockMinutes || getTpoProfileSettingsFromDom().block_minutes,
+                        valueAreaPct: def.valueAreaPct || getTpoProfileSettingsFromDom().value_area_pct,
+                        showSinglePrints: def.showSinglePrints,
+                    },
+                    Math.min(fromLogical, endLogical),
+                    Math.max(fromLogical, endLogical),
+                    def.t1,
+                    endTime
+                );
+                const ib = def.showInitialBalance ? computeInitialBalanceFromCandles(selected, def.initialBalanceMinutes) : null;
+                return { type: def.type, x1, x2, profile, ib };
             }
             if (def.type === 'text') {
                 const y = def.previewY != null ? def.previewY : tvCandleSeries.priceToCoordinate(def.price);
@@ -19654,6 +21951,118 @@ def index():
                     bindSelect(hit);
                     group.appendChild(hit);
                 }
+            } else if (screen.type === 'fib') {
+                const x1 = screen.x1;
+                // Always extend the right edge to the chart boundary so the
+                // levels stay readable as new bars print.
+                const x2 = Math.max(screen.x2, screen.width || screen.x2);
+                screen.segments.forEach(seg => {
+                    group.appendChild(createSvgEl('line', {
+                        class: 'tv-drawing-shape',
+                        x1, x2,
+                        y1: seg.y, y2: seg.y,
+                        stroke: def.color,
+                        'stroke-width': strokeWidth,
+                        'stroke-dasharray': dashArray || null,
+                        'stroke-linecap': 'round',
+                        opacity: isPreview ? 0.7 : 0.9,
+                    }));
+                    const labelTxt = (seg.level * 100).toFixed(seg.level === 0 || seg.level === 1 || seg.level === 0.5 ? 1 : 1) + '%  $' + seg.price.toFixed(2);
+                    const text = createSvgEl('text', {
+                        class: 'tv-drawing-text',
+                        x: x1 + 6,
+                        y: seg.y - 3,
+                        fill: def.color,
+                        'font-size': 10,
+                    });
+                    text.textContent = labelTxt;
+                    group.appendChild(text);
+                });
+                // Shade the body between high (level 0) and low (level 1).
+                const topY = screen.segments[0] ? screen.segments[0].y : null;
+                const botY = screen.segments[screen.segments.length - 1] ? screen.segments[screen.segments.length - 1].y : null;
+                if (topY != null && botY != null) {
+                    group.appendChild(createSvgEl('rect', {
+                        class: 'tv-drawing-shape',
+                        x: x1,
+                        y: Math.min(topY, botY),
+                        width: Math.max(1, x2 - x1),
+                        height: Math.max(1, Math.abs(botY - topY)),
+                        fill: def.color,
+                        'fill-opacity': isPreview ? 0.04 : 0.06,
+                        stroke: 'none',
+                    }));
+                }
+                if (interactive) {
+                    screen.segments.forEach(seg => {
+                        const hit = createSvgEl('line', {
+                            class: 'tv-drawing-hitbox',
+                            x1, x2,
+                            y1: seg.y, y2: seg.y,
+                            'stroke-width': Math.max(10, strokeWidth + 6),
+                        });
+                        bindSelect(hit);
+                        group.appendChild(hit);
+                    });
+                }
+            } else if (screen.type === 'fixed_vp' || screen.type === 'fixed_tpo' || screen.type === 'anchored_tpo') {
+                const boxX = Math.min(screen.x1, screen.x2);
+                const boxW = Math.max(1, Math.abs(screen.x2 - screen.x1));
+                const isTpoDrawing = screen.type === 'fixed_tpo' || screen.type === 'anchored_tpo';
+                group.appendChild(createSvgEl('rect', {
+                    class: 'tv-drawing-shape',
+                    x: boxX,
+                    y: 0,
+                    width: boxW,
+                    height,
+                    fill: def.color,
+                    'fill-opacity': isPreview ? 0.04 : 0.06,
+                    stroke: def.color,
+                    'stroke-width': strokeWidth,
+                    'stroke-dasharray': dashArray || '5 5',
+                    opacity: isPreview ? 0.7 : 1,
+                }));
+                appendTVDrawingBadge(group, {
+                    label: labelText || (screen.type === 'anchored_tpo' ? 'Anchored TPO' : (isTpoDrawing ? 'TPO Range' : 'Fixed VP')),
+                    color: def.color,
+                    x: boxX + 8,
+                    y: 18,
+                    anchor: 'left',
+                    boundWidth: width,
+                    boundHeight: height,
+                });
+                if (interactive) {
+                    const hit = createSvgEl('rect', {
+                        class: 'tv-drawing-hitbox',
+                        x: boxX,
+                        y: 0,
+                        width: boxW,
+                        height,
+                    });
+                    bindSelect(hit);
+                    group.appendChild(hit);
+                    if (def.id === tvSelectedDrawingId) {
+                        const handleSpecs = [
+                            { key: 'start', cx: screen.x1 },
+                            ...(screen.type === 'anchored_tpo' ? [] : [{ key: 'end', cx: screen.x2 }]),
+                        ];
+                        handleSpecs.forEach(spec => {
+                            const handle = createSvgEl('circle', {
+                                class: 'tv-drawing-handle tv-drawing-handle--horizontal',
+                                cx: spec.cx,
+                                cy: 18,
+                                r: 5.5,
+                                fill: def.color,
+                                stroke: 'rgba(255,255,255,0.85)',
+                                'stroke-width': 1.5,
+                            });
+                            handle.addEventListener('mousedown', event => {
+                                tvBeginProfileAnchorDrag(event, def, spec.key, handle);
+                            });
+                            group.appendChild(handle);
+                        });
+                    }
+                }
             } else if (screen.type === 'avwap') {
                 // The actual line is rendered via a LightweightCharts line series
                 // (managed in applyTVAvwapDrawings). The overlay only paints the
@@ -19761,7 +22170,7 @@ def index():
             const pendingPoints = Array.isArray(tvDrawStart && tvDrawStart.points)
                 ? tvDrawStart.points
                 : (tvDrawStart ? [tvDrawStart] : []);
-            if (pendingPoints.length && (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel')) {
+            if (pendingPoints.length && (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo')) {
                 pendingPoints.forEach(point => {
                     const x = tvResolveDrawingAnchorX(point.time, point.logical, null);
                     const y = tvCandleSeries.priceToCoordinate(point.price);
@@ -19783,6 +22192,7 @@ def index():
             tvRefreshDrawingLevels();
             applyTVAvwapDrawings();
             scheduleTVDrawingOverlayDraw();
+            scheduleTVProfileOverlayDraw();
         }
 
         function clearTVDrawingPreview() {
@@ -19889,7 +22299,7 @@ def index():
                     text: 'Label',
                     color: drawColor,
                 });
-            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel') && tvDrawStart) {
+            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'fib' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo') && tvDrawStart) {
                 const drawPoints = Array.isArray(tvDrawStart.points) ? tvDrawStart.points : [tvDrawStart];
                 if (tvDrawMode === 'trendline' && drawPoints.length === 1) {
                     const startPoint = drawPoints[0];
@@ -19907,6 +22317,63 @@ def index():
                         color: drawColor,
                         lineWidth: 2,
                         lineStyle: 'dashed',
+                    });
+                } else if (tvDrawMode === 'fixed_vp' && drawPoints.length === 1) {
+                    const startPoint = drawPoints[0];
+                    nextPreview = normalizeTVDrawingDef({
+                        id: '__preview__',
+                        type: 'fixed_vp',
+                        t1: startPoint.time,
+                        l1: startPoint.logical,
+                        t2: point.time || startPoint.time,
+                        l2: point.logical,
+                        previewX2: previewPoint.x,
+                        color: drawColor,
+                        lineWidth: 2,
+                        lineStyle: 'dashed',
+                        binSize: getVolumeProfileSettingsFromDom().bin_size,
+                        method: getVolumeProfileSettingsFromDom().method,
+                        profileSide: getVolumeProfileSettingsFromDom().fixed_vp_side,
+                        label: 'Fixed VP',
+                    });
+                } else if (tvDrawMode === 'fixed_tpo' && drawPoints.length === 1) {
+                    const startPoint = drawPoints[0];
+                    const tpoSettings = getTpoProfileSettingsFromDom();
+                    nextPreview = normalizeTVDrawingDef({
+                        id: '__preview__',
+                        type: 'fixed_tpo',
+                        t1: startPoint.time,
+                        l1: startPoint.logical,
+                        t2: point.time || startPoint.time,
+                        l2: point.logical,
+                        previewX2: previewPoint.x,
+                        color: drawColor,
+                        lineWidth: 2,
+                        lineStyle: 'dashed',
+                        binSize: tpoSettings.bin_size,
+                        blockMinutes: tpoSettings.block_minutes,
+                        valueAreaPct: tpoSettings.value_area_pct,
+                        showSinglePrints: tpoSettings.show_single_prints,
+                        profileSide: tpoSettings.fixed_tpo_side,
+                        label: 'TPO Range',
+                    });
+                } else if (tvDrawMode === 'fib' && drawPoints.length === 1) {
+                    const startPoint = drawPoints[0];
+                    nextPreview = normalizeTVDrawingDef({
+                        id: '__preview__',
+                        type: 'fib',
+                        t1: startPoint.time,
+                        l1: startPoint.logical,
+                        p1: startPoint.price,
+                        t2: point.time || startPoint.time,
+                        l2: point.logical,
+                        p2: previewPoint.price,
+                        previewX2: previewPoint.x,
+                        previewY2: previewPoint.y,
+                        color: drawColor,
+                        lineWidth: 1,
+                        lineStyle: 'dashed',
+                        label: 'Fib',
                     });
                 } else if (tvDrawMode === 'rect' && drawPoints.length === 1) {
                     const startPoint = drawPoints[0];
@@ -20124,6 +22591,9 @@ def index():
             if (def.type === 'trendline') return 'Trend';
             if (def.type === 'channel') return 'Channel';
             if (def.type === 'rect') return 'Box';
+            if (def.type === 'fixed_vp') return 'Fixed VP';
+            if (def.type === 'fixed_tpo') return 'TPO Range';
+            if (def.type === 'anchored_tpo') return 'Anchored TPO';
             if (def.type === 'avwap') return 'AVWAP';
             if (def.type === 'text') return 'Label';
             return 'Drawing';
@@ -20158,6 +22628,12 @@ def index():
             if (def && def.type === 'rect') {
                 const priceText = fmtRange(def.bot, def.top);
                 if (priceText) return `${prefix} ${priceText}`;
+            }
+            if (def && def.type === 'fixed_vp') {
+                return `${prefix}: ${Number(def.binSize || 0.10).toFixed(2)} bin`;
+            }
+            if (def && (def.type === 'fixed_tpo' || def.type === 'anchored_tpo')) {
+                return `${prefix}: ${Number(def.binSize || 0.25).toFixed(2)} bin`;
             }
             if (def && def.type === 'trendline') {
                 const priceText = fmtRange(def.p1, def.p2);
@@ -20361,14 +22837,40 @@ def index():
                 return;
             }
 
-            if (tvDrawMode === 'trendline' || tvDrawMode === 'rect') {
+            if (tvDrawMode === 'anchored_tpo') {
+                if (!clickTime) return;
+                const tpoSettings = getTpoProfileSettingsFromDom();
+                finishTVDrawingCreation({
+                    type: 'anchored_tpo',
+                    t1: clickTime,
+                    l1: logical,
+                    color: drawColor,
+                    lineWidth: 2,
+                    lineStyle: 'dashed',
+                    binSize: tpoSettings.bin_size,
+                    blockMinutes: tpoSettings.block_minutes,
+                    valueAreaPct: tpoSettings.value_area_pct,
+                    showSinglePrints: tpoSettings.show_single_prints,
+                    showInitialBalance: !!tpoSettings.show_initial_balance,
+                    initialBalanceMinutes: tpoSettings.initial_balance_minutes || 60,
+                    profileSide: tpoSettings.fixed_tpo_side,
+                    label: 'Anchored TPO',
+                });
+                return;
+            }
+
+            if (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'fib' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo') {
                 if (!clickTime) return; // still no time — bail
                 const drawPoints = Array.isArray(tvDrawStart && tvDrawStart.points) ? tvDrawStart.points : [];
                 if (!drawPoints.length) {
                     tvDrawStart = { points: [{ price, time: clickTime, logical }] };
                     // Show visual hint that first point is set
                     const container = document.getElementById('price-chart');
-                    if (container) { container.title = 'Click second point to complete drawing'; }
+                    if (container) {
+                        container.title = tvDrawMode === 'fib'
+                            ? 'Click the opposite extreme to complete the Fibonacci retracement'
+                            : 'Click second point to complete drawing';
+                    }
                     scheduleTVDrawingOverlayDraw();
                 } else {
                     const startPoint = drawPoints[0];
@@ -20397,6 +22899,55 @@ def index():
                             color: drawColor,
                             lineWidth: 2,
                             lineStyle: 'solid',
+                        });
+                    } else if (tvDrawMode === 'fib') {
+                        finishTVDrawingCreation({
+                            type: 'fib',
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
+                            p1: startPoint.price,
+                            t2: clickTime,
+                            l2: logical,
+                            p2: price,
+                            color: drawColor,
+                            lineWidth: 1,
+                            lineStyle: 'solid',
+                            label: 'Fib',
+                        });
+                    } else if (tvDrawMode === 'fixed_vp') {
+                        finishTVDrawingCreation({
+                            type: 'fixed_vp',
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
+                            t2: clickTime,
+                            l2: logical,
+                            color: drawColor,
+                            lineWidth: 2,
+                            lineStyle: 'dashed',
+                            binSize: getVolumeProfileSettingsFromDom().bin_size,
+                            method: getVolumeProfileSettingsFromDom().method,
+                            profileSide: getVolumeProfileSettingsFromDom().fixed_vp_side,
+                            label: 'Fixed VP',
+                        });
+                    } else if (tvDrawMode === 'fixed_tpo') {
+                        const tpoSettings = getTpoProfileSettingsFromDom();
+                        finishTVDrawingCreation({
+                            type: 'fixed_tpo',
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
+                            t2: clickTime,
+                            l2: logical,
+                            color: drawColor,
+                            lineWidth: 2,
+                            lineStyle: 'dashed',
+                            binSize: tpoSettings.bin_size,
+                            blockMinutes: tpoSettings.block_minutes,
+                            valueAreaPct: tpoSettings.value_area_pct,
+                            showSinglePrints: tpoSettings.show_single_prints,
+                            showInitialBalance: !!tpoSettings.show_initial_balance,
+                            initialBalanceMinutes: tpoSettings.initial_balance_minutes || 60,
+                            profileSide: tpoSettings.fixed_tpo_side,
+                            label: 'TPO Range',
                         });
                     }
                     tvDrawStart = null;
@@ -20469,33 +23020,87 @@ def index():
         }
 
         // ── Candle Close Timer ─────────────────────────────────────────────────────
+        function _computeCandleCloseRemaining() {
+            const tfEl = document.getElementById('timeframe');
+            const tf = tfEl ? parseInt(tfEl.value) || 1 : 1;
+            const tfSecs = tf * 60;
+            const now = new Date();
+            const etFormatter = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false
+            });
+            const parts = etFormatter.formatToParts(now);
+            let h = 0, m2 = 0, s2 = 0;
+            for (const p of parts) {
+                if (p.type === 'hour')   h  = parseInt(p.value);
+                if (p.type === 'minute') m2 = parseInt(p.value);
+                if (p.type === 'second') s2 = parseInt(p.value);
+            }
+            const secondsOfDay = h * 3600 + m2 * 60 + s2;
+            const elapsed = secondsOfDay % tfSecs;
+            const remaining = tfSecs - elapsed;
+            return { remaining, tfSecs };
+        }
+        function _formatCandleCloseRemaining(remaining) {
+            const minutes = Math.floor(remaining / 60);
+            const seconds = remaining % 60;
+            return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+        function ensureAxisCountdownChip() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let chip = container.querySelector('.tv-axis-countdown');
+            if (!chip) {
+                chip = document.createElement('div');
+                chip.className = 'tv-axis-countdown';
+                chip.style.display = 'none';
+                container.appendChild(chip);
+            }
+            return chip;
+        }
+        function isAxisCountdownEnabled() {
+            const cb = document.getElementById('axis_countdown_enabled');
+            return !!(cb && cb.checked);
+        }
+        function updateAxisCountdownChip(text) {
+            const chip = ensureAxisCountdownChip();
+            if (!chip) return;
+            if (!isAxisCountdownEnabled() || !tvCandleSeries || !tvLastCandles.length) {
+                chip.style.display = 'none';
+                return;
+            }
+            const last = tvLastCandles[tvLastCandles.length - 1];
+            const price = last && (last.close != null ? last.close : last.value);
+            const y = (price != null) ? tvCandleSeries.priceToCoordinate(price) : null;
+            const container = document.getElementById('price-chart');
+            if (y == null || !Number.isFinite(y) || !container) {
+                chip.style.display = 'none';
+                return;
+            }
+            const priceScale = tvPriceChart && tvPriceChart.priceScale ? tvPriceChart.priceScale('right') : null;
+            // The price-scale label sits on the right edge; place the chip just below it.
+            const pricePillHeight = 22;
+            const chipTop = Math.max(2, Math.min(container.clientHeight - 22, y + (pricePillHeight / 2) + 2));
+            const scaleWidth = (priceScale && typeof priceScale.width === 'function') ? priceScale.width() : 56;
+            chip.style.right = '2px';
+            chip.style.top = chipTop + 'px';
+            chip.style.minWidth = (Math.max(40, scaleWidth - 8)) + 'px';
+            chip.textContent = text;
+            chip.style.display = '';
+        }
         function startCandleCloseTimer() {
             if (candleCloseTimerInterval) clearInterval(candleCloseTimerInterval);
             function updateTimer() {
                 const el = document.getElementById('candle-close-timer');
-                if (!el) { clearInterval(candleCloseTimerInterval); return; }
-                const tfEl = document.getElementById('timeframe');
-                const tf = tfEl ? parseInt(tfEl.value) || 1 : 1;
-                const tfSecs = tf * 60;
-                // Use ET (America/New_York) time for candle boundary calculation
-                const now = new Date();
-                const etFormatter = new Intl.DateTimeFormat('en-US', {
-                    timeZone: 'America/New_York',
-                    hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false
-                });
-                const parts = etFormatter.formatToParts(now);
-                let h = 0, m2 = 0, s2 = 0;
-                for (const p of parts) {
-                    if (p.type === 'hour')   h  = parseInt(p.value);
-                    if (p.type === 'minute') m2 = parseInt(p.value);
-                    if (p.type === 'second') s2 = parseInt(p.value);
+                const { remaining } = _computeCandleCloseRemaining();
+                const text = _formatCandleCloseRemaining(remaining);
+                if (el) {
+                    el.textContent = `⏱ ${text}`;
                 }
-                const secondsOfDay = h * 3600 + m2 * 60 + s2;
-                const elapsed = secondsOfDay % tfSecs;
-                const remaining = tfSecs - elapsed;
-                const minutes = Math.floor(remaining / 60);
-                const seconds = remaining % 60;
-                el.textContent = `⏱ ${minutes}:${seconds.toString().padStart(2, '0')}`;
+                updateAxisCountdownChip(text);
+                if (!el && !isAxisCountdownEnabled()) {
+                    clearInterval(candleCloseTimerInterval);
+                }
             }
             updateTimer();
             candleCloseTimerInterval = setInterval(updateTimer, 1000);
@@ -20550,6 +23155,22 @@ def index():
             const drawGroup = makeGroup('draw');
             const actionsGroup = makeGroup('actions');
             renderStrikeOverlayControls(toolbarMain);
+            const profilesGroup = makeGroup('profiles');
+            const vpToggle = btn('VP', 'Toggle price-axis volume profile', () => {
+                const current = !!(document.getElementById('vp_enabled') && document.getElementById('vp_enabled').checked);
+                setTVProfileToggle('vp', !current);
+            });
+            vpToggle.dataset.profileToggle = 'vp';
+            vpToggle.setAttribute('aria-pressed', 'false');
+            addToGroup(profilesGroup, vpToggle);
+            const tpoToggle = btn('TPO', 'Toggle price-axis TPO market profile', () => {
+                const current = !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked);
+                setTVProfileToggle('tpo', !current);
+            });
+            tpoToggle.dataset.profileToggle = 'tpo';
+            tpoToggle.setAttribute('aria-pressed', 'false');
+            addToGroup(profilesGroup, tpoToggle);
+            syncTVProfileToolbarButtons();
             const helperGroup = document.createElement('div');
             helperGroup.className = 'tv-toolbar-group tv-toolbar-helper';
             helperGroup.dataset.group = 'contract-helper';
@@ -20777,79 +23398,114 @@ def index():
                 node.classList.toggle('active', node.dataset.hlinePreset === getActiveTVHLinePresetKey());
             });
 
-            const drawDefs = [
-                { key:'trendline', label:'↗ Trend',  title:'Draw trend line (click start, click end)' },
-                { key:'channel',   label:'∥ Channel', title:'Draw parallel channel (click two trend points, then width)' },
-                { key:'rect',      label:'▭ Box',    title:'Draw rectangle between two prices (click two points)' },
-                { key:'avwap',     label:'⚓ AVWAP',  title:'Anchored VWAP — click any candle to anchor' },
-                { key:'text',      label:'T Label',  title:'Add price label (click to place)' },
+            // Consolidated "Tools" dropdown for the secondary drawing tools.
+            // H-Line stays inline above (most-used). Channel's preset selector
+            // and axis-snap toggle live inside this menu as inline rows.
+            const drawToolsMenu = createToolbarMenu('Tools', 'Open drawing tools menu.', {
+                toggleTitle: 'Open drawing tools menu',
+            });
+            drawToolsMenu.menuButton.id = 'tv-draw-tools-button';
+            drawToolsMenu.menuButton.dataset.drawToolsTrigger = '1';
+            drawToolsMenu.menuButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                const isOpen = drawToolsMenu.wrap.classList.contains('open');
+                closeTVToolbarMenus();
+                if (!isOpen) {
+                    openTVToolbarMenu(drawToolsMenu.wrap, drawToolsMenu.menuButton, drawToolsMenu.menuPanel);
+                }
+            }, true);
+            const drawToolsGrid = document.createElement('div');
+            drawToolsGrid.className = 'tv-toolbar-menu-grid';
+
+            const simpleDrawDefs = [
+                { section: 'Lines', items: [
+                    { key:'trendline', label:'↗ Trend', title:'Draw trend line (click start, click end)' },
+                ]},
+                { section: 'Shapes', items: [
+                    { key:'rect', label:'▭ Box', title:'Draw rectangle between two prices (click two points)' },
+                    { key:'fib',  label:'𝝓 Fib', title:'Fibonacci retracement (click high, click low — or vice versa)' },
+                ]},
+                { section: 'Profiles', items: [
+                    { key:'fixed_vp',  label:'VP Range',  title:'Draw fixed range volume profile (click start, click end)' },
+                    { key:'fixed_tpo', label:'TPO Range', title:'Draw fixed range TPO market profile (click start, click end)' },
+                    { key:'anchored_tpo', label:'⚓ TPO', title:'Anchored TPO profile — click any candle to anchor' },
+                    { key:'avwap', label:'⚓ AVWAP', title:'Anchored VWAP — click any candle to anchor' },
+                ]},
+                { section: 'Other', items: [
+                    { key:'text', label:'T Label', title:'Add price label (click to place)' },
+                ]},
             ];
-            drawDefs.forEach(def => {
-                const b = btn(def.label, def.title, () => setDrawMode(def.key));
-                b.dataset.draw = def.key;
-                if (tvDrawMode === def.key) b.classList.add('active');
-                if (def.key === 'channel') {
-                    b.id = 'tv-channel-draw-button';
-                    const wrap = document.createElement('div');
-                    wrap.className = 'tv-draw-inline';
-
-                    const presetWrap = document.createElement('div');
-                    presetWrap.className = 'tv-draw-dropdown';
-                    presetWrap.appendChild(b);
-
-                    const channelMenuToggle = btn('', 'Choose channel preset/color', event => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const isOpen = presetWrap.classList.contains('open');
-                        closeTVToolbarMenus();
-                        if (!isOpen) {
-                            openTVToolbarMenu(presetWrap, channelMenuToggle, channelMenu);
-                        }
-                    }, 'icon');
-                    channelMenuToggle.id = 'tv-channel-preset-toggle';
-
-                    const channelMenu = document.createElement('div');
-                    channelMenu.className = 'tv-draw-dropdown-menu';
-                    [
-                        { key: 'support', title: 'Draw support channels in green' },
-                        { key: 'resistance', title: 'Draw resistance channels in red' },
-                        { key: 'neutral', title: 'Draw neutral channels in gray' },
-                        { key: 'custom', title: 'Use the toolbar color picker for new channels' },
-                    ].forEach(presetDef => {
-                        const preset = getTVHLinePreset(presetDef.key);
-                        const option = document.createElement('button');
-                        option.type = 'button';
-                        option.className = 'tv-draw-menu-item';
-                        option.dataset.channelPreset = presetDef.key;
-                        option.title = presetDef.title;
-                        option.innerHTML =
-                            '<span class="tv-draw-pill-swatch" style="background:' + (preset.color || getTVDrawingColorFallback('custom')) + '"></span>' +
-                            preset.label;
-                        option.addEventListener('click', event => {
+            simpleDrawDefs.forEach(group => {
+                appendToolbarMenuSection(drawToolsGrid, group.section, section => {
+                    group.items.forEach(def => {
+                        const b = btn(def.label, def.title, event => {
                             event.preventDefault();
                             event.stopPropagation();
-                            setActiveTVChannelPresetKey(presetDef.key);
-                            setDrawMode('channel', { force: true });
+                            setDrawMode(def.key);
+                            closeTVToolbarMenus();
                         });
-                        channelMenu.appendChild(option);
+                        b.classList.add('tv-draw-menu-item');
+                        b.dataset.draw = def.key;
+                        if (tvDrawMode === def.key) b.classList.add('active');
+                        section.appendChild(b);
                     });
-                    presetWrap.appendChild(channelMenuToggle);
-                    presetWrap.appendChild(channelMenu);
-                    wrap.appendChild(presetWrap);
-
-                    const channelSnapBtn = btn('', '', () => {
-                        setTVChannelAxisSnapEnabled(!getTVChannelAxisSnapEnabled());
-                    }, 'pill');
-                    channelSnapBtn.id = 'tv-channel-snap-toggle';
-                    wrap.appendChild(channelSnapBtn);
-
-                    addToGroup(drawGroup, wrap);
-                    syncTVChannelToolbarPreset();
-                    syncTVChannelSnapToolbarButton();
-                } else {
-                    addToGroup(drawGroup, b);
-                }
+                });
             });
+
+            // Channel + preset + snap-toggle live as their own section inside the menu.
+            appendToolbarMenuSection(drawToolsGrid, 'Channel', section => {
+                const channelBtn = btn('∥ Channel', 'Draw parallel channel (click two trend points, then width)', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setDrawMode('channel');
+                    closeTVToolbarMenus();
+                });
+                channelBtn.id = 'tv-channel-draw-button';
+                channelBtn.dataset.draw = 'channel';
+                channelBtn.classList.add('tv-draw-menu-item');
+                if (tvDrawMode === 'channel') channelBtn.classList.add('active');
+                section.appendChild(channelBtn);
+
+                const presetRow = document.createElement('div');
+                presetRow.className = 'tv-toolbar-menu-row';
+                [
+                    { key: 'support', title: 'Draw support channels in green' },
+                    { key: 'resistance', title: 'Draw resistance channels in red' },
+                    { key: 'neutral', title: 'Draw neutral channels in gray' },
+                    { key: 'custom', title: 'Use the toolbar color picker for new channels' },
+                ].forEach(presetDef => {
+                    const preset = getTVHLinePreset(presetDef.key);
+                    const option = document.createElement('button');
+                    option.type = 'button';
+                    option.className = 'tv-draw-menu-item';
+                    option.dataset.channelPreset = presetDef.key;
+                    option.title = presetDef.title;
+                    option.innerHTML =
+                        '<span class="tv-draw-pill-swatch" style="background:' + (preset.color || getTVDrawingColorFallback('custom')) + '"></span>' +
+                        preset.label;
+                    option.addEventListener('click', event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setActiveTVChannelPresetKey(presetDef.key);
+                        setDrawMode('channel', { force: true });
+                        closeTVToolbarMenus();
+                    });
+                    presetRow.appendChild(option);
+                });
+                section.appendChild(presetRow);
+
+                const snapBtn = btn('', '', () => {
+                    setTVChannelAxisSnapEnabled(!getTVChannelAxisSnapEnabled());
+                }, 'pill');
+                snapBtn.id = 'tv-channel-snap-toggle';
+                section.appendChild(snapBtn);
+            });
+
+            drawToolsMenu.menuPanel.appendChild(drawToolsGrid);
+            addToGroup(drawGroup, drawToolsMenu.wrap);
+            syncTVChannelToolbarPreset();
+            syncTVChannelSnapToolbarButton();
 
             // Draw color picker
             const colorWrap = document.createElement('span');
@@ -21401,6 +24057,7 @@ def index():
                     scheduleTVStrikeOverlayDraw();
                     scheduleTVDrawingOverlayDraw();
                     scheduleTVHistoricalOverlayDraw();
+                    scheduleTVProfileOverlayDraw();
                     scheduleRvolMarkerDraw();
                     scheduleGexPanelSync();
                 });
@@ -21411,6 +24068,7 @@ def index():
                         scheduleTVStrikeOverlayDraw();
                         scheduleTVDrawingOverlayDraw();
                         scheduleTVHistoricalOverlayDraw();
+                        scheduleTVProfileOverlayDraw();
                         scheduleRvolMarkerDraw();
                         scheduleGexPanelSync();
                         requestTVDrawingOverlayActiveRedraw(activeDuration);
@@ -21446,16 +24104,29 @@ def index():
                         if (handledStrike) {
                             const tooltip = ensureTVHistoricalTooltip();
                             if (tooltip) tooltip.style.display = 'none';
+                            const profileTooltip = ensureTVProfileTooltip();
+                            if (profileTooltip) profileTooltip.style.display = 'none';
                         } else {
-                            updateTVHistoricalTooltip(event);
+                            const handledProfile = updateTVProfileTooltip(event);
+                            if (handledProfile) {
+                                const tooltip = ensureTVHistoricalTooltip();
+                                if (tooltip) tooltip.style.display = 'none';
+                            } else {
+                                updateTVHistoricalTooltip(event);
+                            }
                         }
                     });
+                    container.addEventListener('click', (event) => {
+                        handleTVProfileClick(event);
+                    }, true);
                     container.addEventListener('mouseleave', () => {
                         if (tvDrawMode) clearTVDrawingPreview();
                         const tooltip = ensureTVHistoricalTooltip();
                         if (tooltip) tooltip.style.display = 'none';
                         const strikeTooltip = ensureTVStrikeOverlayTooltip();
                         if (strikeTooltip) strikeTooltip.style.display = 'none';
+                        const profileTooltip = ensureTVProfileTooltip();
+                        if (profileTooltip) profileTooltip.style.display = 'none';
                     });
                 }
                 const _tc2 = document.getElementById('tv-toolbar-container');
@@ -21596,10 +24267,13 @@ def index():
             clearTVHistoricalExpectedMoveSeries();
 
             tvHistoricalPoints = priceData.historical_exposure_levels || [];
+            tvVolumeProfilePayload = priceData.volume_profile || null;
+            tvTpoProfilePayload = priceData.tpo_profile || null;
             tvRestoreDrawings();
             scheduleSessionLevelCloudDraw();
             scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
+            scheduleTVProfileOverlayDraw();
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             renderKeyLevels(getScopedKeyLevels());
             renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
@@ -21620,6 +24294,7 @@ def index():
                         scheduleSessionLevelCloudDraw();
                         scheduleTVStrikeOverlayDraw();
                         scheduleTVHistoricalOverlayDraw();
+                        scheduleTVProfileOverlayDraw();
                     } catch(e) {}
                 }, 50);
             } else if (shouldFocusSession) {
@@ -21700,6 +24375,11 @@ def index():
                             '<div class="rail-metric-pair">' +
                                 '<div class="rail-metric"><div class="rail-card-header">Net GEX</div><div class="v" data-met="net_gex">—</div><div class="d" data-met="net_gex_delta"></div></div>' +
                                 '<div class="rail-metric"><div class="rail-card-header">Net DEX</div><div class="v" data-met="net_dex">—</div><div class="d" data-met="net_dex_delta"></div></div>' +
+                            '</div>' +
+                            '<div class="rail-drift-wrap" id="rail-spark-netex" title="Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — centered at unchanged">' +
+                                '<div class="rail-drift-row" data-drift-row="gex"><span class="rail-drift-label">GEX</span><div class="rail-drift-track" aria-hidden="true"><div class="rail-drift-fill" data-drift-fill="gex"></div></div><span class="rail-drift-value" data-drift-value="gex">—</span></div>' +
+                                '<div class="rail-drift-row" data-drift-row="dex"><span class="rail-drift-label">DEX</span><div class="rail-drift-track" aria-hidden="true"><div class="rail-drift-fill" data-drift-fill="dex"></div></div><span class="rail-drift-value" data-drift-value="dex">—</span></div>' +
+                                '<div class="rail-drift-footer"><span class="rail-drift-scale">Δ open</span><span class="rail-drift-read" data-met="netex_read">Exposure drift unavailable</span></div>' +
                             '</div>' +
                             '<div class="gex-scope-pill" id="gex-scope-pill"><button class="gex-scope-btn" data-scope="all">All</button><button class="gex-scope-btn" data-scope="0dte">0DTE</button></div>' +
                         '</div>' +
@@ -23927,6 +26607,8 @@ def index():
                     }
                 } else if (def.type === 'rect') {
                     tvAllLevelPrices.push(def.top, def.bot);
+                } else if (def.type === 'fib') {
+                    tvAllLevelPrices.push(def.p1, def.p2);
                 }
             });
             tvAllLevelPrices = tvAllLevelPrices.filter(price => Number.isFinite(price));
@@ -24139,6 +26821,8 @@ def index():
                 coloring_mode: document.getElementById('coloring_mode').value,
                 top_oi_count: getTopOICountSetting(),
                 session_levels: getSessionLevelSettingsFromDom(),
+                volume_profile: getVolumeProfileSettingsFromDom(),
+                tpo_profile: getTpoProfileSettingsFromDom(),
                 gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
             };
         }
@@ -24498,6 +27182,9 @@ def index():
                 _setMet('net_dex', '—');
                 _setMet('net_gex_delta', '');
                 _setMet('net_dex_delta', '');
+                _setMet('netex_read', 'Exposure drift unavailable');
+                netexSparkOpenBaseline = { g: null, d: null };
+                renderNetExSparkline();
                 document.querySelectorAll('#rail-card-metrics .v').forEach(el => el.classList.remove('pos', 'neg'));
                 return;
             }
@@ -24516,6 +27203,10 @@ def index():
             const sd = stats.session_deltas || {};
             const dGex = (typeof sd.net_gex_vs_open === 'number') ? sd.net_gex_vs_open : null;
             const dDex = (typeof sd.net_dex_vs_open === 'number') ? sd.net_dex_vs_open : null;
+            netexSparkOpenBaseline = {
+                g: (typeof stats.net_gex === 'number' && dGex != null) ? (stats.net_gex - dGex) : null,
+                d: (typeof stats.net_dex === 'number' && dDex != null) ? (stats.net_dex - dDex) : null,
+            };
             _setMet('net_gex_delta', dGex == null ? '' : ('Δ ' + (dGex > 0 ? '+' : '') + fmtMoneyCompact(dGex)));
             _setMet('net_dex_delta', dDex == null ? '' : ('Δ ' + (dDex > 0 ? '+' : '') + fmtMoneyCompact(dDex)));
             const dGexEl = document.querySelector('#rail-card-metrics [data-met="net_gex_delta"]');
@@ -24528,6 +27219,223 @@ def index():
                 dDexEl.classList.toggle('pos', dDex != null && dDex > 0);
                 dDexEl.classList.toggle('neg', dDex != null && dDex < 0);
             }
+            recordNetExSparklineSample(stats.net_gex, stats.net_dex);
+            renderNetExSparkline();
+        }
+
+        // ── Net GEX/DEX intraday drift bars ─────────────────────────────────────
+        // Per-ticker, per-day ring buffer (localStorage). Open mode anchors to
+        // the 09:30 ET session open when the browser has an open-era sample;
+        // otherwise it falls back to the live "vs open" baseline if available.
+        // First-sample mode anchors to the first captured sample of the day.
+        const NETEX_SPARK_MAX = 240;
+        let netexSparkOpenBaseline = { g: null, d: null };
+        function _netexSparkKey() {
+            const tickerEl = document.getElementById('ticker');
+            const tk = tickerEl ? (tickerEl.value || '').trim().toUpperCase() : '';
+            const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+            return 'netex_spark::' + tk + '::' + today;
+        }
+        function _loadNetexSpark() {
+            try {
+                const raw = localStorage.getItem(_netexSparkKey());
+                if (!raw) return [];
+                const parsed = JSON.parse(raw);
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (e) { return []; }
+        }
+        function _saveNetexSpark(samples) {
+            try { localStorage.setItem(_netexSparkKey(), JSON.stringify(samples)); } catch (e) {}
+        }
+        function recordNetExSparklineSample(gex, dex) {
+            if (typeof gex !== 'number' && typeof dex !== 'number') return;
+            const samples = _loadNetexSpark();
+            const now = Date.now();
+            const last = samples[samples.length - 1];
+            // Throttle to one sample per ~20s — handles dense refresh polling
+            // without blowing through the ring buffer mid-session.
+            if (last && samples.length > 1 && (now - last.t) < 20000) {
+                last.g = (typeof gex === 'number') ? gex : last.g;
+                last.d = (typeof dex === 'number') ? dex : last.d;
+                last.t = now;
+            } else {
+                samples.push({
+                    t: now,
+                    g: typeof gex === 'number' ? gex : null,
+                    d: typeof dex === 'number' ? dex : null,
+                });
+                while (samples.length > NETEX_SPARK_MAX) samples.shift();
+            }
+            _saveNetexSpark(samples);
+        }
+        function _netexSparkAnchorLabel() {
+            return netexSparkAnchorMode === 'first' ? 'first' : 'open';
+        }
+        function _netexSparkOpenMs(samples) {
+            const ref = Array.isArray(samples) && samples.length && Number.isFinite(samples[0] && samples[0].t)
+                ? new Date(samples[0].t)
+                : new Date();
+            const fmt = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+            });
+            const parts = fmt.formatToParts(ref).reduce((acc, part) => {
+                if (part.type !== 'literal') acc[part.type] = part.value;
+                return acc;
+            }, {});
+            const hh = Number(parts.hour);
+            const mm = Number(parts.minute);
+            const ss = Number(parts.second);
+            if (!Number.isFinite(hh) || !Number.isFinite(mm) || !Number.isFinite(ss)) return null;
+            const elapsedMs = (((hh * 60) + mm) * 60 + ss) * 1000 + ref.getMilliseconds();
+            const openMsOfDay = ((9 * 60) + 30) * 60 * 1000;
+            return ref.getTime() - (elapsedMs - openMsOfDay);
+        }
+        function _sparkResolveBaseline(values, samples, fallbackValue) {
+            if (!Array.isArray(values) || !values.length) return null;
+            if (netexSparkAnchorMode === 'first') {
+                for (let i = 0; i < values.length; i++) {
+                    const v = values[i];
+                    if (typeof v === 'number' && isFinite(v)) return v;
+                }
+                return null;
+            }
+            const openMs = _netexSparkOpenMs(samples);
+            if (openMs != null) {
+                for (let i = 0; i < values.length; i++) {
+                    const v = values[i];
+                    const t = samples[i] && samples[i].t;
+                    if (typeof v === 'number' && isFinite(v) && Number.isFinite(t) && t >= openMs) {
+                        return v;
+                    }
+                }
+            }
+            if (typeof fallbackValue === 'number' && isFinite(fallbackValue)) return fallbackValue;
+            for (let i = 0; i < values.length; i++) {
+                const v = values[i];
+                if (typeof v === 'number' && isFinite(v)) return v;
+            }
+            return null;
+        }
+        function _sparkSeriesDelta(values, samples, fallbackValue) {
+            const baseline = _sparkResolveBaseline(values, samples, fallbackValue);
+            return values.map(v => {
+                if (typeof v !== 'number' || !isFinite(v)) return null;
+                if (baseline == null) return null;
+                return v - baseline;
+            });
+        }
+        function _sparkLastFinite(values) {
+            if (!Array.isArray(values)) return null;
+            for (let i = values.length - 1; i >= 0; i--) {
+                const v = values[i];
+                if (typeof v === 'number' && isFinite(v)) return v;
+            }
+            return null;
+        }
+        function _netexDriftTone(delta) {
+            if (typeof delta !== 'number' || !isFinite(delta)) return '';
+            if (delta > 0) return 'pos';
+            if (delta < 0) return 'neg';
+            return '';
+        }
+        function _netexDriftClass(delta, baseline) {
+            if (typeof delta !== 'number' || !isFinite(delta)) return 'unavailable';
+            const baseAbs = (typeof baseline === 'number' && isFinite(baseline)) ? Math.abs(baseline) : 0;
+            const steadyThreshold = Math.max(25000000, baseAbs * 0.005);
+            if (Math.abs(delta) <= steadyThreshold) return 'steady';
+            return delta > 0 ? 'building' : 'fading';
+        }
+        function _netexDriftRead(gexDelta, dexDelta, gexBase, dexBase) {
+            const gexState = _netexDriftClass(gexDelta, gexBase);
+            const dexState = _netexDriftClass(dexDelta, dexBase);
+            if (gexState === 'unavailable' && dexState === 'unavailable') return 'Exposure drift unavailable';
+            if (gexState === 'steady' && dexState === 'steady') return 'Exposure steady vs ' + _netexSparkAnchorLabel();
+            if (gexState === dexState && gexState !== 'unavailable') {
+                return 'GEX / DEX ' + gexState + ' vs ' + _netexSparkAnchorLabel();
+            }
+            if (gexState === 'unavailable') return 'DEX ' + dexState + ' vs ' + _netexSparkAnchorLabel();
+            if (dexState === 'unavailable') return 'GEX ' + gexState + ' vs ' + _netexSparkAnchorLabel();
+            return 'GEX ' + gexState + ', DEX ' + dexState;
+        }
+        function _setDriftBar(wrap, key, delta, peak) {
+            const fill = wrap.querySelector('[data-drift-fill="' + key + '"]');
+            const value = wrap.querySelector('[data-drift-value="' + key + '"]');
+            const tone = _netexDriftTone(delta);
+            if (value) {
+                value.textContent = (typeof delta === 'number' && isFinite(delta))
+                    ? ((delta > 0 ? '+' : '') + fmtMoneyCompact(delta))
+                    : '—';
+                value.classList.toggle('pos', tone === 'pos');
+                value.classList.toggle('neg', tone === 'neg');
+            }
+            if (!fill) return;
+            fill.classList.toggle('pos', tone === 'pos');
+            fill.classList.toggle('neg', tone === 'neg');
+            if (typeof delta !== 'number' || !isFinite(delta) || !(peak > 0)) {
+                fill.style.left = '50%';
+                fill.style.width = '0%';
+                return;
+            }
+            const widthPct = Math.min(50, Math.max(2, (Math.abs(delta) / peak) * 50));
+            fill.style.left = delta < 0 ? (50 - widthPct).toFixed(2) + '%' : '50%';
+            fill.style.width = widthPct.toFixed(2) + '%';
+        }
+        function _setNetexDeltaMetric(key, delta) {
+            _setMet(key, (typeof delta === 'number' && isFinite(delta))
+                ? ('Δ ' + (delta > 0 ? '+' : '') + fmtMoneyCompact(delta))
+                : ''
+            );
+            const el = document.querySelector('#rail-card-metrics [data-met="' + key + '"]');
+            const tone = _netexDriftTone(delta);
+            if (el) {
+                el.classList.toggle('pos', tone === 'pos');
+                el.classList.toggle('neg', tone === 'neg');
+            }
+        }
+        function renderNetExSparkline() {
+            document.querySelectorAll('#rail-spark-netex').forEach(wrap => {
+                const samples = _loadNetexSpark();
+                const scaleEl = wrap.querySelector('.rail-drift-scale');
+                const readEl = wrap.querySelector('[data-met="netex_read"]');
+                if (samples.length < 1) {
+                    _setDriftBar(wrap, 'gex', null, 0);
+                    _setDriftBar(wrap, 'dex', null, 0);
+                    if (scaleEl) scaleEl.textContent = 'Δ ' + _netexSparkAnchorLabel();
+                    if (readEl) readEl.textContent = 'Exposure drift unavailable';
+                    return;
+                }
+                const gexValues = samples.map(s => s.g);
+                const dexValues = samples.map(s => s.d);
+                const gexDelta = _sparkSeriesDelta(gexValues, samples, netexSparkOpenBaseline.g);
+                const dexDelta = _sparkSeriesDelta(dexValues, samples, netexSparkOpenBaseline.d);
+                const gexNow = _sparkLastFinite(gexDelta);
+                const dexNow = _sparkLastFinite(dexDelta);
+                const peak = Math.max(Math.abs(gexNow || 0), Math.abs(dexNow || 0));
+                _setNetexDeltaMetric('net_gex_delta', gexNow);
+                _setNetexDeltaMetric('net_dex_delta', dexNow);
+                _setDriftBar(wrap, 'gex', gexNow, peak);
+                _setDriftBar(wrap, 'dex', dexNow, peak);
+                const anchorLabel = _netexSparkAnchorLabel();
+                if (scaleEl) {
+                    scaleEl.textContent = peak > 0 ? ('Δ ' + anchorLabel + ' ±' + fmtMoneyCompact(peak)) : ('Δ ' + anchorLabel);
+                }
+                if (readEl) {
+                    const read = _netexDriftRead(gexNow, dexNow, netexSparkOpenBaseline.g, netexSparkOpenBaseline.d);
+                    const tone = (read.indexOf('building') >= 0 && read.indexOf('fading') < 0) ? 'pos'
+                        : (read.indexOf('fading') >= 0 && read.indexOf('building') < 0) ? 'neg'
+                        : '';
+                    readEl.textContent = read;
+                    readEl.classList.toggle('pos', tone === 'pos');
+                    readEl.classList.toggle('neg', tone === 'neg');
+                }
+                wrap.title = netexSparkAnchorMode === 'first'
+                    ? 'Intraday Net GEX / Net DEX drift from the first captured sample today — centered at unchanged'
+                    : 'Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — centered at unchanged';
+            });
         }
 
         function renderContractHelper(stats) {
@@ -25258,6 +28166,7 @@ def index():
             scheduleTVDrawingOverlayDraw();
             scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
+            scheduleTVProfileOverlayDraw();
             scheduleGexPanelSync();
         });
 
@@ -25311,7 +28220,7 @@ def index():
         // Settings save/load functions
         function gatherSettings() {
             return {
-                settings_schema_version: 6,
+                settings_schema_version: 8,
                 ticker: document.getElementById('ticker').value,
                 timeframe: document.getElementById('timeframe').value,
                 strike_range: document.getElementById('strike_range').value,
@@ -25339,6 +28248,7 @@ def index():
                 highlight_max_level: document.getElementById('highlight_max_level').checked,
                 max_level_color: document.getElementById('max_level_color').value,
                 max_level_mode: document.getElementById('max_level_mode').value,
+                netex_spark_anchor: netexSparkAnchorMode,
                 gate_alerts: !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked),
                 dealer_impact_verbose: !!(document.getElementById('dealer_impact_verbose') && document.getElementById('dealer_impact_verbose').checked),
                 em_range_locked: emRangeLocked,
@@ -25346,6 +28256,8 @@ def index():
                 tv_indicator_prefs: normalizeTVIndicatorPrefMap(tvIndicatorPrefs),
                 price_level_prefs: normalizePriceLevelPrefMap(priceLevelPrefs),
                 session_levels: getSessionLevelSettingsFromDom(),
+                volume_profile: getVolumeProfileSettingsFromDom(),
+                tpo_profile: getTpoProfileSettingsFromDom(),
                 // Chart visibility
                 charts: getChartVisibility()
             };
@@ -25416,6 +28328,11 @@ def index():
             if (settings.max_level_mode) {
                 document.getElementById('max_level_mode').value = settings.max_level_mode;
             }
+            if (settings.netex_spark_anchor) {
+                setNetexSparkAnchorMode(settings.netex_spark_anchor);
+            } else {
+                setNetexSparkAnchorMode(netexSparkAnchorMode, { skipPersist: true });
+            }
             if (settings.gate_alerts !== undefined) {
                 setAlertGateSetting(settings.gate_alerts);
             }
@@ -25428,6 +28345,49 @@ def index():
                 setEmRangeLocked(settings.em_range_locked);
             }
             applySessionLevelSettingsToDom(settings.session_levels || DEFAULT_SESSION_LEVEL_SETTINGS);
+            if (settings.volume_profile) {
+                const vp = settings.volume_profile;
+                if (document.getElementById('vp_enabled')) document.getElementById('vp_enabled').checked = !!vp.enabled;
+                if (document.getElementById('vp_mode')) document.getElementById('vp_mode').value = vp.mode || 'days';
+                if (document.getElementById('vp_days')) document.getElementById('vp_days').value = vp.days || 5;
+                if (document.getElementById('vp_start_date')) document.getElementById('vp_start_date').value = vp.start_date || '';
+                if (document.getElementById('vp_end_date')) document.getElementById('vp_end_date').value = vp.end_date || '';
+                if (document.getElementById('vp_color')) document.getElementById('vp_color').value = normalizeTVIndicatorColor(vp.color, resolveCssColor('var(--info)') || '#3B82F6');
+                if (document.getElementById('vp_bin_size')) document.getElementById('vp_bin_size').value = vp.bin_size || 0.10;
+                if (document.getElementById('fixed_vp_side')) document.getElementById('fixed_vp_side').value = vp.fixed_vp_side === 'left' ? 'left' : 'right';
+                if (document.getElementById('vp_method')) document.getElementById('vp_method').value = vp.method || 'triangular';
+                if (document.getElementById('vp_level_line_style')) document.getElementById('vp_level_line_style').value = ['solid', 'dashed', 'dotted'].includes(vp.level_line_style) ? vp.level_line_style : 'dashed';
+                if (document.getElementById('vp_level_line_width')) document.getElementById('vp_level_line_width').value = Math.max(0.5, Math.min(5, parseFloat(vp.level_line_width) || 1));
+                syncVolumeProfileSettingsVisibility();
+                syncTVProfileToolbarButtons();
+            }
+            if (settings.tpo_profile) {
+                const tpo = settings.tpo_profile;
+                if (document.getElementById('tpo_enabled')) document.getElementById('tpo_enabled').checked = !!tpo.enabled;
+                if (document.getElementById('tpo_bin_size')) document.getElementById('tpo_bin_size').value = tpo.bin_size || 0.25;
+                if (document.getElementById('fixed_tpo_side')) document.getElementById('fixed_tpo_side').value = tpo.fixed_tpo_side === 'left' ? 'left' : 'right';
+                if (document.getElementById('tpo_mode')) document.getElementById('tpo_mode').value = ['session', 'days', 'custom', 'bars_back', 'anchor'].includes(tpo.mode) ? tpo.mode : 'session';
+                if (document.getElementById('tpo_days')) document.getElementById('tpo_days').value = tpo.days || 3;
+                if (document.getElementById('tpo_start_date')) document.getElementById('tpo_start_date').value = tpo.start_date || '';
+                if (document.getElementById('tpo_end_date')) document.getElementById('tpo_end_date').value = tpo.end_date || '';
+                if (document.getElementById('tpo_bars_back')) document.getElementById('tpo_bars_back').value = tpo.bars_back || 200;
+                if (document.getElementById('tpo_anchor_datetime')) document.getElementById('tpo_anchor_datetime').value = tpo.anchor_datetime || '';
+                if (document.getElementById('tpo_block_minutes')) document.getElementById('tpo_block_minutes').value = [15, 30, 60, 240].includes(parseInt(tpo.block_minutes)) ? String(tpo.block_minutes) : '30';
+                if (document.getElementById('tpo_value_area_pct')) document.getElementById('tpo_value_area_pct').value = tpo.value_area_pct || 70;
+                if (document.getElementById('tpo_show_single_prints')) document.getElementById('tpo_show_single_prints').checked = !!tpo.show_single_prints;
+                if (document.getElementById('tpo_single_print_boxes')) document.getElementById('tpo_single_print_boxes').checked = !!tpo.single_print_boxes;
+                if (document.getElementById('tpo_compact_labels')) document.getElementById('tpo_compact_labels').checked = tpo.compact_labels !== false;
+                if (document.getElementById('tpo_show_level_labels')) document.getElementById('tpo_show_level_labels').checked = !!tpo.show_level_labels;
+                if (document.getElementById('tpo_show_summary')) document.getElementById('tpo_show_summary').checked = tpo.show_summary !== false;
+                if (document.getElementById('tpo_show_initial_balance')) document.getElementById('tpo_show_initial_balance').checked = !!tpo.show_initial_balance;
+                if (document.getElementById('tpo_initial_balance_minutes')) document.getElementById('tpo_initial_balance_minutes').value = Math.max(15, Math.min(240, parseInt(tpo.initial_balance_minutes) || 60));
+                if (document.getElementById('tpo_color')) document.getElementById('tpo_color').value = normalizeTVIndicatorColor(tpo.color, resolveCssColor('var(--accent)') || '#A78BFA');
+                if (document.getElementById('tpo_opacity')) document.getElementById('tpo_opacity').value = tpo.opacity || 0.18;
+                if (document.getElementById('tpo_level_line_style')) document.getElementById('tpo_level_line_style').value = ['solid', 'dashed', 'dotted'].includes(tpo.level_line_style) ? tpo.level_line_style : 'dashed';
+                if (document.getElementById('tpo_level_line_width')) document.getElementById('tpo_level_line_width').value = Math.max(0.5, Math.min(5, parseFloat(tpo.level_line_width) || 1));
+                syncTpoProfileSettingsVisibility();
+                syncTVProfileToolbarButtons();
+            }
             let nextTvActiveInds;
             if (Array.isArray(settings.tv_active_indicators)) {
                 nextTvActiveInds = new Set(normalizeTVIndicatorActiveKeys(settings.tv_active_indicators));
@@ -25678,6 +28638,23 @@ def index():
             });
         }
 
+        const AXIS_COUNTDOWN_LS_KEY = 'gex.axisCountdown.v1';
+        const axisCountdownInput = document.getElementById('axis_countdown_enabled');
+        if (axisCountdownInput) {
+            try {
+                const stored = localStorage.getItem(AXIS_COUNTDOWN_LS_KEY);
+                if (stored != null) axisCountdownInput.checked = stored === '1';
+            } catch (e) {}
+            axisCountdownInput.addEventListener('change', () => {
+                try { localStorage.setItem(AXIS_COUNTDOWN_LS_KEY, axisCountdownInput.checked ? '1' : '0'); } catch (e) {}
+                if (typeof startCandleCloseTimer === 'function') startCandleCloseTimer();
+                if (!axisCountdownInput.checked) {
+                    const chip = document.querySelector('.tv-axis-countdown');
+                    if (chip) chip.style.display = 'none';
+                }
+            });
+        }
+
         const RVOL_LS_KEY = 'gex.rvolAtTime.v1';
         const rvolEnabledInput = document.getElementById('rvol_enabled');
         const rvolLookbackInput = document.getElementById('rvol_lookback_days');
@@ -25825,6 +28802,7 @@ def index():
         const settingsModal = document.getElementById('settings-modal');
         const indicatorSettingsModal = document.getElementById('indicator-settings-modal');
         const priceLevelSettingsModal = document.getElementById('price-level-settings-modal');
+        const netexSparkAnchorSelect = document.getElementById('netex_spark_anchor');
         document.getElementById('settingsToggle').addEventListener('click', () => {
             if (settingsModal.showModal) { settingsModal.showModal(); }
             else { settingsModal.setAttribute('open', ''); } // <dialog> fallback
@@ -25856,6 +28834,23 @@ def index():
             }
             if (document.getElementById('settings-drawer').classList.contains('open')) closeDrawer();
         });
+
+        function setNetexSparkAnchorMode(mode, options = {}) {
+            netexSparkAnchorMode = mode === 'first' ? 'first' : 'open';
+            if (netexSparkAnchorSelect && netexSparkAnchorSelect.value !== netexSparkAnchorMode) {
+                netexSparkAnchorSelect.value = netexSparkAnchorMode;
+            }
+            if (!options.skipPersist) {
+                try { localStorage.setItem(NETEX_SPARK_ANCHOR_KEY, netexSparkAnchorMode); } catch (e) {}
+            }
+            renderNetExSparkline();
+        }
+        if (netexSparkAnchorSelect) {
+            netexSparkAnchorSelect.value = netexSparkAnchorMode;
+            netexSparkAnchorSelect.addEventListener('change', () => {
+                setNetexSparkAnchorMode(netexSparkAnchorSelect.value);
+            });
+        }
 
         // Add event listener for ticker input
         document.getElementById('ticker').addEventListener('input', function(e) {
@@ -26340,6 +29335,8 @@ def update_price():
         coloring_mode = data.get('coloring_mode', 'Linear Intensity')
         top_oi_count = data.get('top_oi_count', 5)
         session_level_config = normalize_session_level_config(data.get('session_levels'))
+        volume_profile_settings = data.get('volume_profile') or {}
+        tpo_profile_settings = data.get('tpo_profile') or {}
         # Mirror /update_data semantics. compute_trader_stats has needed these
         # since Phase 2 Stage 3 (commit 6fc40bb); without them every tick raised
         # a silent NameError and trader_stats stayed None.
@@ -26398,6 +29395,8 @@ def update_price():
             selected_expiries=selected_expiries,
             timeframe=timeframe,
             rvol_lookback_days=rvol_lookback_days,
+            volume_profile_settings=volume_profile_settings,
+            tpo_profile_settings=tpo_profile_settings,
         )
         # Inject timeframe so the popout candle-close timer knows the selected interval
         try:
