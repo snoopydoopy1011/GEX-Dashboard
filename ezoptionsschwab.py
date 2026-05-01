@@ -10115,10 +10115,10 @@ def index():
             display: block;
         }
         .rail-spark-zero {
-            stroke: var(--border, #3a3f4a);
+            stroke: var(--fg-2, #9ba1ad);
             stroke-width: 1;
-            stroke-dasharray: 2 2;
-            opacity: 0.7;
+            stroke-dasharray: 3 3;
+            opacity: 0.9;
         }
         .rail-spark-line {
             stroke-width: 1.4;
@@ -10148,9 +10148,15 @@ def index():
         }
         .rail-spark-legend i.dot.gex { background: var(--call, #2ecc71); }
         .rail-spark-legend i.dot.dex { background: var(--put, #e74c3c); }
+        /* Override .chart-container > div { flex:1; width:100%; height:100% }
+           so this chip stays a small floating pill instead of filling the chart. */
+        .chart-container > .tv-axis-countdown,
         .tv-axis-countdown {
             position: absolute;
             z-index: 5;
+            flex: none;
+            width: auto;
+            height: auto;
             pointer-events: none;
             background: rgba(20, 24, 33, 0.92);
             color: var(--fg-1, #d1d5db);
@@ -22227,7 +22233,7 @@ def index():
                     text: 'Label',
                     color: drawColor,
                 });
-            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo') && tvDrawStart) {
+            } else if ((tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'fib' || tvDrawMode === 'channel' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo') && tvDrawStart) {
                 const drawPoints = Array.isArray(tvDrawStart.points) ? tvDrawStart.points : [tvDrawStart];
                 if (tvDrawMode === 'trendline' && drawPoints.length === 1) {
                     const startPoint = drawPoints[0];
@@ -22284,6 +22290,24 @@ def index():
                         showSinglePrints: tpoSettings.show_single_prints,
                         profileSide: tpoSettings.fixed_tpo_side,
                         label: 'TPO Range',
+                    });
+                } else if (tvDrawMode === 'fib' && drawPoints.length === 1) {
+                    const startPoint = drawPoints[0];
+                    nextPreview = normalizeTVDrawingDef({
+                        id: '__preview__',
+                        type: 'fib',
+                        t1: startPoint.time,
+                        l1: startPoint.logical,
+                        p1: startPoint.price,
+                        t2: point.time || startPoint.time,
+                        l2: point.logical,
+                        p2: previewPoint.price,
+                        previewX2: previewPoint.x,
+                        previewY2: previewPoint.y,
+                        color: drawColor,
+                        lineWidth: 1,
+                        lineStyle: 'dashed',
+                        label: 'Fib',
                     });
                 } else if (tvDrawMode === 'rect' && drawPoints.length === 1) {
                     const startPoint = drawPoints[0];
