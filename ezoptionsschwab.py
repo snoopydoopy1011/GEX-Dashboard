@@ -33,6 +33,7 @@ import json
 import threading
 import queue
 import hashlib
+import copy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
@@ -908,6 +909,10 @@ current_expiry = None
 # Cache for last fetched options data per ticker — used by /update_price
 # so the price chart can refresh independently without re-fetching the full chain.
 _options_cache = {}  # ticker -> {'calls': DataFrame, 'puts': DataFrame, 'S': float}
+
+TRADE_PREVIEW_TTL_SECONDS = 300
+_trade_preview_lock = threading.Lock()
+_trade_preview_records = {}
 
 # Initialize Schwab client
 try:
@@ -4886,6 +4891,58 @@ def _order_preview_fingerprint(account_hash, ticker, order):
         'order': order,
     }, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _trade_preview_record_from_order(account_hash, ticker, contract_symbol, instruction, quantity, limit_price, order):
+    return {
+        'account_hash': str(account_hash or ''),
+        'ticker': format_ticker(ticker or ''),
+        'contract_symbol': str(contract_symbol or '').strip(),
+        'instruction': str(instruction or '').upper(),
+        'quantity': int(quantity),
+        'limit_price': f'{_parse_limit_price(limit_price):.2f}',
+        'order': copy.deepcopy(order),
+        'created_at': time.time(),
+    }
+
+
+def _remember_successful_trade_preview(preview_token, record):
+    if not preview_token or not isinstance(record, dict):
+        return
+    now = time.time()
+    with _trade_preview_lock:
+        stale = [
+            token for token, item in _trade_preview_records.items()
+            if now - float(item.get('created_at') or 0) > TRADE_PREVIEW_TTL_SECONDS
+        ]
+        for token in stale:
+            _trade_preview_records.pop(token, None)
+        _trade_preview_records[str(preview_token)] = copy.deepcopy(record)
+
+
+def _get_successful_trade_preview(preview_token):
+    token = str(preview_token or '').strip()
+    if not token:
+        return None, 'Missing preview token.'
+    with _trade_preview_lock:
+        record = copy.deepcopy(_trade_preview_records.get(token))
+    if not record:
+        return None, 'Missing successful preview. Preview the order again.'
+    if time.time() - float(record.get('created_at') or 0) > TRADE_PREVIEW_TTL_SECONDS:
+        with _trade_preview_lock:
+            _trade_preview_records.pop(token, None)
+        return None, 'Preview is stale. Preview the order again.'
+    return record, None
+
+
+def _trade_order_location(response):
+    headers = getattr(response, 'headers', None)
+    if not headers:
+        return None
+    try:
+        return headers.get('Location') or headers.get('location')
+    except Exception:
+        return None
 
 
 def _redact_trade_payload(value):
@@ -10625,8 +10682,26 @@ def index():
             text-transform: uppercase;
             cursor: pointer;
         }
+        .trade-place-button {
+            width: 100%;
+            min-height: 34px;
+            margin-top: 8px;
+            border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border));
+            background: color-mix(in srgb, var(--warn) 10%, var(--bg-0));
+            color: var(--fg-0);
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
         .trade-preview-button:disabled {
             opacity: 0.55;
+            cursor: not-allowed;
+        }
+        .trade-place-button:disabled {
+            opacity: 0.45;
             cursor: not-allowed;
         }
         .trade-preview-response {
@@ -15281,7 +15356,8 @@ def index():
                     </section>
                     <section class="trade-panel">
                         <button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>
-                        <div class="trade-preview-response" data-trade-preview-response>Preview required before any future live placement. Live orders are not available in this stage.</div>
+                        <button type="button" class="trade-place-button" data-trade-place disabled>Place Live Order</button>
+                        <div class="trade-preview-response" data-trade-preview-response>Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.</div>
                     </section>
                 </div>
             </aside>
@@ -25521,7 +25597,8 @@ def index():
                     '</section>' +
                     '<section class="trade-panel">' +
                         '<button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>' +
-                        '<div class="trade-preview-response" data-trade-preview-response>Preview required before any future live placement. Live orders are not available in this stage.</div>' +
+                        '<button type="button" class="trade-place-button" data-trade-place disabled>Place Live Order</button>' +
+                        '<div class="trade-preview-response" data-trade-preview-response>Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.</div>' +
                     '</section>' +
                 '</div>'
             );
@@ -26056,6 +26133,9 @@ def index():
             previewToken: '',
             previewLoading: false,
             previewError: '',
+            placement: null,
+            placementLoading: false,
+            placementError: '',
         };
 
         function fmtTradePrice(value) {
@@ -26112,6 +26192,8 @@ def index():
             tradeRailState.preview = null;
             tradeRailState.previewToken = '';
             tradeRailState.previewError = message;
+            tradeRailState.placement = null;
+            tradeRailState.placementError = '';
             renderTradeTicket();
         }
         function getTradePresetPrice(contract, preset) {
@@ -26133,6 +26215,7 @@ def index():
             const note = document.querySelector('[data-trade-ticket-note]');
             const warnings = document.querySelector('[data-trade-ticket-warnings]');
             const previewButton = document.querySelector('[data-trade-preview]');
+            const placeButton = document.querySelector('[data-trade-place]');
             const previewResponse = document.querySelector('[data-trade-preview-response]');
             if (qtyInput && String(qtyInput.value) !== String(tradeRailState.quantity)) qtyInput.value = tradeRailState.quantity;
             if (limitInput && String(limitInput.value) !== String(tradeRailState.limitPrice || '')) limitInput.value = tradeRailState.limitPrice || '';
@@ -26161,13 +26244,21 @@ def index():
                 previewButton.disabled = tradeRailState.previewLoading || !tradeRailState.accountHash || !selected || !tradeRailState.limitPrice || !(Number(tradeRailState.quantity) > 0);
                 previewButton.textContent = tradeRailState.previewLoading ? 'Previewing...' : 'Preview Order';
             }
+            if (placeButton) {
+                placeButton.disabled = tradeRailState.placementLoading || !tradeRailState.previewToken || !selected || !tradeRailState.accountHash;
+                placeButton.textContent = tradeRailState.placementLoading ? 'Placing...' : 'Place Live Order';
+            }
             if (previewResponse) {
-                if (tradeRailState.preview) {
+                if (tradeRailState.placement) {
+                    previewResponse.textContent = JSON.stringify(tradeRailState.placement, null, 2);
+                } else if (tradeRailState.placementError) {
+                    previewResponse.textContent = tradeRailState.placementError;
+                } else if (tradeRailState.preview) {
                     previewResponse.textContent = JSON.stringify(tradeRailState.preview, null, 2);
                 } else if (tradeRailState.previewError) {
                     previewResponse.textContent = tradeRailState.previewError;
                 } else {
-                    previewResponse.textContent = 'Preview required before any future live placement. Live orders are not available in this stage.';
+                    previewResponse.textContent = 'Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.';
                 }
             }
         }
@@ -26491,6 +26582,8 @@ def index():
                 tradeRailState.preview = data;
                 tradeRailState.previewToken = data.preview_token || '';
                 tradeRailState.previewError = '';
+                tradeRailState.placement = null;
+                tradeRailState.placementError = '';
                 renderTradeTicket();
             })
             .catch(err => {
@@ -26498,6 +26591,50 @@ def index():
                 tradeRailState.preview = null;
                 tradeRailState.previewToken = '';
                 tradeRailState.previewError = err.message || 'Preview failed';
+                renderTradeTicket();
+            });
+        }
+        function placeTradeOrder() {
+            const selected = getSelectedTradeContract();
+            if (!selected || !tradeRailState.accountHash || !tradeRailState.previewToken) {
+                tradeRailState.placementError = 'A successful preview is required before live placement.';
+                renderTradeTicket();
+                return;
+            }
+            const summary = tradeRailState.action + ' ' + tradeRailState.quantity + ' ' + selected.contract_symbol + ' @ ' + tradeRailState.limitPrice;
+            if (!window.confirm('Send live order to Schwab?\\n\\n' + summary)) return;
+            tradeRailState.placementLoading = true;
+            tradeRailState.placementError = '';
+            tradeRailState.placement = null;
+            renderTradeTicket();
+            fetch('/trade/place_order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    account_hash: tradeRailState.accountHash,
+                    ticker: tradeRailState.ticker || getTradeRailTicker(),
+                    contract_symbol: selected.contract_symbol,
+                    instruction: tradeRailState.action,
+                    quantity: tradeRailState.quantity,
+                    limit_price: tradeRailState.limitPrice,
+                    preview_token: tradeRailState.previewToken,
+                    order: tradeRailState.preview && tradeRailState.preview.order,
+                    confirmed: true,
+                }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                tradeRailState.placementLoading = false;
+                if (!ok || data.error) throw new Error(data.error || 'Live placement failed');
+                tradeRailState.placement = data;
+                tradeRailState.placementError = '';
+                renderTradeTicket();
+                requestTradeAccountDetails({ force: true });
+            })
+            .catch(err => {
+                tradeRailState.placementLoading = false;
+                tradeRailState.placement = null;
+                tradeRailState.placementError = err.message || 'Live placement failed';
                 renderTradeTicket();
             });
         }
@@ -26591,6 +26728,8 @@ def index():
             });
             const previewButton = root.querySelector('[data-trade-preview]');
             if (previewButton) previewButton.addEventListener('click', previewTradeOrder);
+            const placeButton = root.querySelector('[data-trade-place]');
+            if (placeButton) placeButton.addEventListener('click', placeTradeOrder);
         }
 
         function scheduleTradeRailResizeRefresh() {
@@ -30972,6 +31111,118 @@ def trade_preview_order():
     }
     if not schwab_ok:
         result['warnings'].append(f"Schwab preview returned status {status_code or 'unknown'}.")
+        return jsonify(result), 502
+    _remember_successful_trade_preview(
+        preview_token,
+        _trade_preview_record_from_order(
+            account_hash=account_hash,
+            ticker=ticker,
+            contract_symbol=contract_symbol,
+            instruction=instruction,
+            quantity=quantity,
+            limit_price=limit_price,
+            order=order,
+        ),
+    )
+    return jsonify(result)
+
+
+@app.route('/trade/place_order', methods=['POST'])
+def trade_place_order():
+    """Live single-leg placement, guarded by feature flag and exact preview binding."""
+    if os.getenv('ENABLE_LIVE_TRADING') != '1':
+        return _trade_api_error('Live trading is disabled. Set ENABLE_LIVE_TRADING=1 to enable order placement.', 403)
+
+    client_error = _require_schwab_client()
+    if client_error:
+        return _trade_api_error(client_error, 503)
+
+    data = request.get_json(silent=True) or {}
+    if data.get('confirmed') is not True and data.get('final_confirmed') is not True:
+        return _trade_api_error('Final confirmation is required before live placement.', 400)
+
+    preview_token = str(data.get('preview_token') or data.get('previewToken') or data.get('order_hash') or '').strip()
+    preview_record, preview_error = _get_successful_trade_preview(preview_token)
+    if preview_error:
+        return _trade_api_error(preview_error, 400)
+
+    account_hash = str(data.get('account_hash') or data.get('accountHash') or '').strip()
+    ticker = format_ticker(data.get('ticker') or '')
+    contract_symbol = str(data.get('contract_symbol') or data.get('contractSymbol') or '').strip()
+    instruction = str(data.get('instruction') or data.get('action') or '').upper()
+
+    if not account_hash:
+        return _trade_api_error('Missing account hash.', 400)
+    if not ticker:
+        return _trade_api_error('Missing ticker.', 400)
+
+    contract = _find_cached_trade_contract(ticker, contract_symbol)
+    if not contract:
+        return _trade_api_error('Selected contract is not in the latest cached trading chain.', 400)
+
+    try:
+        quantity = _parse_trade_quantity(data.get('quantity'))
+        limit_price = _parse_limit_price(data.get('limit_price') if 'limit_price' in data else data.get('limitPrice'))
+        order = build_single_option_limit_order(contract_symbol, instruction, quantity, limit_price)
+    except ValueError as e:
+        return _trade_api_error(str(e), 400)
+
+    expected = {
+        'account_hash': preview_record.get('account_hash'),
+        'ticker': preview_record.get('ticker'),
+        'contract_symbol': preview_record.get('contract_symbol'),
+        'instruction': preview_record.get('instruction'),
+        'quantity': int(preview_record.get('quantity') or 0),
+        'limit_price': preview_record.get('limit_price'),
+    }
+    actual = {
+        'account_hash': account_hash,
+        'ticker': ticker,
+        'contract_symbol': contract_symbol,
+        'instruction': instruction,
+        'quantity': int(quantity),
+        'limit_price': f'{limit_price:.2f}',
+    }
+    changed = [key for key, expected_value in expected.items() if actual.get(key) != expected_value]
+    if changed:
+        return _trade_api_error('Order fields changed after preview. Preview the order again.', 400, ', '.join(changed))
+
+    if _order_preview_fingerprint(account_hash, ticker, order) != preview_token:
+        return _trade_api_error('Preview token does not match this order. Preview the order again.', 400)
+
+    preview_order = preview_record.get('order')
+    if order != preview_order:
+        return _trade_api_error('Order JSON changed after preview. Preview the order again.', 400)
+
+    requested_order = data.get('order')
+    if requested_order is not None and requested_order != preview_order:
+        return _trade_api_error('Submitted order JSON does not match the previewed order.', 400)
+
+    try:
+        response = client.place_order(account_hash, preview_order)
+    except Exception as e:
+        return _trade_api_error('Schwab order placement failed.', 502, e)
+
+    status_code = getattr(response, 'status_code', None)
+    schwab_ok = bool(getattr(response, 'ok', False)) or status_code in (200, 201)
+    response_body = _redact_trade_payload(_safe_response_json(response))
+    location = _trade_order_location(response)
+    result = {
+        'ok': schwab_ok,
+        'placed': schwab_ok,
+        'order_hash': preview_token,
+        'schwab_status': status_code,
+        'location': location,
+        'contract_symbol': contract_symbol,
+        'ticker': ticker,
+        'instruction': instruction,
+        'quantity': int(quantity),
+        'limit_price': f'{limit_price:.2f}',
+        'schwab_response': response_body,
+        'warnings': [],
+    }
+    if not schwab_ok:
+        result['warnings'].append(f"Schwab placement returned status {status_code or 'unknown'}.")
         return jsonify(result), 502
     return jsonify(result)
 

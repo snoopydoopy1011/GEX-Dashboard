@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Stage 4 complete / Stage 5 next
+**Status:** Stage 5 complete / Stage 6 next
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -145,6 +145,36 @@ Verification completed:
 - `git diff --check` passed.
 - Flask test-client smoke tests for `/trade/preview_order` confirmed missing account rejection, missing/unknown contract rejection, invalid quantity/price/action rejection, expected Schwab preview payload for `BUY_TO_OPEN`, `SELL_TO_CLOSE` position validation, and account-number redaction.
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+
+### 2026-05-01 Stage 5 Progress Update
+
+Stage 5 is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Added guarded live single-leg placement via `POST /trade/place_order`.
+- Kept live placement behind `ENABLE_LIVE_TRADING=1`; without the flag, placement returns a hard rejection and never calls Schwab.
+- Added an in-memory successful-preview record store with a short TTL so placement requires a recent successful Schwab preview.
+- Bound placement to the exact previewed account hash, ticker, contract symbol, action, quantity, limit price, preview token/order hash, and order JSON.
+- Required explicit frontend final confirmation before posting a live placement request.
+- Handled Schwab `place_order(accountHash, order)` responses, including `201 Created` with a `Location` header and no JSON body.
+- Returned safe placement metadata only: status, location, token hash, ticker, contract symbol, instruction, quantity, limit price, and redacted Schwab response body.
+- Added clear trading rail success/error state plus a disabled-until-preview `Place Live Order` button.
+- Preserved the directional quick-fill workflow: `BUY_TO_OPEN` fills ask and `SELL_TO_CLOSE` fills bid.
+
+Tricky parts / implementation notes:
+
+- Stage 4's preview token was deterministic, so Stage 5 adds server-side memory for successful previews. A token alone is not enough to prove Schwab accepted a preview recently.
+- The place endpoint rebuilds the order from current request fields, compares it to the saved preview order, and also rejects a submitted `order` JSON body if it differs from preview.
+- The endpoint remains registered so the UI and tests receive a clear feature-flag rejection, but it is inert unless `ENABLE_LIVE_TRADING=1`.
+- This stage still does not add cancel/replace, order lists, spread tickets, bracket orders, alert-triggered trading, chart-click trading, or any analytical formula changes.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+- Flask test-client smoke tests for `/trade/place_order` confirmed feature-flag rejection, missing preview-token rejection, stale preview rejection, changed account/contract/action/quantity/price rejection, changed order JSON rejection, missing final confirmation rejection, exact previewed-order placement, `201 Created` plus `Location` handling, and no plain account-number exposure.
 
 ---
 
@@ -1148,10 +1178,10 @@ Stage 4:
 
 Stage 5:
 
-- [ ] Add env-gated place endpoint.
-- [ ] Bind place to preview token/order hash.
-- [ ] Add final confirmation.
-- [ ] Handle Schwab response status/header.
+- [x] Add env-gated place endpoint.
+- [x] Bind place to preview token/order hash.
+- [x] Add final confirmation.
+- [x] Handle Schwab response status/header.
 
 Stage 6:
 
