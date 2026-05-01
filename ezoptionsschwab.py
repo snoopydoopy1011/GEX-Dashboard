@@ -13653,6 +13653,13 @@ def index():
                             <input type="number" id="tpo_bin_size" min="0.01" max="10" value="0.25" step="0.01" style="width: 72px;">
                         </div>
                         <div class="control-group">
+                            <label for="fixed_tpo_side">Fixed TPO Side:</label>
+                            <select id="fixed_tpo_side">
+                                <option value="right" selected>Right</option>
+                                <option value="left">Left</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
                             <label for="tpo_mode">TPO Sessions:</label>
                             <select id="tpo_mode">
                                 <option value="session" selected>Current Session</option>
@@ -16248,7 +16255,7 @@ def index():
         });
         syncVolumeProfileSettingsVisibility();
         syncTpoProfileSettingsVisibility();
-        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_show_level_labels', 'tpo_show_summary', 'tpo_show_initial_balance', 'tpo_initial_balance_minutes', 'tpo_color', 'tpo_opacity', 'vp_level_line_style', 'vp_level_line_width', 'tpo_level_line_style', 'tpo_level_line_width'].forEach(id => {
+        ['vp_enabled', 'vp_mode', 'vp_days', 'vp_start_date', 'vp_end_date', 'vp_color', 'vp_bin_size', 'fixed_vp_side', 'vp_method', 'tpo_enabled', 'tpo_bin_size', 'fixed_tpo_side', 'tpo_mode', 'tpo_days', 'tpo_start_date', 'tpo_end_date', 'tpo_bars_back', 'tpo_anchor_datetime', 'tpo_block_minutes', 'tpo_value_area_pct', 'tpo_show_single_prints', 'tpo_single_print_boxes', 'tpo_compact_labels', 'tpo_show_level_labels', 'tpo_show_summary', 'tpo_show_initial_balance', 'tpo_initial_balance_minutes', 'tpo_color', 'tpo_opacity', 'vp_level_line_style', 'vp_level_line_width', 'tpo_level_line_style', 'tpo_level_line_width'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             el.addEventListener('input', () => {
@@ -20212,6 +20219,7 @@ def index():
 
         function getTpoProfileSettingsFromDom() {
             const binEl = document.getElementById('tpo_bin_size');
+            const sideEl = document.getElementById('fixed_tpo_side');
             const modeEl = document.getElementById('tpo_mode');
             const daysEl = document.getElementById('tpo_days');
             const startEl = document.getElementById('tpo_start_date');
@@ -20235,6 +20243,7 @@ def index():
             return {
                 enabled: !!(document.getElementById('tpo_enabled') && document.getElementById('tpo_enabled').checked),
                 bin_size: binEl ? Math.max(0.01, Math.min(10, parseFloat(binEl.value) || 0.25)) : 0.25,
+                fixed_tpo_side: sideEl && sideEl.value === 'left' ? 'left' : 'right',
                 mode: modeEl ? modeEl.value : 'session',
                 days: daysEl ? Math.max(1, Math.min(20, parseInt(daysEl.value) || 3)) : 3,
                 start_date: startEl ? String(startEl.value || '') : '',
@@ -21047,7 +21056,7 @@ def index():
                 const group = createSvgEl('g', {});
                 const boxX = Math.min(screen.x1, screen.x2);
                 const boxRight = Math.max(screen.x1, screen.x2);
-                const profileSide = def.profileSide || (isTpoDrawing ? 'right' : (vpSettings.fixed_vp_side || 'right'));
+                const profileSide = def.profileSide || (isTpoDrawing ? (tpoSettings.fixed_tpo_side || 'right') : (vpSettings.fixed_vp_side || 'right'));
                 const profileMaxWidth = Math.max(36, Math.min(130, Math.abs(screen.x2 - screen.x1) * 0.72));
                 let tpoLineX1 = boxX;
                 let tpoLineX2 = boxRight;
@@ -22079,6 +22088,7 @@ def index():
                         blockMinutes: tpoSettings.block_minutes,
                         valueAreaPct: tpoSettings.value_area_pct,
                         showSinglePrints: tpoSettings.show_single_prints,
+                        profileSide: tpoSettings.fixed_tpo_side,
                         label: 'TPO Range',
                     });
                 } else if (tvDrawMode === 'rect' && drawPoints.length === 1) {
@@ -22559,6 +22569,7 @@ def index():
                     showSinglePrints: tpoSettings.show_single_prints,
                     showInitialBalance: !!tpoSettings.show_initial_balance,
                     initialBalanceMinutes: tpoSettings.initial_balance_minutes || 60,
+                    profileSide: tpoSettings.fixed_tpo_side,
                     label: 'Anchored TPO',
                 });
                 return;
@@ -22633,6 +22644,7 @@ def index():
                             showSinglePrints: tpoSettings.show_single_prints,
                             showInitialBalance: !!tpoSettings.show_initial_balance,
                             initialBalanceMinutes: tpoSettings.initial_balance_minutes || 60,
+                            profileSide: tpoSettings.fixed_tpo_side,
                             label: 'TPO Range',
                         });
                     }
@@ -27728,6 +27740,7 @@ def index():
                 const tpo = settings.tpo_profile;
                 if (document.getElementById('tpo_enabled')) document.getElementById('tpo_enabled').checked = !!tpo.enabled;
                 if (document.getElementById('tpo_bin_size')) document.getElementById('tpo_bin_size').value = tpo.bin_size || 0.25;
+                if (document.getElementById('fixed_tpo_side')) document.getElementById('fixed_tpo_side').value = tpo.fixed_tpo_side === 'left' ? 'left' : 'right';
                 if (document.getElementById('tpo_mode')) document.getElementById('tpo_mode').value = ['session', 'days', 'custom', 'bars_back', 'anchor'].includes(tpo.mode) ? tpo.mode : 'session';
                 if (document.getElementById('tpo_days')) document.getElementById('tpo_days').value = tpo.days || 3;
                 if (document.getElementById('tpo_start_date')) document.getElementById('tpo_start_date').value = tpo.start_date || '';
