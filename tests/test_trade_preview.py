@@ -47,6 +47,22 @@ class MockPreviewClient:
             }
         }
 
+    def linked_accounts(self):
+        return MockResponse([
+            {
+                'hashValue': 'HASH123',
+                'accountNumber': '123456789',
+                'displayName': 'Primary 123456789',
+                'type': 'MARGIN',
+            },
+            {
+                'hashValue': 'HASH456',
+                'maskedAccountNumber': 'IRA ****6789',
+                'displayName': 'IRA 987654321',
+                'type': 'CASH',
+            },
+        ])
+
     def preview_order(self, account_hash, order):
         self.preview_calls.append((account_hash, order))
         return MockResponse({'status': 'ACCEPTED', 'accountNumber': '123456789'})
@@ -77,6 +93,24 @@ class MockPreviewClient:
                         'quantity': 2,
                         'instrument': {
                             'symbol': 'SPY   260501C00722000',
+                            'assetType': 'OPTION',
+                            'underlyingSymbol': 'SPY',
+                        },
+                    }
+                ],
+            },
+            {
+                'orderId': 333,
+                'status': 'WORKING',
+                'enteredTime': '2026-05-01T14:45:00Z',
+                'orderType': 'LIMIT',
+                'price': 0.41,
+                'orderLegCollection': [
+                    {
+                        'instruction': 'BUY_TO_OPEN',
+                        'quantity': 1,
+                        'instrument': {
+                            'symbol': 'SPY   260501C00723000',
                             'assetType': 'OPTION',
                             'underlyingSymbol': 'SPY',
                         },
@@ -346,6 +380,40 @@ class TradePlaceOrderEndpointTest(unittest.TestCase):
         self.assertIn('/orders/987654321', data['location'])
         self.assertEqual(ezoptionsschwab.client.place_calls, [('HASH123', preview['order'])])
 
+    def test_successful_placement_consumes_preview_token(self):
+        preview = self.post_preview().get_json()
+        payload = self.place_payload_from_preview(preview)
+        with patch.dict(os.environ, {'ENABLE_LIVE_TRADING': '1'}):
+            response = self.post_place(payload)
+            replay = self.post_place(payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(replay.status_code, 400)
+        self.assertIn('successful preview', replay.get_json()['error'].lower())
+        self.assertEqual(ezoptionsschwab.client.place_calls, [('HASH123', preview['order'])])
+
+    def test_sell_to_close_rechecks_position_before_live_placement(self):
+        preview = self.post_preview(instruction='SELL_TO_CLOSE', quantity=3).get_json()
+        ezoptionsschwab.client.positions_payload = {
+            'securitiesAccount': {
+                'positions': [
+                    {
+                        'longQuantity': 1,
+                        'shortQuantity': 0,
+                        'instrument': {
+                            'symbol': 'SPY   260501C00722000',
+                            'assetType': 'OPTION',
+                            'underlyingSymbol': 'SPY',
+                        },
+                    }
+                ]
+            }
+        }
+        with patch.dict(os.environ, {'ENABLE_LIVE_TRADING': '1'}):
+            response = self.post_place(self.place_payload_from_preview(preview))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('long position', response.get_json()['error'])
+        self.assertEqual(ezoptionsschwab.client.place_calls, [])
+
     def test_place_response_does_not_expose_plain_account_numbers(self):
         preview = self.post_preview().get_json()
         with patch.dict(os.environ, {'ENABLE_LIVE_TRADING': '1'}):
@@ -399,6 +467,24 @@ class TradeOrderManagementEndpointTest(unittest.TestCase):
         self.assertEqual(data['orders'][0]['order_id'], '111')
         self.assertEqual(data['orders'][0]['legs'][0]['symbol'], 'SPY   260501C00722000')
         self.assertEqual(ezoptionsschwab.client.order_calls[0][0], 'HASH123')
+
+    def test_selected_contract_filtering_excludes_other_same_underlying_orders(self):
+        response = self.post_orders(contract_symbol='SPY   260501C00723000')
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(len(data['orders']), 1)
+        self.assertEqual(data['orders'][0]['order_id'], '333')
+        self.assertEqual(data['orders'][0]['legs'][0]['symbol'], 'SPY   260501C00723000')
+
+    def test_linked_accounts_do_not_expose_plain_account_numbers_in_labels(self):
+        response = self.app.get('/trade/accounts')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        data = response.get_json()
+        self.assertNotIn('123456789', body)
+        self.assertNotIn('987654321', body)
+        self.assertEqual(data['accounts'][0]['display_label'], 'Account *6789')
+        self.assertEqual(data['accounts'][1]['display_label'], 'IRA ****6789')
 
     def test_cancel_requires_explicit_confirmation(self):
         response = self.app.post('/trade/cancel_order', json={

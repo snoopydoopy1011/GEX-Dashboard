@@ -4671,6 +4671,19 @@ def _mask_account_tail(value):
     return text[-4:].rjust(min(4, len(text)), '*')
 
 
+def _safe_account_display_label(row, idx):
+    raw_number = row.get('accountNumber') or row.get('account_number')
+    masked = row.get('maskedAccountNumber') or row.get('masked_account_number')
+    if masked:
+        return str(masked)
+    if raw_number:
+        return f"Account *{_mask_account_tail(raw_number)}"
+    display = row.get('displayName') or row.get('display_name')
+    if display:
+        return str(display)
+    return f"Schwab account {idx}"
+
+
 def _normalize_linked_accounts(raw_accounts):
     if isinstance(raw_accounts, dict):
         if isinstance(raw_accounts.get('accounts'), list):
@@ -4689,16 +4702,10 @@ def _normalize_linked_accounts(raw_accounts):
         account_hash = row.get('hashValue') or row.get('accountHash') or row.get('account_hash')
         if not account_hash:
             continue
-        raw_number = row.get('accountNumber') or row.get('account_number')
-        masked = row.get('displayName') or row.get('maskedAccountNumber') or row.get('masked_account_number')
-        if not masked and raw_number:
-            masked = f"Account *{_mask_account_tail(raw_number)}"
-        if not masked:
-            masked = f"Schwab account {idx}"
         account_type = row.get('type') or row.get('accountType') or row.get('account_type')
         accounts.append({
             'account_hash': str(account_hash),
-            'display_label': str(masked),
+            'display_label': _safe_account_display_label(row, idx),
             'account_type': str(account_type) if account_type else None,
         })
     return accounts
@@ -4935,6 +4942,21 @@ def _get_successful_trade_preview(preview_token):
     return record, None
 
 
+def _consume_successful_trade_preview(preview_token):
+    token = str(preview_token or '').strip()
+    if not token:
+        return None, 'Missing preview token.'
+    with _trade_preview_lock:
+        record = copy.deepcopy(_trade_preview_records.get(token))
+        if not record:
+            return None, 'Missing successful preview. Preview the order again.'
+        if time.time() - float(record.get('created_at') or 0) > TRADE_PREVIEW_TTL_SECONDS:
+            _trade_preview_records.pop(token, None)
+            return None, 'Preview is stale. Preview the order again.'
+        _trade_preview_records.pop(token, None)
+    return record, None
+
+
 def _trade_order_location(response):
     headers = getattr(response, 'headers', None)
     if not headers:
@@ -4997,8 +5019,16 @@ def _trade_order_matches_selection(order, ticker=None, contract_symbol=None):
         return True
     for leg in _trade_order_leg_summary(order):
         symbol = str(leg.get('symbol') or '').strip()
-        if contract_symbol and symbol == contract_symbol:
-            return True
+        if contract_symbol:
+            if symbol:
+                if symbol == contract_symbol:
+                    return True
+                continue
+            if ticker:
+                underlying = str(leg.get('underlying') or '').upper()
+                if underlying == ticker:
+                    return True
+            continue
         if ticker:
             underlying = str(leg.get('underlying') or '').upper()
             if underlying == ticker:
@@ -31633,6 +31663,27 @@ def trade_place_order():
     requested_order = data.get('order')
     if requested_order is not None and requested_order != preview_order:
         return _trade_api_error('Submitted order JSON does not match the previewed order.', 400)
+
+    if instruction == 'SELL_TO_CLOSE':
+        try:
+            details_response = client.account_details(account_hash, fields='positions')
+        except Exception as e:
+            return _trade_api_error('Position check failed before placement.', 502, e)
+        if not getattr(details_response, 'ok', False):
+            return _trade_api_error(
+                f"Position check failed with Schwab status {getattr(details_response, 'status_code', 'unknown')}.",
+                502,
+                getattr(details_response, 'reason', None),
+            )
+        available_qty = _selected_contract_position_quantity(_safe_response_json(details_response) or {}, contract_symbol)
+        if available_qty < quantity:
+            return _trade_api_error('SELL_TO_CLOSE quantity exceeds the selected-contract long position. Preview again.', 400)
+
+    consumed_record, consume_error = _consume_successful_trade_preview(preview_token)
+    if consume_error:
+        return _trade_api_error(consume_error, 400)
+    if consumed_record.get('order') != preview_order:
+        return _trade_api_error('Preview record changed. Preview the order again.', 400)
 
     try:
         response = client.place_order(account_hash, preview_order)
