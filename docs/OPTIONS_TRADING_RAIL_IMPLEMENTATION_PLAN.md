@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Draft / planning only  
+**Status:** Stage 1 complete / Stage 2 next
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -23,6 +23,45 @@ Current dashboard rails:
 The trading rail should use the existing dashboard option-chain data as much as possible. The app already fetches Schwab options chains for analytics, including contract symbols, bid/ask/mark/last, volume, OI, IV, Greeks, expiry, and strike.
 
 **Do not start by placing live orders.** The implementation should progress from read-only contract selection to Schwab preview order responses to live placement only after explicit confirmation.
+
+### 2026-05-01 Progress Update
+
+Stage 1 is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Added a fourth `.chart-grid` column for a dedicated trading rail using `--trade-rail-w`.
+- Added initial read-only trading rail DOM in the server-rendered HTML:
+  - `#trade-rail-header`
+  - `#trade-rail-collapse-toggle`
+  - `#trade-rail-resize-handle`
+  - `#trade-rail`
+- Added a dense placeholder rail shell for contract picker, selected contract, order ticket, and disabled preview state.
+- Added independent localStorage-backed collapse and resize state:
+  - `gex.tradeRailCollapsed`
+  - `gex.tradeRailWidthPx`
+- Mirrored the new rail in the `ensurePriceChartDom()` rebuild path with `buildTradeRailHtml()` and `ensureTradeRailDom()`.
+- Updated `showPriceChartUI()` so ticker/timeframe refresh paths do not leave trade rail elements hidden.
+- Kept the rail collapsed by default.
+- Added responsive placement so the trade rail stacks below the analytics rail on narrow screens.
+- Did not add account, order preview, order placement, or live trading endpoints.
+
+Tricky parts / implementation notes:
+
+- `ensurePriceChartDom()` is a defensive rebuild path. Any trade rail element that exists in initial HTML also had to be recreated there or future chart rebuilds could drop the rail.
+- The analytics rail collapse button is absolutely positioned. Its `right` offset now accounts for `--trade-rail-w` so it remains reachable when both rails are open.
+- Existing strike rail and analytics rail width clamps needed to subtract `--trade-rail-w`; otherwise resizing one rail could squeeze the chart more than intended.
+- Port `5001` was briefly restarted for verification, then released so local terminal workflows can own it again.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- Local HTTP smoke test confirmed the page served the new trade rail markup and default collapsed state.
+
+Next:
+
+- Stage 2 should add a structured cached-chain payload helper and read-only contract picker UI. Preserve Schwab-returned `contractSymbol` exactly.
 
 ---
 
@@ -985,21 +1024,21 @@ Do not squash while the feature is being reviewed. The safety progression should
 
 Before Stage 1:
 
-- [ ] Confirm branch and worktree state.
-- [ ] Read this plan.
+- [x] Confirm branch and worktree state.
+- [x] Read this plan.
 - [ ] Read `docs/UI_MODERNIZATION_PLAN.md` sections on layout/tokens.
-- [ ] Read current right rail anchors in `ezoptionsschwab.py`.
-- [ ] Decide whether trade rail starts collapsed by default.
+- [x] Read current right rail anchors in `ezoptionsschwab.py`.
+- [x] Decide whether trade rail starts collapsed by default.
 
 Stage 1:
 
-- [ ] Add fourth grid column.
-- [ ] Add trade rail shell markup.
-- [ ] Add collapse state.
-- [ ] Add resize state.
-- [ ] Mirror DOM in `ensurePriceChartDom()`.
-- [ ] Update `showPriceChartUI()`.
-- [ ] Test existing rails.
+- [x] Add fourth grid column.
+- [x] Add trade rail shell markup.
+- [x] Add collapse state.
+- [x] Add resize state.
+- [x] Mirror DOM in `ensurePriceChartDom()`.
+- [x] Update `showPriceChartUI()`.
+- [x] Test existing rails.
 
 Stage 2:
 
@@ -1049,4 +1088,3 @@ Stage 6:
 - No changes to GEX/DEX/Vanna/Charm/Flow formulas.
 - No migration to a JS framework.
 - No splitting `ezoptionsschwab.py` into modules.
-

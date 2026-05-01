@@ -9369,12 +9369,13 @@ def index():
         .chart-grid {
             --gex-col-w: 352px;
             --rail-col-w: clamp(360px, 24vw, 430px);
+            --trade-rail-w: clamp(360px, 24vw, 460px);
             --workspace-top-reclaim: 36px;
             --workspace-flow-reclaim: 96px;
             --workspace-pane-h: clamp(900px, calc(84vh + var(--workspace-top-reclaim) + var(--workspace-flow-reclaim)), 1120px);
             position: relative;
             display: grid;
-            grid-template-columns: minmax(0, 1fr) var(--gex-col-w) var(--rail-col-w);
+            grid-template-columns: minmax(0, 1fr) var(--gex-col-w) var(--rail-col-w) var(--trade-rail-w);
             grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto auto;
             column-gap: 2px;
             row-gap: 4px;
@@ -9384,19 +9385,27 @@ def index():
         .chart-grid.gex-collapsed { --gex-col-w: 0px; }
         .chart-grid.rail-flow-active { --rail-col-w: clamp(440px, 32vw, 560px); }
         .chart-grid.rail-collapsed { --rail-col-w: 0px !important; }
+        .chart-grid.trade-rail-collapsed { --trade-rail-w: 0px !important; }
         .chart-grid.rail-collapsed > .right-rail-tabs,
         .chart-grid.rail-collapsed > .right-rail-panels,
         .chart-grid.rail-collapsed > .right-rail-resize-handle {
             display: none;
         }
-        /* Row 1: workspace toolbar shell (col 1) + GEX column header (col 2) + rail tabs (col 3). */
+        .chart-grid.trade-rail-collapsed > .trade-rail-header,
+        .chart-grid.trade-rail-collapsed > .trade-rail,
+        .chart-grid.trade-rail-collapsed > .trade-rail-resize-handle {
+            display: none;
+        }
+        /* Row 1: workspace toolbar shell (col 1) + GEX column header (col 2) + rail tabs (col 3) + trading header (col 4). */
         .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
         .chart-grid > .gex-col-header       { grid-column: 2; grid-row: 1; }
         .chart-grid > .right-rail-tabs      { grid-column: 3; grid-row: 1; }
-        /* Row 2: price chart (col 1) + GEX column (col 2) + rail panels (col 3). */
+        .chart-grid > .trade-rail-header    { grid-column: 4; grid-row: 1; }
+        /* Row 2: price chart (col 1) + GEX column (col 2) + rail panels (col 3) + trading rail (col 4). */
         .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
         .chart-grid > .gex-column            { grid-column: 2; grid-row: 2; }
         .chart-grid > .right-rail-panels     { grid-column: 3; grid-row: 2; }
+        .chart-grid > .trade-rail            { grid-column: 4; grid-row: 2; }
         .chart-grid > .right-rail-resize-handle {
             grid-column: 3;
             grid-row: 1 / span 2;
@@ -9437,10 +9446,50 @@ def index():
             color: var(--fg-0);
             border-color: var(--accent);
         }
+        .chart-grid > .trade-rail-resize-handle {
+            grid-column: 4;
+            grid-row: 1 / span 2;
+            justify-self: start;
+            align-self: stretch;
+            width: 12px;
+            margin-left: -6px;
+            cursor: ew-resize;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+            touch-action: none;
+        }
+        .trade-rail-resize-handle::before {
+            content: '↔';
+            width: 18px;
+            height: 54px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: rgba(21, 26, 33, 0.92);
+            border: 1px solid var(--border);
+            color: var(--fg-2);
+            font-size: 11px;
+            line-height: 1;
+            opacity: 0;
+            transform: scale(0.96);
+            transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+            pointer-events: none;
+        }
+        .trade-rail-resize-handle:hover::before,
+        .trade-rail-resize-handle.dragging::before {
+            opacity: 1;
+            transform: scale(1);
+            color: var(--fg-0);
+            border-color: var(--accent);
+        }
         .right-rail-collapse-toggle {
             position: absolute;
             top: 8px;
-            right: 6px;
+            right: calc(var(--trade-rail-w) + 8px);
             z-index: 12;
             background: transparent;
             color: var(--fg-1);
@@ -9452,6 +9501,24 @@ def index():
             border-radius: 4px;
         }
         .right-rail-collapse-toggle:hover {
+            color: var(--fg-0);
+            background: var(--bg-2);
+        }
+        .trade-rail-collapse-toggle {
+            position: absolute;
+            top: 8px;
+            right: 6px;
+            z-index: 13;
+            background: transparent;
+            color: var(--fg-1);
+            border: none;
+            padding: 2px 6px;
+            font-size: 12px;
+            line-height: 1;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .trade-rail-collapse-toggle:hover {
             color: var(--fg-0);
             background: var(--bg-2);
         }
@@ -9507,6 +9574,11 @@ def index():
         }
         body.right-rail-resize-active,
         body.right-rail-resize-active * {
+            cursor: ew-resize !important;
+            user-select: none !important;
+        }
+        body.trade-rail-resize-active,
+        body.trade-rail-resize-active * {
             cursor: ew-resize !important;
             user-select: none !important;
         }
@@ -9751,6 +9823,179 @@ def index():
             vertical-align: middle;
         }
         .right-rail-tab .tab-badge.visible { display: inline-block; }
+
+        /* ── Trading rail shell ───────────────────────────────────────── */
+        .trade-rail-header {
+            min-height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            background: #1a1a1a;
+            border-bottom: 1px solid var(--bg-2);
+            border-radius: 10px 10px 0 0;
+            padding: 0 30px 0 10px;
+            min-width: 0;
+        }
+        .trade-rail-title {
+            color: var(--fg-0);
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .trade-rail-badge {
+            flex: 0 0 auto;
+            padding: 2px 7px;
+            border: 1px solid color-mix(in srgb, var(--info) 45%, var(--border));
+            border-radius: 999px;
+            color: var(--info);
+            background: color-mix(in srgb, var(--info) 9%, transparent);
+            font-size: 10px;
+            line-height: 1.2;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .trade-rail {
+            height: var(--workspace-pane-h);
+            min-width: 0;
+            overflow: hidden;
+            background: var(--bg-0);
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid var(--border);
+            container-type: inline-size;
+        }
+        .trade-rail-shell {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 8px;
+            overflow-y: auto;
+        }
+        .trade-panel {
+            border: 1px solid var(--border);
+            background: var(--bg-1);
+            border-radius: var(--radius);
+            padding: 10px;
+            min-width: 0;
+        }
+        .trade-panel-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .trade-panel-title {
+            color: var(--fg-0);
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .trade-panel-note,
+        .trade-field-label,
+        .trade-empty {
+            color: var(--fg-2);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .trade-segment {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px;
+            margin-bottom: 8px;
+        }
+        .trade-segment button,
+        .trade-price-preset {
+            min-height: 28px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            color: var(--fg-1);
+            border-radius: 6px;
+            font-size: 11px;
+            cursor: default;
+        }
+        .trade-segment button.active.call {
+            color: var(--call);
+            border-color: color-mix(in srgb, var(--call) 45%, var(--border));
+            background: color-mix(in srgb, var(--call) 8%, transparent);
+        }
+        .trade-segment button.put {
+            color: var(--put);
+            border-color: color-mix(in srgb, var(--put) 24%, var(--border));
+        }
+        .trade-chain-placeholder {
+            display: grid;
+            grid-template-columns: 0.65fr repeat(4, 1fr);
+            gap: 4px;
+            align-items: center;
+        }
+        .trade-chain-placeholder span {
+            min-height: 24px;
+            border-radius: 4px;
+            background: var(--bg-0);
+            border: 1px solid var(--border);
+            color: var(--fg-2);
+            font-size: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .trade-selected-symbol {
+            color: var(--fg-0);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+            font-size: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .trade-ticket-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .trade-field {
+            min-width: 0;
+        }
+        .trade-field-value {
+            min-height: 30px;
+            margin-top: 4px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            border-radius: 6px;
+            color: var(--fg-1);
+            display: flex;
+            align-items: center;
+            padding: 0 8px;
+            font-size: 12px;
+        }
+        .trade-price-presets {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 4px;
+            margin-top: 8px;
+        }
+        .trade-preview-button {
+            width: 100%;
+            min-height: 34px;
+            border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+            background: color-mix(in srgb, var(--accent) 10%, var(--bg-0));
+            color: var(--fg-0);
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
 
         .rail-flow-shell {
             display: flex;
@@ -13114,13 +13359,16 @@ def index():
             .chart-grid {
                 --workspace-top-reclaim: 28px;
                 --workspace-flow-reclaim: 64px;
-                grid-template-columns: minmax(0, 1fr) var(--rail-col-w);
+                grid-template-columns: minmax(0, 1fr) var(--rail-col-w) var(--trade-rail-w);
                 grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px auto auto;
             }
             .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
             .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
+            .chart-grid > .trade-rail-header    { grid-column: 3; grid-row: 1; }
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
             .chart-grid > .right-rail-panels     { grid-column: 2; grid-row: 2; }
+            .chart-grid > .trade-rail            { grid-column: 3; grid-row: 2; }
+            .chart-grid > .trade-rail-resize-handle { grid-column: 3; grid-row: 1 / span 2; }
             .chart-grid > .flow-event-lane       { grid-column: 1 / -1; grid-row: 3; }
             .chart-grid > .gex-col-header        { grid-column: 1; grid-row: 4; }
             .chart-grid > .gex-column            { grid-column: 1; grid-row: 5; height: 420px; }
@@ -13139,7 +13387,7 @@ def index():
                 --workspace-top-reclaim: 0px;
                 --workspace-flow-reclaim: 0px;
                 grid-template-columns: 1fr;
-                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
             }
             .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
@@ -13148,11 +13396,18 @@ def index():
             .chart-grid > .gex-column { grid-column: 1; grid-row: 5; }
             .chart-grid > .right-rail-tabs { grid-column: 1; grid-row: 6; }
             .chart-grid > .right-rail-panels { grid-column: 1; grid-row: 7; }
-            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 8; }
-            .chart-grid > .charts-grid { grid-column: 1; grid-row: 9; }
-            .chart-grid > .gex-resize-handle { display: none; }
+            .chart-grid > .trade-rail-header { grid-column: 1; grid-row: 8; }
+            .chart-grid > .trade-rail { grid-column: 1; grid-row: 9; }
+            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 10; }
+            .chart-grid > .charts-grid { grid-column: 1; grid-row: 11; }
+            .chart-grid > .gex-resize-handle,
+            .chart-grid > .right-rail-resize-handle,
+            .chart-grid > .trade-rail-resize-handle { display: none; }
+            .right-rail-collapse-toggle,
+            .trade-rail-collapse-toggle { right: 6px; }
             .gex-column { height: 420px; }
             .right-rail-panels { height: 420px; }
+            .trade-rail { height: 420px; }
         }
         @media screen and (max-width: 1280px) {
             .flow-event-lane {
@@ -13976,7 +14231,7 @@ def index():
             </div>
         </dialog>
         
-        <div class="chart-grid" id="chart-grid">
+        <div class="chart-grid trade-rail-collapsed" id="chart-grid">
             <div class="workspace-toolbar-shell" id="workspace-toolbar-shell">
                 <button id="drawerToggle" class="btn-icon workspace-drawer-toggle" title="Open settings drawer" aria-label="Open settings">&#9776;</button>
                 <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
@@ -13997,6 +14252,12 @@ def index():
             </div>
             <button type="button" class="right-rail-collapse-toggle" id="right-rail-collapse-toggle" title="Collapse right rail" aria-label="Collapse right rail">›</button>
             <div class="right-rail-resize-handle" id="right-rail-resize-handle" role="separator" aria-label="Resize right rail" aria-orientation="vertical"></div>
+            <div class="trade-rail-header" id="trade-rail-header">
+                <div class="trade-rail-title">Order Entry</div>
+                <div class="trade-rail-badge">Preview Only</div>
+            </div>
+            <button type="button" class="trade-rail-collapse-toggle" id="trade-rail-collapse-toggle" title="Collapse trading rail" aria-label="Collapse trading rail">›</button>
+            <div class="trade-rail-resize-handle" id="trade-rail-resize-handle" role="separator" aria-label="Resize trading rail" aria-orientation="vertical"></div>
             <div class="price-chart-container">
                 <div class="chart-container" id="price-chart"></div>
                 <div class="tv-sub-pane" id="rsi-pane" style="display:none">
@@ -14267,6 +14528,68 @@ def index():
                     </div>
                 </div>
             </div>
+            <aside class="trade-rail" id="trade-rail" aria-label="Options trading rail">
+                <div class="trade-rail-shell">
+                    <section class="trade-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Contract Picker</div>
+                            <div class="trade-panel-note">SPY first</div>
+                        </div>
+                        <div class="trade-segment" aria-label="Option type">
+                            <button type="button" class="active call" disabled>Calls</button>
+                            <button type="button" class="put" disabled>Puts</button>
+                        </div>
+                        <div class="trade-chain-placeholder" aria-hidden="true">
+                            <span>Strike</span><span>Bid</span><span>Ask</span><span>Mid</span><span>Vol</span>
+                            <span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>
+                            <span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>
+                        </div>
+                        <div class="trade-empty">Contracts will load from the cached option chain in the next stage.</div>
+                    </section>
+                    <section class="trade-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Selected Contract</div>
+                            <div class="trade-panel-note">No selection</div>
+                        </div>
+                        <div class="trade-selected-symbol">—</div>
+                        <div class="trade-empty">Exact Schwab contract symbols will be shown here before any preview flow is enabled.</div>
+                    </section>
+                    <section class="trade-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Order Ticket</div>
+                            <div class="trade-panel-note">Read only</div>
+                        </div>
+                        <div class="trade-ticket-grid">
+                            <div class="trade-field">
+                                <div class="trade-field-label">Action</div>
+                                <div class="trade-field-value">Buy to Open</div>
+                            </div>
+                            <div class="trade-field">
+                                <div class="trade-field-label">Quantity</div>
+                                <div class="trade-field-value">1</div>
+                            </div>
+                            <div class="trade-field">
+                                <div class="trade-field-label">Limit</div>
+                                <div class="trade-field-value">—</div>
+                            </div>
+                            <div class="trade-field">
+                                <div class="trade-field-label">Est. Risk</div>
+                                <div class="trade-field-value">—</div>
+                            </div>
+                        </div>
+                        <div class="trade-price-presets">
+                            <button type="button" class="trade-price-preset" disabled>Bid</button>
+                            <button type="button" class="trade-price-preset" disabled>Mid</button>
+                            <button type="button" class="trade-price-preset" disabled>Ask</button>
+                            <button type="button" class="trade-price-preset" disabled>Mark</button>
+                        </div>
+                    </section>
+                    <section class="trade-panel">
+                        <button type="button" class="trade-preview-button" disabled>Preview Disabled</button>
+                        <div class="trade-empty">Stage 1 does not call account, preview, or order endpoints.</div>
+                    </section>
+                </div>
+            </aside>
             <div class="flow-event-lane" id="flow-event-lane">
                 <div class="flow-event-strip" id="flow-event-strip-alerts">
                     <div class="flow-event-strip-head">
@@ -24432,6 +24755,76 @@ def index():
             );
         }
 
+        function buildTradeRailHtml() {
+            return (
+                '<div class="trade-rail-shell">' +
+                    '<section class="trade-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Contract Picker</div><div class="trade-panel-note">SPY first</div></div>' +
+                        '<div class="trade-segment" aria-label="Option type">' +
+                            '<button type="button" class="active call" disabled>Calls</button>' +
+                            '<button type="button" class="put" disabled>Puts</button>' +
+                        '</div>' +
+                        '<div class="trade-chain-placeholder" aria-hidden="true">' +
+                            '<span>Strike</span><span>Bid</span><span>Ask</span><span>Mid</span><span>Vol</span>' +
+                            '<span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>' +
+                            '<span>—</span><span>—</span><span>—</span><span>—</span><span>—</span>' +
+                        '</div>' +
+                        '<div class="trade-empty">Contracts will load from the cached option chain in the next stage.</div>' +
+                    '</section>' +
+                    '<section class="trade-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Selected Contract</div><div class="trade-panel-note">No selection</div></div>' +
+                        '<div class="trade-selected-symbol">—</div>' +
+                        '<div class="trade-empty">Exact Schwab contract symbols will be shown here before any preview flow is enabled.</div>' +
+                    '</section>' +
+                    '<section class="trade-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Order Ticket</div><div class="trade-panel-note">Read only</div></div>' +
+                        '<div class="trade-ticket-grid">' +
+                            '<div class="trade-field"><div class="trade-field-label">Action</div><div class="trade-field-value">Buy to Open</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">Quantity</div><div class="trade-field-value">1</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">Limit</div><div class="trade-field-value">—</div></div>' +
+                            '<div class="trade-field"><div class="trade-field-label">Est. Risk</div><div class="trade-field-value">—</div></div>' +
+                        '</div>' +
+                        '<div class="trade-price-presets">' +
+                            '<button type="button" class="trade-price-preset" disabled>Bid</button>' +
+                            '<button type="button" class="trade-price-preset" disabled>Mid</button>' +
+                            '<button type="button" class="trade-price-preset" disabled>Ask</button>' +
+                            '<button type="button" class="trade-price-preset" disabled>Mark</button>' +
+                        '</div>' +
+                    '</section>' +
+                    '<section class="trade-panel">' +
+                        '<button type="button" class="trade-preview-button" disabled>Preview Disabled</button>' +
+                        '<div class="trade-empty">Stage 1 does not call account, preview, or order endpoints.</div>' +
+                    '</section>' +
+                '</div>'
+            );
+        }
+
+        function ensureTradeRailDom(grid = document.getElementById('chart-grid')) {
+            if (!grid) return null;
+            let header = document.getElementById('trade-rail-header');
+            if (!header) {
+                header = document.createElement('div');
+                header.className = 'trade-rail-header';
+                header.id = 'trade-rail-header';
+                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-badge">Preview Only</div>';
+                grid.appendChild(header);
+            }
+            ensureTradeRailControls(grid);
+            let rail = document.getElementById('trade-rail');
+            if (!rail) {
+                rail = document.createElement('aside');
+                rail.className = 'trade-rail';
+                rail.id = 'trade-rail';
+                rail.setAttribute('aria-label', 'Options trading rail');
+                rail.innerHTML = buildTradeRailHtml();
+                grid.appendChild(rail);
+            } else if (!rail.querySelector('.trade-rail-shell')) {
+                rail.innerHTML = buildTradeRailHtml();
+            }
+            applyTradeRailCollapse(isTradeRailCollapsed());
+            return rail;
+        }
+
         // Rebuild missing chart-grid children in the canonical Stage-5 order.
         // The initial HTML markup already includes all of these; this defensive
         // path only kicks in if price-chart-container was removed from the DOM.
@@ -24442,6 +24835,7 @@ def index():
             if (priceContainer) {
                 ensureStrikeRailResizeHandle(grid);
                 ensureRightRailControls(grid);
+                ensureTradeRailDom(grid);
                 ensureFlowEventLane();
                 return priceContainer;
             }
@@ -24575,13 +24969,14 @@ def index():
                 redrawGexScope();
                 applyRightRailTab();
             }
+            ensureTradeRailDom(grid);
             ensureFlowEventLane();
             renderStrikeRailPanel();
             return priceContainer;
         }
 
         function showPriceChartUI() {
-            const ids = ['workspace-toolbar-shell', 'tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels', 'right-rail-collapse-toggle', 'right-rail-resize-handle', 'flow-event-lane'];
+            const ids = ['workspace-toolbar-shell', 'tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels', 'right-rail-collapse-toggle', 'right-rail-resize-handle', 'trade-rail-header', 'trade-rail-collapse-toggle', 'trade-rail-resize-handle', 'trade-rail', 'flow-event-lane'];
             ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
             const pc = document.querySelector('.price-chart-container');
             if (pc) pc.style.display = 'block';
@@ -24595,8 +24990,9 @@ def index():
             if (!grid) return { min: 280, max: 640 };
             const styles = getComputedStyle(grid);
             const railWidth = parseFloat(styles.getPropertyValue('--rail-col-w')) || 272;
+            const tradeRailWidth = parseFloat(styles.getPropertyValue('--trade-rail-w')) || 0;
             const min = 280;
-            const max = Math.max(min, Math.min(640, grid.clientWidth - railWidth - 360));
+            const max = Math.max(min, Math.min(640, grid.clientWidth - railWidth - tradeRailWidth - 360));
             return { min, max };
         }
         function clampGexColWidth(width) {
@@ -24769,8 +25165,9 @@ def index():
             if (!grid) return { min: 320, max: 640 };
             const styles = getComputedStyle(grid);
             const gexWidth = parseFloat(styles.getPropertyValue('--gex-col-w')) || 0;
+            const tradeRailWidth = parseFloat(styles.getPropertyValue('--trade-rail-w')) || 0;
             const min = getActiveRailTabForSizing() === 'flow' ? 440 : 320;
-            const max = Math.max(min, Math.min(640, grid.clientWidth - gexWidth - 520));
+            const max = Math.max(min, Math.min(640, grid.clientWidth - gexWidth - tradeRailWidth - 520));
             return { min, max };
         }
         function clampRightRailWidth(width) {
@@ -24896,6 +25293,158 @@ def index():
                 try { collapsed = localStorage.getItem(RIGHT_RAIL_COLLAPSE_KEY) === '1'; } catch (e) {}
                 applyRightRailCollapse(collapsed);
                 if (!collapsed) syncRightRailWidthForTab();
+            };
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', restore);
+            else restore();
+        })();
+
+        // ── Trading rail collapse + resize ──────────────────────────────
+        const TRADE_RAIL_COLLAPSE_KEY = 'gex.tradeRailCollapsed';
+        const TRADE_RAIL_WIDTH_KEY = 'gex.tradeRailWidthPx';
+        const TRADE_RAIL_DEFAULT_WIDTH = 400;
+
+        function scheduleTradeRailResizeRefresh() {
+            requestAnimationFrame(() => {
+                scheduleTVStrikeOverlayDraw();
+                scheduleGexPanelSync();
+                try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+            });
+        }
+        function getTradeRailWidthConstraints() {
+            const grid = document.getElementById('chart-grid');
+            if (!grid) return { min: 340, max: 560 };
+            const styles = getComputedStyle(grid);
+            const gexWidth = parseFloat(styles.getPropertyValue('--gex-col-w')) || 0;
+            const railWidth = parseFloat(styles.getPropertyValue('--rail-col-w')) || 0;
+            const min = 340;
+            const max = Math.max(min, Math.min(560, grid.clientWidth - gexWidth - railWidth - 520));
+            return { min, max };
+        }
+        function clampTradeRailWidth(width) {
+            const { min, max } = getTradeRailWidthConstraints();
+            return Math.max(min, Math.min(max, width));
+        }
+        function applyTradeRailWidth(width, persist = false) {
+            const grid = document.getElementById('chart-grid');
+            if (!grid || !Number.isFinite(width)) return;
+            const clamped = clampTradeRailWidth(width);
+            grid.style.setProperty('--trade-rail-w', clamped + 'px');
+            if (persist) {
+                try { localStorage.setItem(TRADE_RAIL_WIDTH_KEY, String(Math.round(clamped))); } catch (e) {}
+            }
+            scheduleTradeRailResizeRefresh();
+        }
+        function syncTradeRailWidth() {
+            const grid = document.getElementById('chart-grid');
+            if (!grid || grid.classList.contains('trade-rail-collapsed')) return;
+            let saved = NaN;
+            try { saved = parseFloat(localStorage.getItem(TRADE_RAIL_WIDTH_KEY)); } catch (e) {}
+            if (Number.isFinite(saved)) {
+                applyTradeRailWidth(saved, false);
+            } else {
+                grid.style.removeProperty('--trade-rail-w');
+                scheduleTradeRailResizeRefresh();
+            }
+        }
+        function isTradeRailCollapsed() {
+            const grid = document.getElementById('chart-grid');
+            return !!(grid && grid.classList.contains('trade-rail-collapsed'));
+        }
+        function applyTradeRailCollapse(collapsed) {
+            const grid = document.getElementById('chart-grid');
+            const btn = document.getElementById('trade-rail-collapse-toggle');
+            if (!grid) return;
+            grid.classList.toggle('trade-rail-collapsed', !!collapsed);
+            if (btn) {
+                btn.textContent = collapsed ? '‹' : '›';
+                btn.title = collapsed ? 'Expand trading rail' : 'Collapse trading rail';
+                btn.setAttribute('aria-label', btn.title);
+            }
+            if (!collapsed) syncTradeRailWidth();
+            scheduleTradeRailResizeRefresh();
+        }
+        function ensureTradeRailControls(grid = document.getElementById('chart-grid')) {
+            if (!grid) return;
+            let toggle = document.getElementById('trade-rail-collapse-toggle');
+            if (!toggle) {
+                toggle = document.createElement('button');
+                toggle.type = 'button';
+                toggle.className = 'trade-rail-collapse-toggle';
+                toggle.id = 'trade-rail-collapse-toggle';
+                grid.appendChild(toggle);
+            }
+            wireTradeRailCollapseToggle(toggle);
+            let handle = document.getElementById('trade-rail-resize-handle');
+            if (!handle) {
+                handle = document.createElement('div');
+                handle.className = 'trade-rail-resize-handle';
+                handle.id = 'trade-rail-resize-handle';
+                handle.setAttribute('role', 'separator');
+                handle.setAttribute('aria-label', 'Resize trading rail');
+                handle.setAttribute('aria-orientation', 'vertical');
+                grid.appendChild(handle);
+            }
+            wireTradeRailResizeHandle(handle);
+            applyTradeRailCollapse(isTradeRailCollapsed());
+        }
+        function wireTradeRailCollapseToggle(button = document.getElementById('trade-rail-collapse-toggle')) {
+            if (!button || button.__tradeRailCollapseWired) return;
+            button.__tradeRailCollapseWired = true;
+            button.addEventListener('click', () => {
+                const next = !isTradeRailCollapsed();
+                try { localStorage.setItem(TRADE_RAIL_COLLAPSE_KEY, next ? '1' : '0'); } catch (e) {}
+                applyTradeRailCollapse(next);
+            });
+        }
+        function wireTradeRailResizeHandle(handle = document.getElementById('trade-rail-resize-handle')) {
+            if (!handle || handle.__tradeRailResizeWired) return;
+            handle.__tradeRailResizeWired = true;
+            handle.addEventListener('dblclick', () => {
+                try { localStorage.removeItem(TRADE_RAIL_WIDTH_KEY); } catch (e) {}
+                const grid = document.getElementById('chart-grid');
+                if (grid) grid.style.removeProperty('--trade-rail-w');
+                syncTradeRailWidth();
+            });
+            handle.addEventListener('pointerdown', (event) => {
+                if (isTradeRailCollapsed()) return;
+                const grid = document.getElementById('chart-grid');
+                if (!grid) return;
+                event.preventDefault();
+                const startX = event.clientX;
+                const styles = getComputedStyle(grid);
+                const startWidth = parseFloat(styles.getPropertyValue('--trade-rail-w')) || TRADE_RAIL_DEFAULT_WIDTH;
+                handle.classList.add('dragging');
+                document.body.classList.add('trade-rail-resize-active');
+                try { handle.setPointerCapture(event.pointerId); } catch (e) {}
+                const onMove = (moveEvent) => {
+                    const nextWidth = startWidth + (startX - moveEvent.clientX);
+                    applyTradeRailWidth(nextWidth, false);
+                };
+                const onUp = (upEvent) => {
+                    document.removeEventListener('pointermove', onMove);
+                    document.removeEventListener('pointerup', onUp);
+                    document.removeEventListener('pointercancel', onUp);
+                    handle.classList.remove('dragging');
+                    document.body.classList.remove('trade-rail-resize-active');
+                    try { handle.releasePointerCapture(upEvent.pointerId); } catch (e) {}
+                    const liveWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--trade-rail-w')) || startWidth;
+                    applyTradeRailWidth(liveWidth, true);
+                };
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', onUp);
+                document.addEventListener('pointercancel', onUp);
+            });
+        }
+        (function restoreTradeRailState() {
+            const restore = () => {
+                ensureTradeRailDom();
+                let collapsed = true;
+                try {
+                    const saved = localStorage.getItem(TRADE_RAIL_COLLAPSE_KEY);
+                    collapsed = saved == null ? true : saved === '1';
+                } catch (e) {}
+                applyTradeRailCollapse(collapsed);
+                if (!collapsed) syncTradeRailWidth();
             };
             if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', restore);
             else restore();
