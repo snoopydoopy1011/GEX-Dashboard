@@ -10101,6 +10101,69 @@ def index():
         .market-state-metrics .rail-card-header {
             margin-bottom: 3px;
         }
+        .rail-spark-wrap {
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--border, #2a2f3a);
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+        .rail-spark-svg {
+            width: 100%;
+            height: 28px;
+            display: block;
+        }
+        .rail-spark-zero {
+            stroke: var(--border, #3a3f4a);
+            stroke-width: 1;
+            stroke-dasharray: 2 2;
+            opacity: 0.7;
+        }
+        .rail-spark-line {
+            stroke-width: 1.4;
+            fill: none;
+            vector-effect: non-scaling-stroke;
+            stroke-linejoin: round;
+            stroke-linecap: round;
+        }
+        .rail-spark-gex { stroke: var(--call, #2ecc71); }
+        .rail-spark-dex { stroke: var(--put, #e74c3c); opacity: 0.92; }
+        .rail-spark-legend {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            font-size: 9px;
+            color: var(--fg-2, #98a2b3);
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .rail-spark-legend i.dot {
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            border-radius: 2px;
+            margin-right: 3px;
+            vertical-align: middle;
+        }
+        .rail-spark-legend i.dot.gex { background: var(--call, #2ecc71); }
+        .rail-spark-legend i.dot.dex { background: var(--put, #e74c3c); }
+        .tv-axis-countdown {
+            position: absolute;
+            z-index: 5;
+            pointer-events: none;
+            background: rgba(20, 24, 33, 0.92);
+            color: var(--fg-1, #d1d5db);
+            border: 1px solid var(--border, #2a2f3a);
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-size: 10.5px;
+            font-family: 'JetBrains Mono', 'Menlo', monospace;
+            font-variant-numeric: tabular-nums;
+            text-align: center;
+            line-height: 1.4;
+            opacity: 0.95;
+        }
         .market-state-range .rail-range-caption,
         .market-state-range .rail-range-labels {
             display: none;
@@ -13301,6 +13364,18 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section">
+                    <summary>Price Axis Countdown</summary>
+                    <div class="drawer-content">
+                        <p class="chart-history-help">TradingView-style countdown chip pinned just below the live price label on the right price axis, showing time until the current candle closes (driven by the active timeframe).</p>
+                        <div class="control-group">
+                            <label for="axis_countdown_enabled" style="display:flex;align-items:center;gap:8px;">
+                                <input type="checkbox" id="axis_countdown_enabled">
+                                <span>Show countdown below price label</span>
+                            </label>
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section">
                     <summary>Volume Coloring (RVOL)</summary>
                     <div class="drawer-content">
                         <p class="chart-history-help">Compare each bar's volume to a robust average for that time-of-day across prior RTH sessions (half-days excluded). Volume bars keep up/down direction; stronger RVOL increases opacity and the dotted line shows expected volume.</p>
@@ -13919,6 +13994,17 @@ def index():
                                     <div class="d" data-met="net_dex_delta"></div>
                                 </div>
                             </div>
+                            <div class="rail-spark-wrap" id="rail-spark-netex" title="Intraday Net GEX (call) and Net DEX (put) — each line normalized to its own range; midline = 0">
+                                <svg class="rail-spark-svg" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true">
+                                    <line class="rail-spark-zero" x1="0" y1="14" x2="120" y2="14"></line>
+                                    <polyline class="rail-spark-line rail-spark-gex" fill="none" points=""></polyline>
+                                    <polyline class="rail-spark-line rail-spark-dex" fill="none" points=""></polyline>
+                                </svg>
+                                <div class="rail-spark-legend">
+                                    <span><i class="dot gex"></i>GEX</span>
+                                    <span><i class="dot dex"></i>DEX</span>
+                                </div>
+                            </div>
                             <div class="gex-scope-pill" id="gex-scope-pill">
                                 <button class="gex-scope-btn" data-scope="all">All</button>
                                 <button class="gex-scope-btn" data-scope="0dte">0DTE</button>
@@ -14487,7 +14573,7 @@ def index():
         // Time-scale sync state
         let tvSyncHandlers = [], tvSyncingTimeScale = false;
         // Drawing state
-        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'fixed_vp' | 'fixed_tpo' | 'anchored_tpo' | 'text' | 'avwap'
+        let tvDrawMode = null;          // null | 'hline' | 'trendline' | 'channel' | 'rect' | 'fib' | 'fixed_vp' | 'fixed_tpo' | 'anchored_tpo' | 'text' | 'avwap'
         let tvDrawStart = null;         // {price, time, x, y} of first click
         let tvDrawingDefs = [];         // serializable drawing definitions — survive full re-renders
         let tvDrawingUndoStack = [];    // snapshots for user drawing actions: create, clear, delete, hide/show
@@ -15027,6 +15113,21 @@ def index():
             }
         }
 
+        function tvGetSessionCandlePriceRange() {
+            if (!tvLastCandles.length) return null;
+            const fromIndex = tvGetCurrentSessionStartIndex();
+            const toIndex = tvLastCandles.length - 1;
+            let minValue = Infinity, maxValue = -Infinity;
+            for (let index = fromIndex; index <= toIndex; index += 1) {
+                const candle = tvLastCandles[index];
+                if (!candle) continue;
+                if (Number.isFinite(candle.low)) minValue = Math.min(minValue, candle.low);
+                if (Number.isFinite(candle.high)) maxValue = Math.max(maxValue, candle.high);
+            }
+            if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return null;
+            return { minValue, maxValue };
+        }
+
         function tvGetVisibleCandlePriceRange(trimLeftBars = 0) {
             if (!tvLastCandles.length) return null;
             let fromIndex = 0;
@@ -15068,17 +15169,26 @@ def index():
                     let minVal = res.priceRange.minValue;
                     let maxVal = res.priceRange.maxValue;
                     if (yAxisMode !== 'fit-all') {
-                        let trimLeftBars = 0;
-                        try {
-                            const visibleRange = tvPriceChart && tvPriceChart.timeScale
-                                ? tvPriceChart.timeScale().getVisibleLogicalRange()
-                                : null;
-                            if (visibleRange) {
-                                const visibleBars = Math.max(1, Math.ceil(visibleRange.to) - Math.floor(visibleRange.from) + 1);
-                                trimLeftBars = Math.min(48, Math.max(0, Math.round(visibleBars * 0.12)));
-                            }
-                        } catch (e) {}
-                        const candleRange = tvGetVisibleCandlePriceRange(trimLeftBars);
+                        let candleRange;
+                        if (yAxisMode === 'session' && tvCurrentDayStartTime) {
+                            // Anchor strictly to today's bars so the Y-axis can't be
+                            // dragged out by far-off level lines (max pain, prior-day
+                            // OI, expected moves) before the timeScale visible-range
+                            // change has propagated to this provider.
+                            candleRange = tvGetSessionCandlePriceRange();
+                        } else {
+                            let trimLeftBars = 0;
+                            try {
+                                const visibleRange = tvPriceChart && tvPriceChart.timeScale
+                                    ? tvPriceChart.timeScale().getVisibleLogicalRange()
+                                    : null;
+                                if (visibleRange) {
+                                    const visibleBars = Math.max(1, Math.ceil(visibleRange.to) - Math.floor(visibleRange.from) + 1);
+                                    trimLeftBars = Math.min(48, Math.max(0, Math.round(visibleBars * 0.12)));
+                                }
+                            } catch (e) {}
+                            candleRange = tvGetVisibleCandlePriceRange(trimLeftBars);
+                        }
                         if (candleRange) {
                             const span = Math.max(0.01, candleRange.maxValue - candleRange.minValue);
                             const focusPad = Math.min(1.0, Math.max(span * 0.28, candleRange.maxValue * 0.0009, 0.18));
@@ -19975,6 +20085,7 @@ def index():
                     : def.type === 'trendline' ? 'Trend Line'
                     : def.type === 'channel' ? 'Channel'
                     : def.type === 'rect' ? 'Box'
+                    : def.type === 'fib' ? 'Fibonacci'
                     : def.type === 'avwap' ? 'Anchored VWAP'
                     : def.type === 'fixed_vp' ? 'Fixed VP'
                     : def.type === 'fixed_tpo' ? 'TPO Range'
@@ -21302,6 +21413,35 @@ def index():
                 }
                 return screen;
             }
+            if (def.type === 'fib') {
+                const x1 = tvResolveDrawingAnchorX(def.t1, def.l1, null);
+                const x2 = tvResolveDrawingAnchorX(def.t2, def.l2, def.previewX2);
+                if ([x1, x2].some(v => v == null || Number.isNaN(v))) return null;
+                const high = Math.max(def.p1, def.p2);
+                const low  = Math.min(def.p1, def.p2);
+                const range = high - low;
+                if (!Number.isFinite(range) || range <= 0) return null;
+                const levels = (Array.isArray(def.levels) && def.levels.length)
+                    ? def.levels
+                    : [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+                const segments = [];
+                levels.forEach(level => {
+                    const price = high - (range * level);
+                    const y = tvCandleSeries.priceToCoordinate(price);
+                    if (y == null || Number.isNaN(y)) return;
+                    segments.push({ level, price, y });
+                });
+                if (!segments.length) return null;
+                return {
+                    type: 'fib',
+                    x1: Math.min(x1, x2),
+                    x2: Math.max(x1, x2),
+                    width,
+                    high,
+                    low,
+                    segments,
+                };
+            }
             if (def.type === 'rect') {
                 const startY = tvCandleSeries.priceToCoordinate(def.startPrice != null ? def.startPrice : def.top);
                 const yTop = def.previewY2 != null && startY != null ? Math.min(startY, def.previewY2) : tvCandleSeries.priceToCoordinate(def.top);
@@ -21738,6 +21878,60 @@ def index():
                     });
                     bindSelect(hit);
                     group.appendChild(hit);
+                }
+            } else if (screen.type === 'fib') {
+                const x1 = screen.x1;
+                // Always extend the right edge to the chart boundary so the
+                // levels stay readable as new bars print.
+                const x2 = Math.max(screen.x2, screen.width || screen.x2);
+                screen.segments.forEach(seg => {
+                    group.appendChild(createSvgEl('line', {
+                        class: 'tv-drawing-shape',
+                        x1, x2,
+                        y1: seg.y, y2: seg.y,
+                        stroke: def.color,
+                        'stroke-width': strokeWidth,
+                        'stroke-dasharray': dashArray || null,
+                        'stroke-linecap': 'round',
+                        opacity: isPreview ? 0.7 : 0.9,
+                    }));
+                    const labelTxt = (seg.level * 100).toFixed(seg.level === 0 || seg.level === 1 || seg.level === 0.5 ? 1 : 1) + '%  $' + seg.price.toFixed(2);
+                    const text = createSvgEl('text', {
+                        class: 'tv-drawing-text',
+                        x: x1 + 6,
+                        y: seg.y - 3,
+                        fill: def.color,
+                        'font-size': 10,
+                    });
+                    text.textContent = labelTxt;
+                    group.appendChild(text);
+                });
+                // Shade the body between high (level 0) and low (level 1).
+                const topY = screen.segments[0] ? screen.segments[0].y : null;
+                const botY = screen.segments[screen.segments.length - 1] ? screen.segments[screen.segments.length - 1].y : null;
+                if (topY != null && botY != null) {
+                    group.appendChild(createSvgEl('rect', {
+                        class: 'tv-drawing-shape',
+                        x: x1,
+                        y: Math.min(topY, botY),
+                        width: Math.max(1, x2 - x1),
+                        height: Math.max(1, Math.abs(botY - topY)),
+                        fill: def.color,
+                        'fill-opacity': isPreview ? 0.04 : 0.06,
+                        stroke: 'none',
+                    }));
+                }
+                if (interactive) {
+                    screen.segments.forEach(seg => {
+                        const hit = createSvgEl('line', {
+                            class: 'tv-drawing-hitbox',
+                            x1, x2,
+                            y1: seg.y, y2: seg.y,
+                            'stroke-width': Math.max(10, strokeWidth + 6),
+                        });
+                        bindSelect(hit);
+                        group.appendChild(hit);
+                    });
                 }
             } else if (screen.type === 'fixed_vp' || screen.type === 'fixed_tpo' || screen.type === 'anchored_tpo') {
                 const boxX = Math.min(screen.x1, screen.x2);
@@ -22575,14 +22769,18 @@ def index():
                 return;
             }
 
-            if (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo') {
+            if (tvDrawMode === 'trendline' || tvDrawMode === 'rect' || tvDrawMode === 'fib' || tvDrawMode === 'fixed_vp' || tvDrawMode === 'fixed_tpo') {
                 if (!clickTime) return; // still no time — bail
                 const drawPoints = Array.isArray(tvDrawStart && tvDrawStart.points) ? tvDrawStart.points : [];
                 if (!drawPoints.length) {
                     tvDrawStart = { points: [{ price, time: clickTime, logical }] };
                     // Show visual hint that first point is set
                     const container = document.getElementById('price-chart');
-                    if (container) { container.title = 'Click second point to complete drawing'; }
+                    if (container) {
+                        container.title = tvDrawMode === 'fib'
+                            ? 'Click the opposite extreme to complete the Fibonacci retracement'
+                            : 'Click second point to complete drawing';
+                    }
                     scheduleTVDrawingOverlayDraw();
                 } else {
                     const startPoint = drawPoints[0];
@@ -22611,6 +22809,20 @@ def index():
                             color: drawColor,
                             lineWidth: 2,
                             lineStyle: 'solid',
+                        });
+                    } else if (tvDrawMode === 'fib') {
+                        finishTVDrawingCreation({
+                            type: 'fib',
+                            t1: startPoint.time,
+                            l1: startPoint.logical,
+                            p1: startPoint.price,
+                            t2: clickTime,
+                            l2: logical,
+                            p2: price,
+                            color: drawColor,
+                            lineWidth: 1,
+                            lineStyle: 'solid',
+                            label: 'Fib',
                         });
                     } else if (tvDrawMode === 'fixed_vp') {
                         finishTVDrawingCreation({
@@ -22718,33 +22930,87 @@ def index():
         }
 
         // ── Candle Close Timer ─────────────────────────────────────────────────────
+        function _computeCandleCloseRemaining() {
+            const tfEl = document.getElementById('timeframe');
+            const tf = tfEl ? parseInt(tfEl.value) || 1 : 1;
+            const tfSecs = tf * 60;
+            const now = new Date();
+            const etFormatter = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false
+            });
+            const parts = etFormatter.formatToParts(now);
+            let h = 0, m2 = 0, s2 = 0;
+            for (const p of parts) {
+                if (p.type === 'hour')   h  = parseInt(p.value);
+                if (p.type === 'minute') m2 = parseInt(p.value);
+                if (p.type === 'second') s2 = parseInt(p.value);
+            }
+            const secondsOfDay = h * 3600 + m2 * 60 + s2;
+            const elapsed = secondsOfDay % tfSecs;
+            const remaining = tfSecs - elapsed;
+            return { remaining, tfSecs };
+        }
+        function _formatCandleCloseRemaining(remaining) {
+            const minutes = Math.floor(remaining / 60);
+            const seconds = remaining % 60;
+            return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+        function ensureAxisCountdownChip() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let chip = container.querySelector('.tv-axis-countdown');
+            if (!chip) {
+                chip = document.createElement('div');
+                chip.className = 'tv-axis-countdown';
+                chip.style.display = 'none';
+                container.appendChild(chip);
+            }
+            return chip;
+        }
+        function isAxisCountdownEnabled() {
+            const cb = document.getElementById('axis_countdown_enabled');
+            return !!(cb && cb.checked);
+        }
+        function updateAxisCountdownChip(text) {
+            const chip = ensureAxisCountdownChip();
+            if (!chip) return;
+            if (!isAxisCountdownEnabled() || !tvCandleSeries || !tvLastCandles.length) {
+                chip.style.display = 'none';
+                return;
+            }
+            const last = tvLastCandles[tvLastCandles.length - 1];
+            const price = last && (last.close != null ? last.close : last.value);
+            const y = (price != null) ? tvCandleSeries.priceToCoordinate(price) : null;
+            const container = document.getElementById('price-chart');
+            if (y == null || !Number.isFinite(y) || !container) {
+                chip.style.display = 'none';
+                return;
+            }
+            const priceScale = tvPriceChart && tvPriceChart.priceScale ? tvPriceChart.priceScale('right') : null;
+            // The price-scale label sits on the right edge; place the chip just below it.
+            const pricePillHeight = 22;
+            const chipTop = Math.max(2, Math.min(container.clientHeight - 22, y + (pricePillHeight / 2) + 2));
+            const scaleWidth = (priceScale && typeof priceScale.width === 'function') ? priceScale.width() : 56;
+            chip.style.right = '2px';
+            chip.style.top = chipTop + 'px';
+            chip.style.minWidth = (Math.max(40, scaleWidth - 8)) + 'px';
+            chip.textContent = text;
+            chip.style.display = '';
+        }
         function startCandleCloseTimer() {
             if (candleCloseTimerInterval) clearInterval(candleCloseTimerInterval);
             function updateTimer() {
                 const el = document.getElementById('candle-close-timer');
-                if (!el) { clearInterval(candleCloseTimerInterval); return; }
-                const tfEl = document.getElementById('timeframe');
-                const tf = tfEl ? parseInt(tfEl.value) || 1 : 1;
-                const tfSecs = tf * 60;
-                // Use ET (America/New_York) time for candle boundary calculation
-                const now = new Date();
-                const etFormatter = new Intl.DateTimeFormat('en-US', {
-                    timeZone: 'America/New_York',
-                    hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false
-                });
-                const parts = etFormatter.formatToParts(now);
-                let h = 0, m2 = 0, s2 = 0;
-                for (const p of parts) {
-                    if (p.type === 'hour')   h  = parseInt(p.value);
-                    if (p.type === 'minute') m2 = parseInt(p.value);
-                    if (p.type === 'second') s2 = parseInt(p.value);
+                const { remaining } = _computeCandleCloseRemaining();
+                const text = _formatCandleCloseRemaining(remaining);
+                if (el) {
+                    el.textContent = `⏱ ${text}`;
                 }
-                const secondsOfDay = h * 3600 + m2 * 60 + s2;
-                const elapsed = secondsOfDay % tfSecs;
-                const remaining = tfSecs - elapsed;
-                const minutes = Math.floor(remaining / 60);
-                const seconds = remaining % 60;
-                el.textContent = `⏱ ${minutes}:${seconds.toString().padStart(2, '0')}`;
+                updateAxisCountdownChip(text);
+                if (!el && !isAxisCountdownEnabled()) {
+                    clearInterval(candleCloseTimerInterval);
+                }
             }
             updateTimer();
             candleCloseTimerInterval = setInterval(updateTimer, 1000);
@@ -23042,82 +23308,114 @@ def index():
                 node.classList.toggle('active', node.dataset.hlinePreset === getActiveTVHLinePresetKey());
             });
 
-            const drawDefs = [
-                { key:'trendline', label:'↗ Trend',  title:'Draw trend line (click start, click end)' },
-                { key:'channel',   label:'∥ Channel', title:'Draw parallel channel (click two trend points, then width)' },
-                { key:'rect',      label:'▭ Box',    title:'Draw rectangle between two prices (click two points)' },
-                { key:'fixed_vp',  label:'VP Range', title:'Draw fixed range volume profile (click start, click end)' },
-                { key:'fixed_tpo', label:'TPO Range', title:'Draw fixed range TPO market profile (click start, click end)' },
-                { key:'anchored_tpo', label:'⚓ TPO', title:'Anchored TPO profile — click any candle to anchor' },
-                { key:'avwap',     label:'⚓ AVWAP',  title:'Anchored VWAP — click any candle to anchor' },
-                { key:'text',      label:'T Label',  title:'Add price label (click to place)' },
+            // Consolidated "Tools" dropdown for the secondary drawing tools.
+            // H-Line stays inline above (most-used). Channel's preset selector
+            // and axis-snap toggle live inside this menu as inline rows.
+            const drawToolsMenu = createToolbarMenu('Tools', 'Open drawing tools menu.', {
+                toggleTitle: 'Open drawing tools menu',
+            });
+            drawToolsMenu.menuButton.id = 'tv-draw-tools-button';
+            drawToolsMenu.menuButton.dataset.drawToolsTrigger = '1';
+            drawToolsMenu.menuButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                const isOpen = drawToolsMenu.wrap.classList.contains('open');
+                closeTVToolbarMenus();
+                if (!isOpen) {
+                    openTVToolbarMenu(drawToolsMenu.wrap, drawToolsMenu.menuButton, drawToolsMenu.menuPanel);
+                }
+            }, true);
+            const drawToolsGrid = document.createElement('div');
+            drawToolsGrid.className = 'tv-toolbar-menu-grid';
+
+            const simpleDrawDefs = [
+                { section: 'Lines', items: [
+                    { key:'trendline', label:'↗ Trend', title:'Draw trend line (click start, click end)' },
+                ]},
+                { section: 'Shapes', items: [
+                    { key:'rect', label:'▭ Box', title:'Draw rectangle between two prices (click two points)' },
+                    { key:'fib',  label:'𝝓 Fib', title:'Fibonacci retracement (click high, click low — or vice versa)' },
+                ]},
+                { section: 'Profiles', items: [
+                    { key:'fixed_vp',  label:'VP Range',  title:'Draw fixed range volume profile (click start, click end)' },
+                    { key:'fixed_tpo', label:'TPO Range', title:'Draw fixed range TPO market profile (click start, click end)' },
+                    { key:'anchored_tpo', label:'⚓ TPO', title:'Anchored TPO profile — click any candle to anchor' },
+                    { key:'avwap', label:'⚓ AVWAP', title:'Anchored VWAP — click any candle to anchor' },
+                ]},
+                { section: 'Other', items: [
+                    { key:'text', label:'T Label', title:'Add price label (click to place)' },
+                ]},
             ];
-            drawDefs.forEach(def => {
-                const b = btn(def.label, def.title, () => setDrawMode(def.key));
-                b.dataset.draw = def.key;
-                if (tvDrawMode === def.key) b.classList.add('active');
-                if (def.key === 'channel') {
-                    b.id = 'tv-channel-draw-button';
-                    const wrap = document.createElement('div');
-                    wrap.className = 'tv-draw-inline';
-
-                    const presetWrap = document.createElement('div');
-                    presetWrap.className = 'tv-draw-dropdown';
-                    presetWrap.appendChild(b);
-
-                    const channelMenuToggle = btn('', 'Choose channel preset/color', event => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const isOpen = presetWrap.classList.contains('open');
-                        closeTVToolbarMenus();
-                        if (!isOpen) {
-                            openTVToolbarMenu(presetWrap, channelMenuToggle, channelMenu);
-                        }
-                    }, 'icon');
-                    channelMenuToggle.id = 'tv-channel-preset-toggle';
-
-                    const channelMenu = document.createElement('div');
-                    channelMenu.className = 'tv-draw-dropdown-menu';
-                    [
-                        { key: 'support', title: 'Draw support channels in green' },
-                        { key: 'resistance', title: 'Draw resistance channels in red' },
-                        { key: 'neutral', title: 'Draw neutral channels in gray' },
-                        { key: 'custom', title: 'Use the toolbar color picker for new channels' },
-                    ].forEach(presetDef => {
-                        const preset = getTVHLinePreset(presetDef.key);
-                        const option = document.createElement('button');
-                        option.type = 'button';
-                        option.className = 'tv-draw-menu-item';
-                        option.dataset.channelPreset = presetDef.key;
-                        option.title = presetDef.title;
-                        option.innerHTML =
-                            '<span class="tv-draw-pill-swatch" style="background:' + (preset.color || getTVDrawingColorFallback('custom')) + '"></span>' +
-                            preset.label;
-                        option.addEventListener('click', event => {
+            simpleDrawDefs.forEach(group => {
+                appendToolbarMenuSection(drawToolsGrid, group.section, section => {
+                    group.items.forEach(def => {
+                        const b = btn(def.label, def.title, event => {
                             event.preventDefault();
                             event.stopPropagation();
-                            setActiveTVChannelPresetKey(presetDef.key);
-                            setDrawMode('channel', { force: true });
+                            setDrawMode(def.key);
+                            closeTVToolbarMenus();
                         });
-                        channelMenu.appendChild(option);
+                        b.classList.add('tv-draw-menu-item');
+                        b.dataset.draw = def.key;
+                        if (tvDrawMode === def.key) b.classList.add('active');
+                        section.appendChild(b);
                     });
-                    presetWrap.appendChild(channelMenuToggle);
-                    presetWrap.appendChild(channelMenu);
-                    wrap.appendChild(presetWrap);
-
-                    const channelSnapBtn = btn('', '', () => {
-                        setTVChannelAxisSnapEnabled(!getTVChannelAxisSnapEnabled());
-                    }, 'pill');
-                    channelSnapBtn.id = 'tv-channel-snap-toggle';
-                    wrap.appendChild(channelSnapBtn);
-
-                    addToGroup(drawGroup, wrap);
-                    syncTVChannelToolbarPreset();
-                    syncTVChannelSnapToolbarButton();
-                } else {
-                    addToGroup(drawGroup, b);
-                }
+                });
             });
+
+            // Channel + preset + snap-toggle live as their own section inside the menu.
+            appendToolbarMenuSection(drawToolsGrid, 'Channel', section => {
+                const channelBtn = btn('∥ Channel', 'Draw parallel channel (click two trend points, then width)', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setDrawMode('channel');
+                    closeTVToolbarMenus();
+                });
+                channelBtn.id = 'tv-channel-draw-button';
+                channelBtn.dataset.draw = 'channel';
+                channelBtn.classList.add('tv-draw-menu-item');
+                if (tvDrawMode === 'channel') channelBtn.classList.add('active');
+                section.appendChild(channelBtn);
+
+                const presetRow = document.createElement('div');
+                presetRow.className = 'tv-toolbar-menu-row';
+                [
+                    { key: 'support', title: 'Draw support channels in green' },
+                    { key: 'resistance', title: 'Draw resistance channels in red' },
+                    { key: 'neutral', title: 'Draw neutral channels in gray' },
+                    { key: 'custom', title: 'Use the toolbar color picker for new channels' },
+                ].forEach(presetDef => {
+                    const preset = getTVHLinePreset(presetDef.key);
+                    const option = document.createElement('button');
+                    option.type = 'button';
+                    option.className = 'tv-draw-menu-item';
+                    option.dataset.channelPreset = presetDef.key;
+                    option.title = presetDef.title;
+                    option.innerHTML =
+                        '<span class="tv-draw-pill-swatch" style="background:' + (preset.color || getTVDrawingColorFallback('custom')) + '"></span>' +
+                        preset.label;
+                    option.addEventListener('click', event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setActiveTVChannelPresetKey(presetDef.key);
+                        setDrawMode('channel', { force: true });
+                        closeTVToolbarMenus();
+                    });
+                    presetRow.appendChild(option);
+                });
+                section.appendChild(presetRow);
+
+                const snapBtn = btn('', '', () => {
+                    setTVChannelAxisSnapEnabled(!getTVChannelAxisSnapEnabled());
+                }, 'pill');
+                snapBtn.id = 'tv-channel-snap-toggle';
+                section.appendChild(snapBtn);
+            });
+
+            drawToolsMenu.menuPanel.appendChild(drawToolsGrid);
+            addToGroup(drawGroup, drawToolsMenu.wrap);
+            syncTVChannelToolbarPreset();
+            syncTVChannelSnapToolbarButton();
 
             // Draw color picker
             const colorWrap = document.createElement('span');
@@ -23987,6 +24285,17 @@ def index():
                             '<div class="rail-metric-pair">' +
                                 '<div class="rail-metric"><div class="rail-card-header">Net GEX</div><div class="v" data-met="net_gex">—</div><div class="d" data-met="net_gex_delta"></div></div>' +
                                 '<div class="rail-metric"><div class="rail-card-header">Net DEX</div><div class="v" data-met="net_dex">—</div><div class="d" data-met="net_dex_delta"></div></div>' +
+                            '</div>' +
+                            '<div class="rail-spark-wrap" id="rail-spark-netex" title="Intraday Net GEX (call) and Net DEX (put) — each line normalized to its own range; midline = 0">' +
+                                '<svg class="rail-spark-svg" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true">' +
+                                    '<line class="rail-spark-zero" x1="0" y1="14" x2="120" y2="14"></line>' +
+                                    '<polyline class="rail-spark-line rail-spark-gex" fill="none" points=""></polyline>' +
+                                    '<polyline class="rail-spark-line rail-spark-dex" fill="none" points=""></polyline>' +
+                                '</svg>' +
+                                '<div class="rail-spark-legend">' +
+                                    '<span><i class="dot gex"></i>GEX</span>' +
+                                    '<span><i class="dot dex"></i>DEX</span>' +
+                                '</div>' +
                             '</div>' +
                             '<div class="gex-scope-pill" id="gex-scope-pill"><button class="gex-scope-btn" data-scope="all">All</button><button class="gex-scope-btn" data-scope="0dte">0DTE</button></div>' +
                         '</div>' +
@@ -26214,6 +26523,8 @@ def index():
                     }
                 } else if (def.type === 'rect') {
                     tvAllLevelPrices.push(def.top, def.bot);
+                } else if (def.type === 'fib') {
+                    tvAllLevelPrices.push(def.p1, def.p2);
                 }
             });
             tvAllLevelPrices = tvAllLevelPrices.filter(price => Number.isFinite(price));
@@ -26817,6 +27128,88 @@ def index():
                 dDexEl.classList.toggle('pos', dDex != null && dDex > 0);
                 dDexEl.classList.toggle('neg', dDex != null && dDex < 0);
             }
+            recordNetExSparklineSample(stats.net_gex, stats.net_dex);
+            renderNetExSparkline();
+        }
+
+        // ── Net GEX/DEX intraday sparkline ──────────────────────────────────────
+        // Per-ticker, per-day ring buffer (localStorage). Each polyline is
+        // normalized independently around 0 so very different magnitudes still
+        // share one zero midline.
+        const NETEX_SPARK_MAX = 240;
+        function _netexSparkKey() {
+            const tickerEl = document.getElementById('ticker');
+            const tk = tickerEl ? (tickerEl.value || '').trim().toUpperCase() : '';
+            const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+            return 'netex_spark::' + tk + '::' + today;
+        }
+        function _loadNetexSpark() {
+            try {
+                const raw = localStorage.getItem(_netexSparkKey());
+                if (!raw) return [];
+                const parsed = JSON.parse(raw);
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (e) { return []; }
+        }
+        function _saveNetexSpark(samples) {
+            try { localStorage.setItem(_netexSparkKey(), JSON.stringify(samples)); } catch (e) {}
+        }
+        function recordNetExSparklineSample(gex, dex) {
+            if (typeof gex !== 'number' && typeof dex !== 'number') return;
+            const samples = _loadNetexSpark();
+            const now = Date.now();
+            const last = samples[samples.length - 1];
+            // Throttle to one sample per ~20s — handles dense refresh polling
+            // without blowing through the ring buffer mid-session.
+            if (last && (now - last.t) < 20000) {
+                last.g = (typeof gex === 'number') ? gex : last.g;
+                last.d = (typeof dex === 'number') ? dex : last.d;
+                last.t = now;
+            } else {
+                samples.push({
+                    t: now,
+                    g: typeof gex === 'number' ? gex : null,
+                    d: typeof dex === 'number' ? dex : null,
+                });
+                while (samples.length > NETEX_SPARK_MAX) samples.shift();
+            }
+            _saveNetexSpark(samples);
+        }
+        function _normalizeSparkSeries(values) {
+            // Map values into 0..28 viewBox with 14 = zero. Normalize against
+            // the absolute peak so positive/negative are symmetric around 0.
+            const finite = values.filter(v => typeof v === 'number' && isFinite(v));
+            if (!finite.length) return null;
+            const peak = Math.max(1e-9, ...finite.map(v => Math.abs(v)));
+            return values.map(v => (typeof v === 'number' && isFinite(v)) ? (14 - (v / peak) * 12) : null);
+        }
+        function renderNetExSparkline() {
+            document.querySelectorAll('#rail-spark-netex').forEach(wrap => {
+                const samples = _loadNetexSpark();
+                const gexLine = wrap.querySelector('.rail-spark-gex');
+                const dexLine = wrap.querySelector('.rail-spark-dex');
+                if (!gexLine || !dexLine) return;
+                if (samples.length < 2) {
+                    gexLine.setAttribute('points', '');
+                    dexLine.setAttribute('points', '');
+                    return;
+                }
+                const W = 120;
+                const xStep = samples.length === 1 ? 0 : (W / (samples.length - 1));
+                const gexY = _normalizeSparkSeries(samples.map(s => s.g));
+                const dexY = _normalizeSparkSeries(samples.map(s => s.d));
+                const toPts = (ys) => {
+                    if (!ys) return '';
+                    const out = [];
+                    ys.forEach((y, i) => {
+                        if (y == null) return;
+                        out.push((i * xStep).toFixed(2) + ',' + y.toFixed(2));
+                    });
+                    return out.join(' ');
+                };
+                gexLine.setAttribute('points', toPts(gexY));
+                dexLine.setAttribute('points', toPts(dexY));
+            });
         }
 
         function renderContractHelper(stats) {
@@ -28010,6 +28403,23 @@ def index():
                 setChartHistoryMap({});
                 renderChartHistorySection();
                 if (typeof fetchPriceHistory === 'function') fetchPriceHistory(true);
+            });
+        }
+
+        const AXIS_COUNTDOWN_LS_KEY = 'gex.axisCountdown.v1';
+        const axisCountdownInput = document.getElementById('axis_countdown_enabled');
+        if (axisCountdownInput) {
+            try {
+                const stored = localStorage.getItem(AXIS_COUNTDOWN_LS_KEY);
+                if (stored != null) axisCountdownInput.checked = stored === '1';
+            } catch (e) {}
+            axisCountdownInput.addEventListener('change', () => {
+                try { localStorage.setItem(AXIS_COUNTDOWN_LS_KEY, axisCountdownInput.checked ? '1' : '0'); } catch (e) {}
+                if (typeof startCandleCloseTimer === 'function') startCandleCloseTimer();
+                if (!axisCountdownInput.checked) {
+                    const chip = document.querySelector('.tv-axis-countdown');
+                    if (chip) chip.style.display = 'none';
+                }
             });
         }
 
