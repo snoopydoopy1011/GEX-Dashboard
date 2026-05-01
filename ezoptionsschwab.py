@@ -10626,10 +10626,6 @@ def index():
         }
         .trade-contract-row.call .trade-contract-strike { color: var(--call); }
         .trade-contract-row.put .trade-contract-strike { color: var(--put); }
-        .trade-contract-row .trade-contract-warn {
-            color: var(--warn);
-            font-weight: 700;
-        }
         .trade-meta-line,
         .trade-warning-list {
             margin-top: 7px;
@@ -10661,6 +10657,22 @@ def index():
             background: var(--bg-0);
             color: var(--fg-1);
             cursor: pointer;
+        }
+        .trade-order-tools {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .trade-order-toggle {
+            min-height: 28px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            cursor: pointer;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
         }
         .trade-balance-line,
         .trade-position-row,
@@ -15411,25 +15423,6 @@ def index():
                     </section>
                     <section class="trade-panel">
                         <div class="trade-panel-head">
-                            <div class="trade-panel-title">Position</div>
-                            <div class="trade-panel-note" data-trade-position-note>No account</div>
-                        </div>
-                        <div data-trade-position-list>
-                            <div class="trade-empty">Select an account to show relevant positions.</div>
-                        </div>
-                    </section>
-                    <section class="trade-panel">
-                        <div class="trade-panel-head">
-                            <div class="trade-panel-title">Orders</div>
-                            <button type="button" class="trade-account-refresh" data-trade-orders-refresh title="Refresh orders" aria-label="Refresh orders">↻</button>
-                        </div>
-                        <div class="trade-panel-note" data-trade-orders-note>No account</div>
-                        <div data-trade-orders-list>
-                            <div class="trade-empty">Select an account to show open and recent orders.</div>
-                        </div>
-                    </section>
-                    <section class="trade-panel">
-                        <div class="trade-panel-head">
                             <div class="trade-panel-title">Order Ticket</div>
                             <div class="trade-panel-note" data-trade-ticket-note>Preview only</div>
                         </div>
@@ -15467,6 +15460,28 @@ def index():
                         <button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>
                         <button type="button" class="trade-place-button" data-trade-place disabled>Place Live Order</button>
                         <div class="trade-preview-response" data-trade-preview-response>Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.</div>
+                    </section>
+                    <section class="trade-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Position</div>
+                            <div class="trade-panel-note" data-trade-position-note>No account</div>
+                        </div>
+                        <div data-trade-position-list>
+                            <div class="trade-empty">Select an account to show relevant positions.</div>
+                        </div>
+                    </section>
+                    <section class="trade-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Orders</div>
+                            <div class="trade-order-tools">
+                                <button type="button" class="trade-order-toggle" data-trade-orders-toggle>Show</button>
+                                <button type="button" class="trade-account-refresh" data-trade-orders-refresh title="Refresh orders" aria-label="Refresh orders">↻</button>
+                            </div>
+                        </div>
+                        <div class="trade-panel-note" data-trade-orders-note>No account</div>
+                        <div data-trade-orders-list>
+                            <div class="trade-empty">Select an account to show open and recent orders.</div>
+                        </div>
                     </section>
                 </div>
             </aside>
@@ -25681,15 +25696,6 @@ def index():
                         '<div class="trade-warning-list" data-trade-selected-warnings></div>' +
                     '</section>' +
                     '<section class="trade-panel">' +
-                        '<div class="trade-panel-head"><div class="trade-panel-title">Position</div><div class="trade-panel-note" data-trade-position-note>No account</div></div>' +
-                        '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
-                    '</section>' +
-                    '<section class="trade-panel">' +
-                        '<div class="trade-panel-head"><div class="trade-panel-title">Orders</div><button type="button" class="trade-account-refresh" data-trade-orders-refresh title="Refresh orders" aria-label="Refresh orders">↻</button></div>' +
-                        '<div class="trade-panel-note" data-trade-orders-note>No account</div>' +
-                        '<div data-trade-orders-list><div class="trade-empty">Select an account to show open and recent orders.</div></div>' +
-                    '</section>' +
-                    '<section class="trade-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Order Ticket</div><div class="trade-panel-note" data-trade-ticket-note>Preview only</div></div>' +
                         '<div class="trade-action-grid" aria-label="Order action">' +
                             '<button type="button" class="trade-action-button buy active" data-trade-action="BUY_TO_OPEN">Buy Ask</button>' +
@@ -25713,6 +25719,15 @@ def index():
                         '<button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>' +
                         '<button type="button" class="trade-place-button" data-trade-place disabled>Place Live Order</button>' +
                         '<div class="trade-preview-response" data-trade-preview-response>Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.</div>' +
+                    '</section>' +
+                    '<section class="trade-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Position</div><div class="trade-panel-note" data-trade-position-note>No account</div></div>' +
+                        '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
+                    '</section>' +
+                    '<section class="trade-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Orders</div><div class="trade-order-tools"><button type="button" class="trade-order-toggle" data-trade-orders-toggle>Show</button><button type="button" class="trade-account-refresh" data-trade-orders-refresh title="Refresh orders" aria-label="Refresh orders">↻</button></div></div>' +
+                        '<div class="trade-panel-note" data-trade-orders-note>No account</div>' +
+                        '<div data-trade-orders-list><div class="trade-empty">Select an account to show open and recent orders.</div></div>' +
                     '</section>' +
                 '</div>'
             );
@@ -26244,6 +26259,7 @@ def index():
             ordersLoading: false,
             ordersError: '',
             ordersRequestKey: '',
+            ordersCollapsed: true,
             cancelLoadingId: '',
             action: 'BUY_TO_OPEN',
             quantity: 1,
@@ -26317,6 +26333,18 @@ def index():
         }
         function setTradeField(key, text) {
             setTradeText('[data-trade-' + key + ']', text);
+        }
+        function preserveTradeRailScroll(callback) {
+            const shell = document.querySelector('#trade-rail .trade-rail-shell');
+            const scrollTop = shell ? shell.scrollTop : 0;
+            const active = document.activeElement;
+            const preserve = shell && scrollTop > 0 && (!active || !shell.contains(active) || active === shell);
+            callback();
+            if (preserve) {
+                requestAnimationFrame(() => {
+                    if (shell) shell.scrollTop = scrollTop;
+                });
+            }
         }
         function getSelectedTradeContract() {
             const payload = tradeRailState.payload || {};
@@ -26452,46 +26480,55 @@ def index():
             }).join('');
         }
         function renderTradeOrders() {
-            const list = document.querySelector('[data-trade-orders-list]');
-            const note = document.querySelector('[data-trade-orders-note]');
-            if (!list) return;
-            if (!tradeRailState.accountHash) {
-                if (note) note.textContent = 'No account';
-                list.innerHTML = '<div class="trade-empty">Select an account to show open and recent orders.</div>';
-                return;
-            }
-            if (tradeRailState.ordersLoading) {
-                if (note) note.textContent = 'Loading';
-                list.innerHTML = '<div class="trade-empty">Loading Schwab orders...</div>';
-                return;
-            }
-            if (tradeRailState.ordersError) {
-                if (note) note.textContent = 'Unavailable';
-                list.innerHTML = '<div class="trade-empty">' + _escapeHtml(tradeRailState.ordersError) + '</div>';
-                return;
-            }
-            const orders = Array.isArray(tradeRailState.orders) ? tradeRailState.orders : [];
-            if (note) note.textContent = orders.length ? orders.length + ' open/recent' : 'No matching orders';
-            if (!orders.length) {
-                list.innerHTML = '<div class="trade-empty">No open or recent orders for the selected context.</div>';
-                return;
-            }
-            list.innerHTML = orders.map(order => {
-                const leg = getTradeOrderLegSummary(order);
-                const status = order.status || 'UNKNOWN';
-                const price = order.price == null ? '—' : fmtTradePrice(order.price);
-                const cancelable = !!order.cancelable && !!order.order_id;
-                const cancelText = tradeRailState.cancelLoadingId === order.order_id ? 'Canceling...' : 'Cancel';
-                const cancel = cancelable ? '<button type="button" class="trade-order-cancel" data-trade-cancel-order="' + _escapeHtml(order.order_id) + '"' + (tradeRailState.cancelLoadingId ? ' disabled' : '') + '>' + cancelText + '</button>' : '';
-                return '<div class="trade-order-row">' +
-                    '<div><div class="trade-order-symbol">' + _escapeHtml(leg.symbol) + '</div><div class="trade-order-meta">' + _escapeHtml(leg.instruction) + ' · Qty ' + _escapeHtml(String(leg.quantity)) + ' · ' + _escapeHtml(order.order_type || 'ORDER') + ' ' + _escapeHtml(price) + '</div><div class="trade-order-meta">Entered ' + _escapeHtml(fmtTradeOrderTime(order.entered_time)) + '</div></div>' +
-                    '<div class="trade-order-values"><div>' + _escapeHtml(status) + '</div><div class="trade-order-meta">#' + _escapeHtml(order.order_id || '—') + '</div>' + cancel + '</div>' +
-                '</div>';
-            }).join('');
-            list.querySelectorAll('[data-trade-cancel-order]').forEach(btn => {
-                if (btn.__tradeCancelBound) return;
-                btn.__tradeCancelBound = true;
-                btn.addEventListener('click', () => cancelTradeOrder(btn.dataset.tradeCancelOrder || ''));
+            preserveTradeRailScroll(() => {
+                const list = document.querySelector('[data-trade-orders-list]');
+                const note = document.querySelector('[data-trade-orders-note]');
+                const toggle = document.querySelector('[data-trade-orders-toggle]');
+                if (!list) return;
+                if (toggle) toggle.textContent = tradeRailState.ordersCollapsed ? 'Show' : 'Hide';
+                const orders = Array.isArray(tradeRailState.orders) ? tradeRailState.orders : [];
+                if (tradeRailState.ordersCollapsed) {
+                    if (note) note.textContent = tradeRailState.accountHash ? (orders.length ? orders.length + ' open/recent' : 'Collapsed') : 'No account';
+                    list.innerHTML = '';
+                    return;
+                }
+                if (!tradeRailState.accountHash) {
+                    if (note) note.textContent = 'No account';
+                    list.innerHTML = '<div class="trade-empty">Select an account to show open and recent orders.</div>';
+                    return;
+                }
+                if (tradeRailState.ordersLoading) {
+                    if (note) note.textContent = 'Loading';
+                    list.innerHTML = '<div class="trade-empty">Loading Schwab orders...</div>';
+                    return;
+                }
+                if (tradeRailState.ordersError) {
+                    if (note) note.textContent = 'Unavailable';
+                    list.innerHTML = '<div class="trade-empty">' + _escapeHtml(tradeRailState.ordersError) + '</div>';
+                    return;
+                }
+                if (note) note.textContent = orders.length ? orders.length + ' open/recent' : 'No matching orders';
+                if (!orders.length) {
+                    list.innerHTML = '<div class="trade-empty">No open or recent orders for the selected context.</div>';
+                    return;
+                }
+                list.innerHTML = orders.map(order => {
+                    const leg = getTradeOrderLegSummary(order);
+                    const status = order.status || 'UNKNOWN';
+                    const price = order.price == null ? '—' : fmtTradePrice(order.price);
+                    const cancelable = !!order.cancelable && !!order.order_id;
+                    const cancelText = tradeRailState.cancelLoadingId === order.order_id ? 'Canceling...' : 'Cancel';
+                    const cancel = cancelable ? '<button type="button" class="trade-order-cancel" data-trade-cancel-order="' + _escapeHtml(order.order_id) + '"' + (tradeRailState.cancelLoadingId ? ' disabled' : '') + '>' + cancelText + '</button>' : '';
+                    return '<div class="trade-order-row">' +
+                        '<div><div class="trade-order-symbol">' + _escapeHtml(leg.symbol) + '</div><div class="trade-order-meta">' + _escapeHtml(leg.instruction) + ' · Qty ' + _escapeHtml(String(leg.quantity)) + ' · ' + _escapeHtml(order.order_type || 'ORDER') + ' ' + _escapeHtml(price) + '</div><div class="trade-order-meta">Entered ' + _escapeHtml(fmtTradeOrderTime(order.entered_time)) + '</div></div>' +
+                        '<div class="trade-order-values"><div>' + _escapeHtml(status) + '</div><div class="trade-order-meta">#' + _escapeHtml(order.order_id || '—') + '</div>' + cancel + '</div>' +
+                    '</div>';
+                }).join('');
+                list.querySelectorAll('[data-trade-cancel-order]').forEach(btn => {
+                    if (btn.__tradeCancelBound) return;
+                    btn.__tradeCancelBound = true;
+                    btn.addEventListener('click', () => cancelTradeOrder(btn.dataset.tradeCancelOrder || ''));
+                });
             });
         }
         function requestTradeAccountDetails(options = {}) {
@@ -26613,15 +26650,36 @@ def index():
             const payload = tradeRailState.payload || {};
             const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
             const expiry = tradeRailState.expiry || (payload.selected_expiries && payload.selected_expiries[0]) || '';
-            return contracts.filter(row => {
+            const rows = contracts.filter(row => {
                 if (tradeRailState.optionType && row.option_type !== tradeRailState.optionType) return false;
                 if (expiry && row.expiry !== expiry) return false;
                 return true;
-            }).sort((a, b) => {
-                const spot = Number(payload.underlying_price);
-                const da = Math.abs((Number(a.strike) || 0) - (Number.isFinite(spot) ? spot : 0));
-                const db = Math.abs((Number(b.strike) || 0) - (Number.isFinite(spot) ? spot : 0));
-                return da - db || ((Number(a.strike) || 0) - (Number(b.strike) || 0));
+            });
+            const spot = Number(payload.underlying_price);
+            if (!rows.length || !Number.isFinite(spot)) {
+                return rows.sort((a, b) => (Number(a.strike) || 0) - (Number(b.strike) || 0));
+            }
+            const atmStrike = rows.reduce((best, row) => {
+                const strike = Number(row.strike) || 0;
+                const bestStrike = Number(best.strike) || 0;
+                return Math.abs(strike - spot) < Math.abs(bestStrike - spot) ? row : best;
+            }, rows[0]).strike;
+            const atm = Number(atmStrike) || spot;
+            return rows.sort((a, b) => {
+                const sa = Number(a.strike) || 0;
+                const sb = Number(b.strike) || 0;
+                if (sa === atm && sb !== atm) return -1;
+                if (sb === atm && sa !== atm) return 1;
+                if (tradeRailState.optionType === 'PUT') {
+                    const ga = sa < atm ? 0 : 1;
+                    const gb = sb < atm ? 0 : 1;
+                    if (ga !== gb) return ga - gb;
+                    return ga === 0 ? sb - sa : sa - sb;
+                }
+                const ga = sa > atm ? 0 : 1;
+                const gb = sb > atm ? 0 : 1;
+                if (ga !== gb) return ga - gb;
+                return ga === 0 ? sa - sb : sb - sa;
             });
         }
         function renderTradeExpiryOptions(payload) {
@@ -26670,77 +26728,78 @@ def index():
         function renderTradeRail() {
             const rail = document.getElementById('trade-rail');
             if (!rail) return;
-            renderTradeAccounts();
-            renderTradePositions();
-            renderTradeOrders();
-            const list = rail.querySelector('[data-trade-chain-list]');
-            const meta = rail.querySelector('[data-trade-chain-meta]');
-            const warnings = rail.querySelector('[data-trade-chain-warnings]');
-            const payload = tradeRailState.payload;
-            rail.querySelectorAll('[data-trade-type]').forEach(btn => {
-                const active = btn.dataset.tradeType === tradeRailState.optionType;
-                btn.classList.toggle('active', active);
-                btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-            });
-            if (!payload) {
-                if (list) list.innerHTML = '<div class="trade-empty">' + (tradeRailState.loading ? 'Loading cached contracts...' : 'Run a chain update to load cached contracts.') + '</div>';
-                if (meta) meta.textContent = tradeRailState.loading ? 'Loading' : 'Cached chain';
-                renderTradeSelected(null);
-                return;
-            }
-            renderTradeExpiryOptions(payload);
-            const rows = getTradeContractsForView();
-            if (meta) {
-                const spot = payload.underlying_price == null ? '—' : fmtTradePrice(payload.underlying_price);
-                meta.textContent = (payload.ticker || tradeRailState.ticker || '—') + ' @ ' + spot + ' · ' + rows.length + ' shown';
-            }
-            if (warnings) warnings.textContent = (payload.warnings || []).join(' · ');
-            if (!rows.length) {
-                if (list) list.innerHTML = '<div class="trade-empty">No contracts match the selected filters.</div>';
-                renderTradeSelected(null);
-                return;
-            }
-            if (!rows.some(row => row.contract_symbol === tradeRailState.selectedSymbol)) {
-                const previousSymbol = tradeRailState.selectedSymbol;
-                tradeRailState.selectedSymbol = rows[0].contract_symbol;
-                if (previousSymbol !== tradeRailState.selectedSymbol) {
-                    tradeRailState.limitPrice = '';
-                    tradeRailState.accountDetails = null;
-                    tradeRailState.accountRequestKey = '';
-                    tradeRailState.orders = [];
-                    tradeRailState.ordersRequestKey = '';
-                    invalidateTradePreview('Contract changed. Preview again.');
+            preserveTradeRailScroll(() => {
+                renderTradeAccounts();
+                renderTradePositions();
+                renderTradeOrders();
+                const list = rail.querySelector('[data-trade-chain-list]');
+                const meta = rail.querySelector('[data-trade-chain-meta]');
+                const warnings = rail.querySelector('[data-trade-chain-warnings]');
+                const payload = tradeRailState.payload;
+                rail.querySelectorAll('[data-trade-type]').forEach(btn => {
+                    const active = btn.dataset.tradeType === tradeRailState.optionType;
+                    btn.classList.toggle('active', active);
+                    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+                });
+                if (!payload) {
+                    if (list) list.innerHTML = '<div class="trade-empty">' + (tradeRailState.loading ? 'Loading cached contracts...' : 'Run a chain update to load cached contracts.') + '</div>';
+                    if (meta) meta.textContent = tradeRailState.loading ? 'Loading' : 'Cached chain';
+                    renderTradeSelected(null);
+                    return;
                 }
-            }
-            if (list) {
-                list.innerHTML = rows.map(row => {
-                    const typeCls = row.option_type === 'PUT' ? 'put' : 'call';
-                    const warn = (row.warnings || []).length ? '<span class="trade-contract-warn">!</span>' : '';
-                    return '<button type="button" class="trade-contract-row ' + typeCls + (row.contract_symbol === tradeRailState.selectedSymbol ? ' active' : '') + '" data-trade-symbol="' + _escapeHtml(row.contract_symbol) + '">' +
-                        '<span class="trade-contract-strike">' + warn + ' ' + _escapeHtml(fmtTradePrice(row.strike)) + '</span>' +
-                        '<span>' + _escapeHtml(fmtTradePrice(row.bid)) + '</span>' +
-                        '<span>' + _escapeHtml(fmtTradePrice(row.ask)) + '</span>' +
-                        '<span>' + _escapeHtml(fmtTradePrice(row.mid || row.mark)) + '</span>' +
-                        '<span>' + _escapeHtml(fmtTradeInt(row.volume)) + '/' + _escapeHtml(fmtTradeInt(row.open_interest)) + '</span>' +
-                    '</button>';
-                }).join('');
-            }
-            const selected = rows.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || rows[0];
-            renderTradeSelected(selected);
-            requestTradeAccountDetails();
-            requestTradeOrders();
-            rail.querySelectorAll('[data-trade-symbol]').forEach(btn => {
-                if (btn.__tradeSymbolBound) return;
-                btn.__tradeSymbolBound = true;
-                btn.addEventListener('click', () => {
-                    tradeRailState.selectedSymbol = btn.dataset.tradeSymbol || '';
-                    tradeRailState.limitPrice = '';
-                    tradeRailState.accountDetails = null;
-                    tradeRailState.accountRequestKey = '';
-                    tradeRailState.orders = [];
-                    tradeRailState.ordersRequestKey = '';
-                    invalidateTradePreview('Contract changed. Preview again.');
-                    renderTradeRail();
+                renderTradeExpiryOptions(payload);
+                const rows = getTradeContractsForView();
+                if (meta) {
+                    const spot = payload.underlying_price == null ? '—' : fmtTradePrice(payload.underlying_price);
+                    meta.textContent = (payload.ticker || tradeRailState.ticker || '—') + ' @ ' + spot + ' · ' + rows.length + ' shown';
+                }
+                if (warnings) warnings.textContent = (payload.warnings || []).join(' · ');
+                if (!rows.length) {
+                    if (list) list.innerHTML = '<div class="trade-empty">No contracts match the selected filters.</div>';
+                    renderTradeSelected(null);
+                    return;
+                }
+                if (!rows.some(row => row.contract_symbol === tradeRailState.selectedSymbol)) {
+                    const previousSymbol = tradeRailState.selectedSymbol;
+                    tradeRailState.selectedSymbol = rows[0].contract_symbol;
+                    if (previousSymbol !== tradeRailState.selectedSymbol) {
+                        tradeRailState.limitPrice = '';
+                        tradeRailState.accountDetails = null;
+                        tradeRailState.accountRequestKey = '';
+                        tradeRailState.orders = [];
+                        tradeRailState.ordersRequestKey = '';
+                        invalidateTradePreview('Contract changed. Preview again.');
+                    }
+                }
+                if (list) {
+                    list.innerHTML = rows.map(row => {
+                        const typeCls = row.option_type === 'PUT' ? 'put' : 'call';
+                        return '<button type="button" class="trade-contract-row ' + typeCls + (row.contract_symbol === tradeRailState.selectedSymbol ? ' active' : '') + '" data-trade-symbol="' + _escapeHtml(row.contract_symbol) + '">' +
+                            '<span class="trade-contract-strike">' + _escapeHtml(fmtTradePrice(row.strike)) + '</span>' +
+                            '<span>' + _escapeHtml(fmtTradePrice(row.bid)) + '</span>' +
+                            '<span>' + _escapeHtml(fmtTradePrice(row.ask)) + '</span>' +
+                            '<span>' + _escapeHtml(fmtTradePrice(row.mid || row.mark)) + '</span>' +
+                            '<span>' + _escapeHtml(fmtTradeInt(row.volume)) + '/' + _escapeHtml(fmtTradeInt(row.open_interest)) + '</span>' +
+                        '</button>';
+                    }).join('');
+                }
+                const selected = rows.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || rows[0];
+                renderTradeSelected(selected);
+                requestTradeAccountDetails();
+                requestTradeOrders();
+                rail.querySelectorAll('[data-trade-symbol]').forEach(btn => {
+                    if (btn.__tradeSymbolBound) return;
+                    btn.__tradeSymbolBound = true;
+                    btn.addEventListener('click', () => {
+                        tradeRailState.selectedSymbol = btn.dataset.tradeSymbol || '';
+                        tradeRailState.limitPrice = '';
+                        tradeRailState.accountDetails = null;
+                        tradeRailState.accountRequestKey = '';
+                        tradeRailState.orders = [];
+                        tradeRailState.ordersRequestKey = '';
+                        invalidateTradePreview('Contract changed. Preview again.');
+                        renderTradeRail();
+                    });
                 });
             });
         }
@@ -26928,6 +26987,14 @@ def index():
                 ordersRefresh.addEventListener('click', () => {
                     requestTradeAccountDetails({ force: true });
                     requestTradeOrders({ force: true });
+                });
+            }
+            const ordersToggle = root.querySelector('[data-trade-orders-toggle]');
+            if (ordersToggle) {
+                ordersToggle.addEventListener('click', () => {
+                    tradeRailState.ordersCollapsed = !tradeRailState.ordersCollapsed;
+                    renderTradeOrders();
+                    if (!tradeRailState.ordersCollapsed) requestTradeOrders({ force: true });
                 });
             }
             root.querySelectorAll('[data-trade-type]').forEach(btn => {
