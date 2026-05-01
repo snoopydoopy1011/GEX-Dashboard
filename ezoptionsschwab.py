@@ -69,7 +69,7 @@ def not_found_error(error):
 def internal_error(error):
     # Expose the error message for API-like endpoints so the frontend can show details
     msg = getattr(error, 'description', None) or str(error)
-    if request.path.startswith('/api/') or request.path.startswith('/update') or request.path.startswith('/expirations') or request.path.startswith('/trade_'):
+    if request.path.startswith('/api/') or request.path.startswith('/update') or request.path.startswith('/expirations') or request.path.startswith('/trade_') or request.path.startswith('/trade/'):
         return jsonify({'error': msg}), 500
     return "500 - Internal Server Error", 500
 
@@ -4634,6 +4634,163 @@ def build_trading_chain_payload(ticker, calls, puts, S, selected_expiries=None, 
         'strike_range': range_pct,
         'contracts': contracts,
         'warnings': sorted(set(warnings_out)),
+    }
+
+
+def _trade_api_error(message, status=400, detail=None):
+    payload = {'error': message}
+    if detail:
+        payload['detail'] = str(detail)[:160]
+    return jsonify(payload), status
+
+
+def _require_schwab_client():
+    if client is None:
+        return 'Schwab client is not initialized. Check app credentials and token setup.'
+    return None
+
+
+def _safe_response_json(response):
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
+def _mask_account_tail(value):
+    text = ''.join(ch for ch in str(value or '') if ch.isalnum())
+    if not text:
+        return ''
+    return text[-4:].rjust(min(4, len(text)), '*')
+
+
+def _normalize_linked_accounts(raw_accounts):
+    if isinstance(raw_accounts, dict):
+        if isinstance(raw_accounts.get('accounts'), list):
+            raw_accounts = raw_accounts.get('accounts')
+        elif isinstance(raw_accounts.get('accountNumbers'), list):
+            raw_accounts = raw_accounts.get('accountNumbers')
+        else:
+            raw_accounts = [raw_accounts]
+    if not isinstance(raw_accounts, list):
+        return []
+
+    accounts = []
+    for idx, row in enumerate(raw_accounts, start=1):
+        if not isinstance(row, dict):
+            continue
+        account_hash = row.get('hashValue') or row.get('accountHash') or row.get('account_hash')
+        if not account_hash:
+            continue
+        raw_number = row.get('accountNumber') or row.get('account_number')
+        masked = row.get('displayName') or row.get('maskedAccountNumber') or row.get('masked_account_number')
+        if not masked and raw_number:
+            masked = f"Account *{_mask_account_tail(raw_number)}"
+        if not masked:
+            masked = f"Schwab account {idx}"
+        account_type = row.get('type') or row.get('accountType') or row.get('account_type')
+        accounts.append({
+            'account_hash': str(account_hash),
+            'display_label': str(masked),
+            'account_type': str(account_type) if account_type else None,
+        })
+    return accounts
+
+
+def _pick_balance_fields(account):
+    balances = {}
+    for bucket_name in ('currentBalances', 'initialBalances', 'projectedBalances'):
+        bucket = account.get(bucket_name) if isinstance(account, dict) else {}
+        if not isinstance(bucket, dict):
+            continue
+        for key in (
+            'buyingPower',
+            'cashBalance',
+            'availableFunds',
+            'optionBuyingPower',
+            'liquidationValue',
+            'accountValue',
+            'longOptionMarketValue',
+            'shortOptionMarketValue',
+        ):
+            if key in bucket and bucket[key] is not None:
+                balances[key] = bucket[key]
+    return balances
+
+
+def _position_number(row, key):
+    try:
+        value = row.get(key)
+        if value is None:
+            return None
+        value = float(value)
+        if not math.isfinite(value):
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def _position_matches_ticker(symbol, instrument, ticker):
+    ticker = format_ticker(ticker or '')
+    if not ticker:
+        return False
+    underlying = str(instrument.get('underlyingSymbol') or instrument.get('underlying') or '').upper()
+    if underlying == ticker:
+        return True
+    clean_symbol = str(symbol or '').upper().replace(' ', '')
+    return clean_symbol.startswith(ticker)
+
+
+def _normalize_trade_positions(account, ticker=None, contract_symbol=None):
+    raw_positions = account.get('positions') if isinstance(account, dict) else []
+    if not isinstance(raw_positions, list):
+        raw_positions = []
+    contract_symbol = str(contract_symbol or '').strip()
+    normalized = []
+    for row in raw_positions:
+        if not isinstance(row, dict):
+            continue
+        instrument = row.get('instrument') if isinstance(row.get('instrument'), dict) else {}
+        symbol = str(instrument.get('symbol') or row.get('symbol') or '').strip()
+        exact_match = bool(contract_symbol and symbol == contract_symbol)
+        ticker_match = _position_matches_ticker(symbol, instrument, ticker)
+        if contract_symbol and not exact_match and not ticker_match:
+            continue
+        if not contract_symbol and ticker and not ticker_match:
+            continue
+        long_qty = _position_number(row, 'longQuantity') or 0
+        short_qty = _position_number(row, 'shortQuantity') or 0
+        quantity = long_qty - short_qty
+        normalized.append({
+            'symbol': symbol,
+            'asset_type': instrument.get('assetType') or row.get('assetType'),
+            'description': instrument.get('description'),
+            'put_call': instrument.get('putCall'),
+            'quantity': quantity,
+            'long_quantity': long_qty,
+            'short_quantity': short_qty,
+            'average_price': _position_number(row, 'averagePrice'),
+            'market_value': _position_number(row, 'marketValue'),
+            'day_pnl': _position_number(row, 'currentDayProfitLoss'),
+            'day_pnl_pct': _position_number(row, 'currentDayProfitLossPercentage'),
+            'selected_contract_match': exact_match,
+        })
+    normalized.sort(key=lambda item: (not item.get('selected_contract_match'), item.get('symbol') or ''))
+    return normalized[:40]
+
+
+def build_trade_account_details_payload(raw_details, account_hash, ticker=None, contract_symbol=None):
+    """Return a conservative account details payload without plain account numbers."""
+    account = raw_details.get('securitiesAccount') if isinstance(raw_details, dict) else {}
+    if not isinstance(account, dict):
+        account = raw_details if isinstance(raw_details, dict) else {}
+    account_type = account.get('type') or account.get('accountType')
+    return {
+        'account_hash': str(account_hash or ''),
+        'account_type': str(account_type) if account_type else None,
+        'balances': _pick_balance_fields(account),
+        'positions': _normalize_trade_positions(account, ticker=ticker, contract_symbol=contract_symbol),
     }
 
 
@@ -10078,7 +10235,8 @@ def index():
             letter-spacing: 0.06em;
         }
         .trade-filter-grid select,
-        .trade-filter-grid input {
+        .trade-filter-grid input,
+        .trade-account-select {
             width: 100%;
             min-height: 28px;
             border: 1px solid var(--border);
@@ -10203,6 +10361,57 @@ def index():
         }
         .trade-warning-list {
             color: var(--warn);
+        }
+        .trade-account-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 6px;
+            align-items: end;
+        }
+        .trade-account-row label {
+            min-width: 0;
+            color: var(--fg-2);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .trade-account-refresh {
+            min-height: 28px;
+            min-width: 32px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            cursor: pointer;
+        }
+        .trade-balance-line,
+        .trade-position-row {
+            margin-top: 7px;
+            color: var(--fg-1);
+            font-size: 11px;
+            line-height: 1.35;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-position-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            padding-top: 7px;
+            border-top: 1px solid var(--border);
+        }
+        .trade-position-symbol {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--fg-0);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        }
+        .trade-position-meta {
+            color: var(--fg-2);
+        }
+        .trade-position-values {
+            text-align: right;
         }
         .trade-selected-symbol {
             color: var(--fg-0);
@@ -14520,6 +14729,7 @@ def index():
             <div class="right-rail-resize-handle" id="right-rail-resize-handle" role="separator" aria-label="Resize right rail" aria-orientation="vertical"></div>
             <div class="trade-rail-header" id="trade-rail-header">
                 <div class="trade-rail-title">Order Entry</div>
+                <div class="trade-rail-title" data-trade-account-header>No account</div>
                 <div class="trade-rail-badge">Preview Only</div>
             </div>
             <button type="button" class="trade-rail-collapse-toggle" id="trade-rail-collapse-toggle" title="Collapse trading rail" aria-label="Collapse trading rail">›</button>
@@ -14798,6 +15008,22 @@ def index():
                 <div class="trade-rail-shell">
                     <section class="trade-panel">
                         <div class="trade-panel-head">
+                            <div class="trade-panel-title">Account</div>
+                            <div class="trade-panel-note" data-trade-account-status>Read only</div>
+                        </div>
+                        <div class="trade-account-row">
+                            <label>Selected
+                                <select class="trade-account-select" data-trade-account-select>
+                                    <option value="">Load linked accounts</option>
+                                </select>
+                            </label>
+                            <button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button>
+                        </div>
+                        <div class="trade-balance-line" data-trade-buying-power>Buying power —</div>
+                        <div class="trade-warning-list" data-trade-account-warnings></div>
+                    </section>
+                    <section class="trade-panel">
+                        <div class="trade-panel-head">
                             <div class="trade-panel-title">Contract Picker</div>
                             <div class="trade-panel-note" data-trade-chain-meta>Cached chain</div>
                         </div>
@@ -14836,6 +15062,15 @@ def index():
                             <div class="trade-field"><div class="trade-field-label">Quote / Trade</div><div class="trade-field-value" data-trade-selected-time>—</div></div>
                         </div>
                         <div class="trade-warning-list" data-trade-selected-warnings></div>
+                    </section>
+                    <section class="trade-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Position</div>
+                            <div class="trade-panel-note" data-trade-position-note>No account</div>
+                        </div>
+                        <div data-trade-position-list>
+                            <div class="trade-empty">Select an account to show relevant positions.</div>
+                        </div>
                     </section>
                     <section class="trade-panel">
                         <div class="trade-panel-head">
@@ -25047,6 +25282,15 @@ def index():
             return (
                 '<div class="trade-rail-shell">' +
                     '<section class="trade-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Account</div><div class="trade-panel-note" data-trade-account-status>Read only</div></div>' +
+                        '<div class="trade-account-row">' +
+                            '<label>Selected<select class="trade-account-select" data-trade-account-select><option value="">Load linked accounts</option></select></label>' +
+                            '<button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button>' +
+                        '</div>' +
+                        '<div class="trade-balance-line" data-trade-buying-power>Buying power —</div>' +
+                        '<div class="trade-warning-list" data-trade-account-warnings></div>' +
+                    '</section>' +
+                    '<section class="trade-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Contract Picker</div><div class="trade-panel-note" data-trade-chain-meta>Cached chain</div></div>' +
                         '<div class="trade-segment" aria-label="Option type">' +
                             '<button type="button" class="active call" data-trade-type="CALL">Calls</button>' +
@@ -25074,6 +25318,10 @@ def index():
                             '<div class="trade-field"><div class="trade-field-label">Quote / Trade</div><div class="trade-field-value" data-trade-selected-time>—</div></div>' +
                         '</div>' +
                         '<div class="trade-warning-list" data-trade-selected-warnings></div>' +
+                    '</section>' +
+                    '<section class="trade-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Position</div><div class="trade-panel-note" data-trade-position-note>No account</div></div>' +
+                        '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
                     '</section>' +
                     '<section class="trade-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Order Ticket</div><div class="trade-panel-note">Read only</div></div>' +
@@ -25105,7 +25353,7 @@ def index():
                 header = document.createElement('div');
                 header.className = 'trade-rail-header';
                 header.id = 'trade-rail-header';
-                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-badge">Preview Only</div>';
+                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-title" data-trade-account-header>No account</div><div class="trade-rail-badge">Preview Only</div>';
                 grid.appendChild(header);
             }
             ensureTradeRailControls(grid);
@@ -25612,6 +25860,14 @@ def index():
             selectedSymbol: '',
             loading: false,
             requestKey: '',
+            accounts: [],
+            accountHash: '',
+            accountLabel: '',
+            accountLoading: false,
+            accountDetails: null,
+            accountDetailsLoading: false,
+            accountError: '',
+            accountRequestKey: '',
         };
 
         function fmtTradePrice(value) {
@@ -25625,6 +25881,10 @@ def index():
         function fmtTradePct(value) {
             const n = Number(value);
             return Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—';
+        }
+        function fmtTradeMoney(value) {
+            const n = Number(value);
+            return Number.isFinite(n) ? '$' + n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—';
         }
         function fmtTradeTimestamp(ms) {
             const n = Number(ms);
@@ -25654,6 +25914,137 @@ def index():
         }
         function setTradeField(key, text) {
             setTradeText('[data-trade-' + key + ']', text);
+        }
+        function getSelectedTradeContract() {
+            const payload = tradeRailState.payload || {};
+            const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
+            return contracts.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || null;
+        }
+        function getBestBuyingPower(details) {
+            const balances = (details && details.balances) || {};
+            return balances.optionBuyingPower ?? balances.buyingPower ?? balances.availableFunds ?? balances.cashBalance ?? null;
+        }
+        function renderTradeAccounts() {
+            const select = document.querySelector('[data-trade-account-select]');
+            const status = document.querySelector('[data-trade-account-status]');
+            const warnings = document.querySelector('[data-trade-account-warnings]');
+            const buyingPower = document.querySelector('[data-trade-buying-power]');
+            const header = document.querySelector('[data-trade-account-header]');
+            if (status) status.textContent = tradeRailState.accountLoading ? 'Loading' : (tradeRailState.accountHash ? 'Selected' : 'Read only');
+            if (header) header.textContent = tradeRailState.accountLabel || 'No account';
+            if (warnings) warnings.textContent = tradeRailState.accountError || '';
+            if (buyingPower) buyingPower.textContent = 'Buying power ' + fmtTradeMoney(getBestBuyingPower(tradeRailState.accountDetails));
+            if (select) {
+                const options = tradeRailState.accounts.length
+                    ? tradeRailState.accounts.map(account => '<option value="' + _escapeHtml(account.account_hash) + '"' + (account.account_hash === tradeRailState.accountHash ? ' selected' : '') + '>' + _escapeHtml(account.display_label || 'Schwab account') + '</option>').join('')
+                    : '<option value="">' + (tradeRailState.accountLoading ? 'Loading accounts...' : 'No account loaded') + '</option>';
+                select.innerHTML = options;
+                select.disabled = tradeRailState.accountLoading || !tradeRailState.accounts.length;
+            }
+        }
+        function renderTradePositions() {
+            const list = document.querySelector('[data-trade-position-list]');
+            const note = document.querySelector('[data-trade-position-note]');
+            if (!list) return;
+            if (!tradeRailState.accountHash) {
+                if (note) note.textContent = 'No account';
+                list.innerHTML = '<div class="trade-empty">Select an account to show relevant positions.</div>';
+                return;
+            }
+            if (tradeRailState.accountDetailsLoading) {
+                if (note) note.textContent = 'Loading';
+                list.innerHTML = '<div class="trade-empty">Loading account positions...</div>';
+                return;
+            }
+            const positions = Array.isArray(tradeRailState.accountDetails && tradeRailState.accountDetails.positions) ? tradeRailState.accountDetails.positions : [];
+            if (note) note.textContent = positions.length ? positions.length + ' relevant' : 'No matching position';
+            if (!positions.length) {
+                const selected = getSelectedTradeContract();
+                list.innerHTML = '<div class="trade-empty">No position found for ' + _escapeHtml((selected && selected.contract_symbol) || tradeRailState.ticker || 'selection') + '.</div>';
+                return;
+            }
+            list.innerHTML = positions.map(pos => {
+                const qty = Number(pos.quantity);
+                const qtyText = Number.isFinite(qty) ? qty.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—';
+                const mv = fmtTradeMoney(pos.market_value);
+                const day = fmtTradeMoney(pos.day_pnl);
+                return '<div class="trade-position-row">' +
+                    '<div><div class="trade-position-symbol">' + _escapeHtml(pos.symbol || '—') + '</div><div class="trade-position-meta">' + _escapeHtml(pos.asset_type || 'Position') + (pos.put_call ? ' · ' + _escapeHtml(pos.put_call) : '') + '</div></div>' +
+                    '<div class="trade-position-values"><div>Qty ' + _escapeHtml(qtyText) + '</div><div class="trade-position-meta">' + _escapeHtml(mv) + ' · Day ' + _escapeHtml(day) + '</div></div>' +
+                '</div>';
+            }).join('');
+        }
+        function requestTradeAccountDetails(options = {}) {
+            if (!tradeRailState.accountHash) {
+                tradeRailState.accountDetails = null;
+                tradeRailState.accountRequestKey = '';
+                renderTradeAccounts();
+                renderTradePositions();
+                return;
+            }
+            const ticker = getTradeRailTicker();
+            const selected = getSelectedTradeContract();
+            const symbol = selected ? selected.contract_symbol : tradeRailState.selectedSymbol;
+            const key = tradeRailState.accountHash + '|' + ticker + '|' + (symbol || '');
+            if (tradeRailState.accountDetailsLoading && tradeRailState.accountRequestKey === key) return;
+            if (!options.force && tradeRailState.accountRequestKey === key && tradeRailState.accountDetails) return;
+            tradeRailState.accountDetailsLoading = true;
+            tradeRailState.accountRequestKey = key;
+            renderTradePositions();
+            fetch('/trade/account_details', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ account_hash: tradeRailState.accountHash, ticker, contract_symbol: symbol || '' }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || 'Account details unavailable');
+                tradeRailState.accountDetails = data;
+                tradeRailState.accountDetailsLoading = false;
+                tradeRailState.accountError = '';
+                renderTradeAccounts();
+                renderTradePositions();
+            })
+            .catch(err => {
+                tradeRailState.accountDetails = null;
+                tradeRailState.accountDetailsLoading = false;
+                tradeRailState.accountError = err.message || 'Account details unavailable';
+                renderTradeAccounts();
+                renderTradePositions();
+            });
+        }
+        function requestTradeAccounts(options = {}) {
+            if (!options.force && (tradeRailState.accountLoading || tradeRailState.accounts.length)) return;
+            tradeRailState.accountLoading = true;
+            tradeRailState.accountError = '';
+            renderTradeAccounts();
+            fetch('/trade/accounts')
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || 'Linked accounts unavailable');
+                tradeRailState.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+                if (!tradeRailState.accounts.some(account => account.account_hash === tradeRailState.accountHash)) {
+                    const first = tradeRailState.accounts[0] || {};
+                    tradeRailState.accountHash = first.account_hash || '';
+                    tradeRailState.accountLabel = first.display_label || '';
+                    tradeRailState.accountDetails = null;
+                    tradeRailState.accountRequestKey = '';
+                }
+                tradeRailState.accountLoading = false;
+                tradeRailState.accountError = (data.warnings || []).join(' · ');
+                renderTradeAccounts();
+                requestTradeAccountDetails({ force: true });
+            })
+            .catch(err => {
+                tradeRailState.accounts = [];
+                tradeRailState.accountHash = '';
+                tradeRailState.accountLabel = '';
+                tradeRailState.accountDetails = null;
+                tradeRailState.accountLoading = false;
+                tradeRailState.accountError = err.message || 'Linked accounts unavailable';
+                renderTradeAccounts();
+                renderTradePositions();
+            });
         }
         function getTradeContractsForView() {
             const payload = tradeRailState.payload || {};
@@ -25721,6 +26112,8 @@ def index():
         function renderTradeRail() {
             const rail = document.getElementById('trade-rail');
             if (!rail) return;
+            renderTradeAccounts();
+            renderTradePositions();
             const list = rail.querySelector('[data-trade-chain-list]');
             const meta = rail.querySelector('[data-trade-chain-meta]');
             const warnings = rail.querySelector('[data-trade-chain-warnings]');
@@ -25766,11 +26159,14 @@ def index():
             }
             const selected = rows.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || rows[0];
             renderTradeSelected(selected);
+            requestTradeAccountDetails();
             rail.querySelectorAll('[data-trade-symbol]').forEach(btn => {
                 if (btn.__tradeSymbolBound) return;
                 btn.__tradeSymbolBound = true;
                 btn.addEventListener('click', () => {
                     tradeRailState.selectedSymbol = btn.dataset.tradeSymbol || '';
+                    tradeRailState.accountDetails = null;
+                    tradeRailState.accountRequestKey = '';
                     renderTradeRail();
                 });
             });
@@ -25802,6 +26198,8 @@ def index():
                 tradeRailState.payload = data;
                 tradeRailState.expiry = (data.selected_expiries && data.selected_expiries[0]) || tradeRailState.expiry || '';
                 tradeRailState.loading = false;
+                tradeRailState.accountDetails = null;
+                tradeRailState.accountRequestKey = '';
                 renderTradeRail();
             })
             .catch(err => {
@@ -25815,10 +26213,29 @@ def index():
         function wireTradeRailPickerControls(root = document.getElementById('trade-rail')) {
             if (!root || root.__tradePickerWired) return;
             root.__tradePickerWired = true;
+            const accountSelect = root.querySelector('[data-trade-account-select]');
+            if (accountSelect) {
+                accountSelect.addEventListener('change', () => {
+                    const selectedHash = accountSelect.value || '';
+                    const account = tradeRailState.accounts.find(item => item.account_hash === selectedHash) || {};
+                    tradeRailState.accountHash = selectedHash;
+                    tradeRailState.accountLabel = account.display_label || '';
+                    tradeRailState.accountDetails = null;
+                    tradeRailState.accountRequestKey = '';
+                    renderTradeAccounts();
+                    requestTradeAccountDetails({ force: true });
+                });
+            }
+            const accountRefresh = root.querySelector('[data-trade-account-refresh]');
+            if (accountRefresh) {
+                accountRefresh.addEventListener('click', () => requestTradeAccounts({ force: true }));
+            }
             root.querySelectorAll('[data-trade-type]').forEach(btn => {
                 btn.addEventListener('click', () => {
                     tradeRailState.optionType = btn.dataset.tradeType === 'PUT' ? 'PUT' : 'CALL';
                     tradeRailState.selectedSymbol = '';
+                    tradeRailState.accountDetails = null;
+                    tradeRailState.accountRequestKey = '';
                     renderTradeRail();
                 });
             });
@@ -25827,6 +26244,8 @@ def index():
                 expirySelect.addEventListener('change', () => {
                     tradeRailState.expiry = expirySelect.value || '';
                     tradeRailState.selectedSymbol = '';
+                    tradeRailState.accountDetails = null;
+                    tradeRailState.accountRequestKey = '';
                     requestTradeChain({ force: true });
                 });
             }
@@ -25835,6 +26254,8 @@ def index():
                 rangeInput.addEventListener('change', () => {
                     tradeRailState.strikeRangePct = Number(rangeInput.value) || 2;
                     tradeRailState.selectedSymbol = '';
+                    tradeRailState.accountDetails = null;
+                    tradeRailState.accountRequestKey = '';
                     requestTradeChain({ force: true });
                 });
             }
@@ -25899,6 +26320,7 @@ def index():
             }
             if (!collapsed) {
                 syncTradeRailWidth();
+                requestTradeAccounts();
                 requestTradeChain();
             }
             scheduleTradeRailResizeRefresh();
@@ -30093,6 +30515,59 @@ def trade_chain():
     )
     if not payload.get('contracts'):
         payload['warnings'] = sorted(set((payload.get('warnings') or []) + ['No contracts matched the cached chain filters.']))
+    return jsonify(payload)
+
+
+@app.route('/trade/accounts', methods=['GET'])
+def trade_accounts():
+    """Read-only linked account lookup for the trading rail."""
+    client_error = _require_schwab_client()
+    if client_error:
+        return _trade_api_error(client_error, 503)
+    try:
+        response = client.linked_accounts()
+    except Exception as e:
+        return _trade_api_error('Linked account lookup failed.', 502, e)
+    if not getattr(response, 'ok', False):
+        return _trade_api_error(
+            f"Linked account lookup failed with Schwab status {getattr(response, 'status_code', 'unknown')}.",
+            502,
+            getattr(response, 'reason', None),
+        )
+    accounts = _normalize_linked_accounts(_safe_response_json(response))
+    if not accounts:
+        return jsonify({'accounts': [], 'warnings': ['No linked Schwab accounts were returned.']})
+    return jsonify({'accounts': accounts, 'warnings': []})
+
+
+@app.route('/trade/account_details', methods=['POST'])
+def trade_account_details():
+    """Read-only account balances and positions for the selected trading rail account."""
+    client_error = _require_schwab_client()
+    if client_error:
+        return _trade_api_error(client_error, 503)
+    data = request.get_json(silent=True) or {}
+    account_hash = str(data.get('account_hash') or data.get('accountHash') or '').strip()
+    if not account_hash:
+        return _trade_api_error('Missing account hash.', 400)
+    ticker = format_ticker(data.get('ticker') or '')
+    contract_symbol = str(data.get('contract_symbol') or data.get('contractSymbol') or '').strip()
+    try:
+        response = client.account_details(account_hash, fields='positions')
+    except Exception as e:
+        return _trade_api_error('Account details lookup failed.', 502, e)
+    if not getattr(response, 'ok', False):
+        return _trade_api_error(
+            f"Account details lookup failed with Schwab status {getattr(response, 'status_code', 'unknown')}.",
+            502,
+            getattr(response, 'reason', None),
+        )
+    payload = build_trade_account_details_payload(
+        _safe_response_json(response) or {},
+        account_hash=account_hash,
+        ticker=ticker,
+        contract_symbol=contract_symbol,
+    )
     return jsonify(payload)
 
 @app.route('/update', methods=['POST'])

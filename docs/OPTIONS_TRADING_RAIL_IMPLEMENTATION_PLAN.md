@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Stage 2 complete / Stage 3 next
+**Status:** Stage 3 complete / Stage 4 next
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -87,7 +87,34 @@ Verification completed:
 
 Next:
 
-- Stage 3 should add account and position read paths only, with masked account display and no preview/place behavior.
+- Stage 4 should add preview-only single-leg limit order plumbing with strict server-side validation. Do not add live placement yet.
+
+### 2026-05-01 Stage 3 Progress Update
+
+Stage 3 is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Added `GET /trade/accounts`, using `client.linked_accounts()` and returning only account hashes plus masked/display labels.
+- Added `POST /trade/account_details`, using `client.account_details(accountHash, fields='positions')`.
+- Added conservative account detail normalization that omits plain account numbers and returns selected balance fields plus positions relevant to the selected ticker/contract.
+- Added an Account panel to the trading rail with account refresh/selection, masked selected-account context, and buying power display.
+- Added a Position panel that refreshes for the selected account and current option contract/ticker.
+- Mirrored all new trading rail DOM in `buildTradeRailHtml()` so `ensurePriceChartDom()` rebuilds preserve the account and position panels.
+- Kept Stage 2 behavior intact: `/trade_chain` still reads from cached `_options_cache` only and does not create a new Schwab chain fetch loop.
+- Added no order preview, place order, cancel, replace, or live trading endpoints.
+
+Tricky parts / implementation notes:
+
+- Schwab linked-account responses can include plain `accountNumber`, so the normalizer never returns it to the browser; it uses `hashValue` for API calls and a masked label for display.
+- Account details responses can include full account structures, so the endpoint builds a narrow response instead of forwarding Schwab JSON.
+- Position matching prioritizes exact selected contract symbol matches, then ticker/underlying matches, so selected contract positions float to the top while related underlying positions can still be seen.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- Flask test-client smoke tests mocked Schwab linked accounts/account details and confirmed masked account labels, no raw account number leakage, relevant position filtering, and clear token/client error handling.
 
 ---
 
@@ -1076,10 +1103,10 @@ Stage 2:
 
 Stage 3:
 
-- [ ] Add linked account lookup.
-- [ ] Add account details/positions lookup.
-- [ ] Mask account display.
-- [ ] Handle token/account errors.
+- [x] Add linked account lookup.
+- [x] Add account details/positions lookup.
+- [x] Mask account display.
+- [x] Handle token/account errors.
 
 Stage 4:
 
