@@ -27128,6 +27128,7 @@ def index():
             strikeRangePct: 2,
             payload: null,
             selectedSymbol: '',
+            pendingContractScrollSymbol: '',
             loading: false,
             requestKey: '',
             accounts: [],
@@ -27298,6 +27299,31 @@ def index():
             const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
             return contracts.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || null;
         }
+        function getTradeContractAnchorRow(rows, spot, optionType = tradeRailState.optionType) {
+            if (!Array.isArray(rows) || !rows.length || !Number.isFinite(spot)) return rows && rows[0] ? rows[0] : null;
+            const nearest = rows.reduce((best, row) => {
+                const strike = Number(row.strike) || 0;
+                const bestStrike = Number(best.strike) || 0;
+                const distance = Math.abs(strike - spot);
+                const bestDistance = Math.abs(bestStrike - spot);
+                if (distance !== bestDistance) return distance < bestDistance ? row : best;
+                return strike < bestStrike ? row : best;
+            }, rows[0]);
+            if (optionType === 'PUT') {
+                const downside = rows.filter(row => Number(row.strike) <= spot).sort((a, b) => Number(b.strike) - Number(a.strike));
+                return downside[0] || nearest;
+            }
+            const upside = rows.filter(row => Number(row.strike) >= spot).sort((a, b) => Number(a.strike) - Number(b.strike));
+            return upside[0] || nearest;
+        }
+        function scrollTradeContractToTop(list, symbol) {
+            if (!list || !symbol) return;
+            const row = Array.from(list.querySelectorAll('[data-trade-symbol]')).find(btn => btn.dataset.tradeSymbol === symbol);
+            if (!row) return;
+            const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
+            const rowTop = Math.max(0, row.offsetTop - list.offsetTop);
+            list.scrollTop = Math.min(rowTop, maxTop);
+        }
         function selectTradeContractSymbol(symbol, message = 'Contract changed. Preview again.') {
             symbol = String(symbol || '').trim();
             if (!symbol) return false;
@@ -27311,6 +27337,7 @@ def index():
             tradeRailState.optionType = contract.option_type === 'PUT' ? 'PUT' : 'CALL';
             tradeRailState.expiry = contract.expiry || tradeRailState.expiry;
             tradeRailState.selectedSymbol = contract.contract_symbol;
+            tradeRailState.pendingContractScrollSymbol = '';
             tradeRailState.limitPrice = '';
             tradeRailState.accountDetails = null;
             tradeRailState.accountRequestKey = '';
@@ -28003,39 +28030,12 @@ def index():
                 if (expiry && row.expiry !== expiry) return false;
                 return true;
             });
-            const spot = Number(payload.underlying_price);
-            if (!rows.length || !Number.isFinite(spot)) {
-                return rows.sort((a, b) => (Number(a.strike) || 0) - (Number(b.strike) || 0));
-            }
-            const nearest = rows.reduce((best, row) => {
-                const strike = Number(row.strike) || 0;
-                const bestStrike = Number(best.strike) || 0;
-                return Math.abs(strike - spot) < Math.abs(bestStrike - spot) ? row : best;
-            }, rows[0]);
-            let anchorRow = nearest;
-            if (tradeRailState.optionType === 'PUT') {
-                const downside = rows.filter(row => Number(row.strike) <= spot).sort((a, b) => Number(b.strike) - Number(a.strike));
-                anchorRow = downside[0] || nearest;
-            } else {
-                const upside = rows.filter(row => Number(row.strike) >= spot).sort((a, b) => Number(a.strike) - Number(b.strike));
-                anchorRow = upside[0] || nearest;
-            }
-            const atm = Number(anchorRow.strike) || spot;
+            const direction = tradeRailState.optionType === 'PUT' ? -1 : 1;
             return rows.sort((a, b) => {
                 const sa = Number(a.strike) || 0;
                 const sb = Number(b.strike) || 0;
-                if (sa === atm && sb !== atm) return -1;
-                if (sb === atm && sa !== atm) return 1;
-                if (tradeRailState.optionType === 'PUT') {
-                    const ga = sa < atm ? 0 : 1;
-                    const gb = sb < atm ? 0 : 1;
-                    if (ga !== gb) return ga - gb;
-                    return ga === 0 ? sb - sa : sa - sb;
-                }
-                const ga = sa > atm ? 0 : 1;
-                const gb = sb > atm ? 0 : 1;
-                if (ga !== gb) return ga - gb;
-                return ga === 0 ? sa - sb : sb - sa;
+                if (sa !== sb) return direction * (sa - sb);
+                return String(a.contract_symbol || '').localeCompare(String(b.contract_symbol || ''));
             });
         }
         function renderTradeExpiryOptions(payload) {
@@ -28123,9 +28123,11 @@ def index():
                 }
                 renderTradeExpiryOptions(payload);
                 const rows = getTradeContractsForView();
+                const spot = Number(payload.underlying_price);
+                const anchorRow = getTradeContractAnchorRow(rows, spot);
                 if (meta) {
-                    const spot = payload.underlying_price == null ? '—' : fmtTradePrice(payload.underlying_price);
-                    meta.textContent = (payload.ticker || tradeRailState.ticker || '—') + ' @ ' + spot + ' · ' + rows.length + ' shown';
+                    const spotText = payload.underlying_price == null ? '—' : fmtTradePrice(payload.underlying_price);
+                    meta.textContent = (payload.ticker || tradeRailState.ticker || '—') + ' @ ' + spotText + ' · ' + rows.length + ' shown';
                 }
                 if (warnings) warnings.textContent = (payload.warnings || []).join(' · ');
                 if (!rows.length) {
@@ -28135,7 +28137,9 @@ def index():
                 }
                 if (!rows.some(row => row.contract_symbol === tradeRailState.selectedSymbol)) {
                     const previousSymbol = tradeRailState.selectedSymbol;
-                    tradeRailState.selectedSymbol = rows[0].contract_symbol;
+                    const nextSelection = anchorRow || rows[0];
+                    tradeRailState.selectedSymbol = nextSelection.contract_symbol;
+                    tradeRailState.pendingContractScrollSymbol = nextSelection.contract_symbol;
                     if (previousSymbol !== tradeRailState.selectedSymbol) {
                         tradeRailState.limitPrice = '';
                         tradeRailState.accountDetails = null;
@@ -28145,6 +28149,9 @@ def index():
                         invalidateTradePreview('Contract changed. Preview again.');
                     }
                 }
+                const selected = rows.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || anchorRow || rows[0];
+                const shouldScrollSelection = !!(selected && tradeRailState.pendingContractScrollSymbol === selected.contract_symbol);
+                const listScrollTop = list ? list.scrollTop : 0;
                 if (list) {
                     list.innerHTML = rows.map(row => {
                         const typeCls = row.option_type === 'PUT' ? 'put' : 'call';
@@ -28172,8 +28179,18 @@ def index():
                             '<span class="trade-contract-cell">' + _escapeHtml(fmtTradeCompactInt(row.open_interest)) + '</span>' +
                         '</button>';
                     }).join('');
+                    requestAnimationFrame(() => {
+                        if (!list.isConnected) return;
+                        if (shouldScrollSelection) {
+                            scrollTradeContractToTop(list, selected.contract_symbol);
+                            if (tradeRailState.pendingContractScrollSymbol === selected.contract_symbol) {
+                                tradeRailState.pendingContractScrollSymbol = '';
+                            }
+                        } else {
+                            list.scrollTop = listScrollTop;
+                        }
+                    });
                 }
-                const selected = rows.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || rows[0];
                 renderTradeSelected(selected);
                 requestTradeAccountDetails();
                 requestTradeOrders();

@@ -1,6 +1,6 @@
 # GEX Dashboard - Options Trading Rail UI Polish Plan
 
-**Status:** Stage 3 contract picker column polish complete
+**Status:** Stage 4 contract picker ATM ladder/scroll polish complete; trading journal build-out queued
 **Created:** 2026-05-01  
 **Branch at draft time:** `codex/options-trading-rail-plan`  
 **Primary file:** `ezoptionsschwab.py`  
@@ -968,6 +968,86 @@ Current latest state:
 Potential next scope:
 - Re-check the Contract Picker table at very narrow rail widths and with larger live volume/OI values.
 - Continue visual polish of Selected Contract, Order Ticket, Orders, or Journal panels if requested.
+- Keep preview invalidation on selection changes and preserve exact Schwab order payload behavior.
+
+Do not implement without explicit approval:
+- Live Schwab bracket/OCO child orders.
+- SPX-specific validation.
+- Multi-leg spreads.
+- Automated trading from chart clicks, alerts, or flow.
+- Automatic screenshots/screen recordings.
+```
+
+---
+
+## 15. 2026-05-02 Contract Picker ATM Ladder Update
+
+Accomplished:
+
+- Fixed Contract Picker row ordering so calls and puts behave like a strike ladder instead of grouping ATM, then OTM, then ITM.
+- Calls now sort low-to-high by strike. The selected ATM call is auto-scrolled to the top of the visible chain list, with ITM calls above it and OTM calls below it.
+- Puts now sort high-to-low by strike. The selected ATM put is auto-scrolled to the top of the visible chain list, with ITM puts above it and OTM puts below it.
+- Kept row clicks selection-only. Manual row selection no longer forces the picker scroll position.
+- Preserved exact cached Schwab/OCC `contract_symbol` values in `data-trade-symbol`, row hover titles, selected-contract state, preview invalidation, and order payload behavior.
+- Restarted the `5014` smoke-test process and confirmed the served page includes the new picker scroll/anchor code. Also confirmed `5001` can serve the same patched code when started from the current working tree, then released port `5001` back to the user's terminal workflow.
+
+Tricky parts:
+
+- The old sorter intentionally made ATM first, then OTM strikes, then ITM strikes. That visually looked useful at first, but it broke the trader's expected ladder model because ITM calls were buried below OTM calls.
+- The fix splits ordering from initial viewport position: rows remain in true ladder order, while a one-shot `pendingContractScrollSymbol` flag scrolls the selected ATM row to the top after the rows are rendered.
+- Calls and puts need opposite ladder direction. Calls use ascending strikes; puts use descending strikes.
+- The selected ATM anchor still needs side-specific behavior: calls prefer the nearest strike at/above spot, while puts prefer the nearest strike at/below spot.
+- Two local Flask processes can serve different code if only one port is restarted. For browser smoke tests use `http://127.0.0.1:5014/`; for the user's local terminal workflow, let their terminal own `5001`.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+- In-app browser smoke loaded `http://127.0.0.1:5014/` and found the Contract Picker without taking screenshots or recordings.
+
+Still left to do:
+
+- Re-check the Contract Picker table at very narrow rail widths and with larger live volume/OI values.
+- Continue visual polish of Selected Contract, Order Ticket, Orders, and Journal panels.
+- Build out a functional in-dashboard trading journal. The current Journal button/panel is only a starter shell and should become a useful, modern journal tied directly to trades placed or previewed from this platform.
+- Use the existing journal at `/Users/scottmunger/Desktop/Trading/Options_Trading_Journal` as a reference for ideas only. It appears to be TradeNote, a Vue/Vite + Node/Express + MongoDB/Parse app that imports trades through CSV-style workflows. Do not port that whole architecture into this dashboard; this app should stay single-file Flask + vanilla JS, with a simpler journal directly connected to the trading rail and Schwab order lifecycle.
+- Decide the journal persistence shape before implementation. A conservative next step is a local SQLite table keyed by order/preview/contract/account/timestamps with editable fields for thesis, setup, tags, screenshots/links later, planned target/stop, realized outcome, mistakes, and review notes.
+- Deferred/non-goals remain unchanged: no Schwab bracket/OCO child orders, no SPX-specific validation, no multi-leg spreads, no automated trading from chart clicks/alerts/flow, and no analytical formula changes.
+
+### Prompt For Next Session
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard on branch codex/options-trading-rail-plan.
+
+Read AGENTS.md first, then read docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md and docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md.
+
+Before editing, run:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Continue only the dedicated fourth order-entry trading rail:
+- #trade-rail-header
+- #trade-rail
+- .trade-rail-shell
+- Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders / Journal panels
+
+Current latest state:
+- Trading rail has preview-only and guarded live single-leg DAY LIMIT option orders.
+- Contract Helper lives at the top of Contract Picker, with compact/expanded localStorage state.
+- Position panel has hide/show state and row-level Use pills that select exact cached contracts only.
+- Bracket Plan is planning-only and must not alter Schwab preview/place payloads.
+- Contract Picker rows use explicit columns: Contract, B, M, A, IV, Δ, Vol, OI. Row clicks are selection-only and exact cached Schwab/OCC contract symbols remain in data-trade-symbol and hover title.
+- Contract Picker now behaves like a strike ladder: calls sort low-to-high and puts sort high-to-low. On side/expiry/range changes, the side-specific ATM anchor is selected and auto-scrolled to the top of the chain list. Do not reintroduce ATM/OTM/ITM grouping.
+- Use http://127.0.0.1:5014/ for browser smoke tests. Do not take automatic screenshots or screen recordings unless explicitly asked. Leave port 5001 available for the user's local terminal unless they ask you to start it.
+
+Potential next scope:
+- Build out the trading journal. The current Journal button/panel is only a starter and should become a simple, modern, functional journal attached directly to trades from this platform.
+- Reference /Users/scottmunger/Desktop/Trading/Options_Trading_Journal for ideas only. It appears to be TradeNote, built with Vue/Vite + Node/Express + MongoDB/Parse and CSV imports. Do not port its full architecture; keep this dashboard single-file Flask + vanilla JS.
+- Suggested journal direction: local SQLite persistence, automatic entries from successful previews/live placements/order refreshes where possible, editable notes/tags/setup/thesis/outcome fields, compact journal list in the rail, and a detailed entry drawer/modal that does not interfere with order entry.
+- Re-check the Contract Picker table at very narrow rail widths and with larger live volume/OI values.
+- Continue visual polish of Selected Contract, Order Ticket, Orders, or Journal panels as needed.
 - Keep preview invalidation on selection changes and preserve exact Schwab order payload behavior.
 
 Do not implement without explicit approval:
