@@ -240,6 +240,31 @@ Verification completed:
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
 - Manual screenshot review confirmed the bracket planning UI renders in the trading rail, shows the planning-only warning, and keeps Preview/Place separate.
 
+### 2026-05-01 Position Card Polish Update
+
+Position card polish is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Reworked the trading rail Position rows to reduce vertical space and remove the duplicated full contract-name display.
+- Made the parsed contract identifier primary with compact option-side pills such as `724C` / `724P`.
+- Styled call pills with `var(--call)` and put pills with `var(--put)` while keeping color usage on existing tokens.
+- Converted `Qty`, `Mkt`, and `Day` values into compact inline metric pills.
+- Added positive/negative coloring for Day P/L while preserving the existing position data source and calculations.
+- Preserved the full Schwab/OCC contract symbol as a row hover title instead of showing it as a third visible line.
+
+Tricky parts / implementation notes:
+
+- Position rows are rendered dynamically by `renderTradePositions()`, so no static HTML or `buildTradeRailHtml()` markup change was required. Static/rebuild parity was still checked before editing.
+- The change is visual only. It does not alter account lookup, position normalization, selected-contract matching, `SELL_TO_CLOSE` caps, order preview, order placement, or Schwab payloads.
+- The row layout wraps metric pills when the rail is narrow so long values do not overflow the dedicated fourth trading rail.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+
 ---
 
 ## 1. Standing Project Constraints
@@ -1093,7 +1118,10 @@ Still later:
 - Multi-leg spreads.
 - In-dashboard order journal.
   - Capture orders placed/used from this rail in a dashboard journal later.
-  - Do not prioritize CSV/export-only behavior; the desired direction is an in-app journal view.
+  - Target direction: a built-in journal surfaced from the dashboard, similar to a bottom-left `Journal` app button/view.
+  - Auto-record trade events where safe and deterministic: previewed order, placed order metadata, selected contract, account display label/hash reference, ticker, timestamps, entry/exit context, bracket plan snapshot, and realized/marked P/L when available.
+  - Add screenshot/screen-recording capture as a later explicit capability, saved to a local database/media store and displayed with each journal entry. Do not start browser/desktop recording automatically without clear user opt-in and storage controls.
+  - Do not prioritize CSV/export-only behavior; the desired direction is an in-app journal view with searchable entries and attached screenshots/recordings.
 
 ---
 
@@ -1275,6 +1303,7 @@ Stage 6:
 - [x] Add open orders.
 - [x] Add cancel support.
 - [x] Add position refresh.
+- [x] Polish Position card with compact contract and metric pills.
 
 Stage 7:
 
@@ -1289,6 +1318,9 @@ Stage 7:
 - [ ] Validate Schwab bracket/OCO preview/place behavior before live support.
 - [ ] Add user-defined template editing beyond built-in presets.
 - [ ] Add in-dashboard order journal.
+  - [ ] Add journal button/view in the dashboard.
+  - [ ] Auto-record rail trade events into local storage/SQLite.
+  - [ ] Add screenshot/screen-recording attachments with explicit opt-in and storage controls.
 
 ---
 
@@ -1301,6 +1333,7 @@ Stage 7:
 - No bracket/OCO orders in the first live stage.
 - Bracket/OCO template work should start as planning-only UI until Schwab preview/place behavior is validated.
 - Future journaling should be an in-dashboard order journal for orders placed or used from this rail, not an export-only workflow.
+- Future screenshot/screen-recording capture for journal entries should require explicit user opt-in and clear storage controls before any recording starts.
 - No changes to GEX/DEX/Vanna/Charm/Flow formulas.
 - No migration to a JS framework.
 - No splitting `ezoptionsschwab.py` into modules.
@@ -1334,12 +1367,13 @@ Do not change analytics formulas, chart behavior outside the explicit trade-help
 Current state:
 - Trading rail is implemented through Stage 7 planning helpers.
 - Account selection is in the trading rail header.
-- Position is directly below the header/account context.
+- Position is directly below the header/account context and uses compact contract/metric pills instead of repeating full OCC symbols in-row.
 - Contract Picker, Selected Contract, Order Ticket, Preview, Orders, live-order guards, and account redaction are working.
 - Bracket Plan is planning-only and does not alter preview/place payloads.
 - Built-in bracket templates include Single, OCO, TRG w/ bracket, TRG w/ 2 brackets, TRG w/ 3 brackets, +1.00/-1.00, +2.00/-2.00, and Scalp.
 - Default bracket template is saved in localStorage as gex.tradeBracketDefault.
 - Chart click only sets an underlying helper reference when the Bracket Plan checkbox is enabled and no drawing mode is active.
+- Future journal direction is a built-in dashboard Journal view/button that can auto-record rail trade events and later attach screenshots/screen recordings with explicit opt-in and storage controls.
 - Static HTML and buildTradeRailHtml() must stay in parity.
 
 Recently passed:
@@ -1351,6 +1385,9 @@ Next sensible scope:
 1. Refine bracket helper UX for cheap contracts so default stop/target presets scale better when the option premium is below the stop offset.
 2. Add user-defined bracket template create/edit/delete in the rail, still localStorage-only and planning-only.
 3. Add an in-dashboard order journal for orders placed/used from this rail.
+   - Start with a `Journal` button/view and local database schema for trade events.
+   - Auto-record deterministic rail events first: preview/place metadata, selected contract, ticker, account display context, bracket plan snapshot, timestamps, and P/L fields when available.
+   - Treat screenshots/screen recordings as a later opt-in media attachment layer, not something that starts automatically without controls.
 
 Do not implement yet without explicit approval:
 - Live Schwab bracket/OCO child orders.

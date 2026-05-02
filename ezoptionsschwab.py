@@ -10821,11 +10821,63 @@ def index():
             padding-top: 7px;
             border-top: 1px solid var(--border);
         }
+        .trade-position-row {
+            align-items: center;
+            grid-template-columns: minmax(0, 1fr);
+        }
         .trade-position-row.match {
             border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
             background: color-mix(in srgb, var(--accent) 7%, transparent);
             border-radius: 6px;
             padding: 7px;
+        }
+        .trade-position-main {
+            display: flex;
+            min-width: 0;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .trade-position-id {
+            display: flex;
+            min-width: 0;
+            flex: 1 1 108px;
+            align-items: center;
+            gap: 7px;
+        }
+        .trade-position-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 48px;
+            max-width: 74px;
+            min-height: 24px;
+            padding: 0 8px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+            color: var(--fg-0);
+            font-size: 11px;
+            font-weight: 800;
+            line-height: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-position-pill.call {
+            color: var(--call);
+            border-color: color-mix(in srgb, var(--call) 42%, var(--border));
+            background: color-mix(in srgb, var(--call) 10%, var(--bg-0));
+        }
+        .trade-position-pill.put {
+            color: var(--put);
+            border-color: color-mix(in srgb, var(--put) 42%, var(--border));
+            background: color-mix(in srgb, var(--put) 10%, var(--bg-0));
+        }
+        .trade-position-copy {
+            min-width: 0;
         }
         .trade-position-symbol,
         .trade-order-symbol {
@@ -10840,21 +10892,56 @@ def index():
         .trade-order-meta {
             color: var(--fg-2);
         }
+        .trade-position-meta {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 10px;
+            line-height: 1.25;
+        }
         .trade-position-values,
         .trade-order-values {
             text-align: right;
         }
         .trade-position-values {
-            display: grid;
-            gap: 3px;
-        }
-        .trade-position-metric {
             display: flex;
+            min-width: 0;
+            flex: 0 1 auto;
+            flex-wrap: wrap;
             justify-content: flex-end;
             gap: 4px;
         }
+        .trade-position-metric {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            min-height: 22px;
+            padding: 0 7px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+            line-height: 1;
+        }
         .trade-position-metric span {
             color: var(--fg-2);
+        }
+        .trade-position-metric strong {
+            color: var(--fg-0);
+            font-weight: 800;
+        }
+        .trade-position-metric.pnl.pos {
+            border-color: color-mix(in srgb, var(--call) 38%, var(--border));
+            background: color-mix(in srgb, var(--call) 8%, var(--bg-0));
+        }
+        .trade-position-metric.pnl.pos strong {
+            color: var(--call);
+        }
+        .trade-position-metric.pnl.neg {
+            border-color: color-mix(in srgb, var(--put) 38%, var(--border));
+            background: color-mix(in srgb, var(--put) 8%, var(--bg-0));
+        }
+        .trade-position-metric.pnl.neg strong {
+            color: var(--put);
         }
         .trade-order-cancel {
             margin-top: 4px;
@@ -26688,16 +26775,19 @@ def index():
                     title: symbol || '—',
                     meta: (pos && pos.asset_type) || 'Position',
                     symbol,
+                    sideClass: '',
                 };
             }
             const yy = match[2].slice(0, 2);
             const mm = match[2].slice(2, 4);
             const dd = match[2].slice(4, 6);
             const strike = Number(match[4]) / 1000;
+            const sideClass = match[3] === 'C' ? 'call' : 'put';
             return {
                 title: fmtTradePrice(strike) + match[3],
                 meta: '20' + yy + '-' + mm + '-' + dd + ' · ' + match[1].trim(),
                 symbol,
+                sideClass,
             };
         }
         function getTradeRailTicker() {
@@ -26984,12 +27074,25 @@ def index():
                 const qtyText = Number.isFinite(qty) ? qty.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—';
                 const mv = fmtTradeMoney(pos.market_value);
                 const day = fmtTradeMoney(pos.day_pnl);
+                const dayValue = Number(pos.day_pnl);
+                const dayClass = Number.isFinite(dayValue) && dayValue > 0 ? ' pos' : (Number.isFinite(dayValue) && dayValue < 0 ? ' neg' : '');
                 const display = getTradePositionDisplay(pos);
                 const matchClass = pos.selected_contract_match ? ' match' : '';
                 const matchLabel = pos.selected_contract_match ? ' · Selected' : '';
-                return '<div class="trade-position-row' + matchClass + '">' +
-                    '<div><div class="trade-position-symbol">' + _escapeHtml(display.title) + '</div><div class="trade-position-meta">' + _escapeHtml(display.meta + matchLabel) + '</div><div class="trade-position-meta">' + _escapeHtml(display.symbol || '') + '</div></div>' +
-                    '<div class="trade-position-values"><div class="trade-position-metric"><span>Qty</span><strong>' + _escapeHtml(qtyText) + '</strong></div><div class="trade-position-metric"><span>Mkt</span><strong>' + _escapeHtml(mv) + '</strong></div><div class="trade-position-metric"><span>Day</span><strong>' + _escapeHtml(day) + '</strong></div></div>' +
+                const sideClass = display.sideClass ? ' ' + display.sideClass : '';
+                const symbolTitle = display.symbol ? ' title="' + _escapeHtml(display.symbol) + '"' : '';
+                return '<div class="trade-position-row' + matchClass + '"' + symbolTitle + '>' +
+                    '<div class="trade-position-main">' +
+                        '<div class="trade-position-id">' +
+                            '<span class="trade-position-pill' + sideClass + '">' + _escapeHtml(display.title) + '</span>' +
+                            '<div class="trade-position-copy"><div class="trade-position-meta">' + _escapeHtml(display.meta + matchLabel) + '</div></div>' +
+                        '</div>' +
+                        '<div class="trade-position-values">' +
+                            '<div class="trade-position-metric"><span>Qty</span><strong>' + _escapeHtml(qtyText) + '</strong></div>' +
+                            '<div class="trade-position-metric"><span>Mkt</span><strong>' + _escapeHtml(mv) + '</strong></div>' +
+                            '<div class="trade-position-metric pnl' + dayClass + '"><span>Day</span><strong>' + _escapeHtml(day) + '</strong></div>' +
+                        '</div>' +
+                    '</div>' +
                 '</div>';
             }).join('');
         }
