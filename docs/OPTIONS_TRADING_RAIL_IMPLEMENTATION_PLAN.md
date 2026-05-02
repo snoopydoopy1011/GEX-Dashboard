@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Stage 6 complete / Stage 7 later
+**Status:** Stage 7 planning helpers complete / live bracket support later
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -202,6 +202,43 @@ Verification completed:
 - `git diff --check` passed.
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
 - Flask test-client smoke tests for `/trade/orders` and `/trade/cancel_order` confirmed missing account rejection, safe Schwab-client errors, no plain account-number exposure, selected contract filtering, explicit cancel confirmation, and cancel scoping to selected account hash/order id.
+
+### 2026-05-01 Stage 7 Progress Update
+
+Stage 7 planning helpers are complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Added a planning-only `Bracket Plan` panel to the dedicated fourth trading rail.
+- Mirrored the new bracket planning DOM in both static HTML and `buildTradeRailHtml()` so `ensurePriceChartDom()` rebuilds keep the panel.
+- Added Thinkorswim-style template choices:
+  - `Single`
+  - `OCO`
+  - `TRG w/ bracket`
+  - `TRG w/ 2 brackets`
+  - `TRG w/ 3 brackets`
+  - simple preset offset templates like `+1.00/-1.00`, `+2.00/-2.00`, and `Scalp`
+- Added localStorage-backed default template saving with `gex.tradeBracketDefault`.
+- Added bracket planning rows that show enabled row number, target limit, stop, `DAY` TIF, and quantity-link style allocation.
+- Added premium-based target/stop helpers using the selected option premium or current ticket limit.
+- Added underlying-reference helpers that can use the selected contract delta as a rough premium estimate from a reference level.
+- Added risk-budget sizing with a manual `Use Risk Size` button.
+- Added opt-in chart-click reference behavior: chart clicks only fill the helper underlying reference when `Chart click sets helper reference` is checked.
+
+Tricky parts / implementation notes:
+
+- The bracket panel is intentionally planning-only. It does not alter `/trade/preview_order`, `/trade/place_order`, `build_single_option_limit_order()`, Schwab order JSON, live trading gates, or final confirmation behavior.
+- Chart clicks are routed through the existing `tvHandleChartClick()` path. The helper reference is only captured when no drawing mode is active and the explicit chart-reference checkbox is enabled, so drawing tools and indicator/AVWAP click behavior keep priority.
+- Cheap contracts can clamp the stop helper to `0.01` when the stop offset exceeds the option premium. This is expected for the current helper math, but later UX may want per-template defaults that scale down for low-premium contracts.
+- Bracket quantity rows currently split the visible ticket quantity across planned brackets for display only; no child orders are created.
+- Default template saving is local to the browser via localStorage. Server-side/user-profile template persistence is still deferred.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+- Manual screenshot review confirmed the bracket planning UI renders in the trading rail, shows the planning-only warning, and keeps Preview/Place separate.
 
 ---
 
@@ -416,8 +453,9 @@ Defer:
 
 - Market orders.
 - Multi-leg spreads.
-- Bracket orders.
-- OCO / trigger orders.
+- Live bracket orders.
+- Live OCO / trigger orders.
+- Bracket/OCO templates beyond planning-only UI.
 - Trailing stops.
 - `SELL_TO_OPEN`.
 - Auto-trading from alerts.
@@ -1023,17 +1061,39 @@ Verification:
 - Cancel works for a known paper/small live test only after user confirmation.
 - Position display updates after order fills or refresh.
 
-### Stage 7 — Later Enhancements
+### Stage 7 — Planning Helpers Complete / Later Live Support
 
-Possible later work:
+Implemented planning-only work:
 
-- Bracket/OCO order builder.
+- Bracket/OCO planning UI.
+  - Model the Thinkorswim workflow visually: a compact template picker with `Single`, `OCO`, `TRG w/ bracket`, `TRG w/ 2 brackets`, and `TRG w/ 3 brackets`.
+  - User normally uses one bracket, sometimes two; three brackets should remain possible but not be the primary/default workflow.
+  - Bracket rows should show enabled state, quantity link, target limit offset, stop offset, and TIF in a dense table-like layout.
+  - Until Schwab bracket/OCO behavior is validated, this must remain clearly planning-only or preview-only and must not alter the existing single-leg Schwab order JSON.
+- Bracket template management.
+  - Allow named bracket templates such as `+1.00/-1.00`, `+2.00/-2.00`, scalp/trail-style presets, and user-defined templates.
+  - Let the user choose one default template for the trading rail.
+  - Template persistence can be localStorage first; move server-side only if templates need account/device portability.
+  - Template application should populate planning fields only. It must not preview, stage, or place an order automatically.
 - Stop/target helpers based on option premium or underlying level.
+  - Premium helpers should support dollar offsets and percent moves from the selected option premium.
+  - Underlying helpers should use a chart-click reference level only for calculation context, likely with selected-contract delta as a rough estimate when available.
 - Risk-budget sizing.
-- Chart click sets underlying reference, not order submission.
+  - Calculate suggested contract count from risk budget and debit/stop assumptions.
+  - Preserve `SELL_TO_CLOSE` position caps and existing max quantity validation.
+- Chart click sets underlying reference for helper calculations only.
+  - No chart click should select a contract, preview an order, stage an order, place an order, or change Schwab order payloads.
+
+Still later:
+
+- Validate Schwab bracket/OCO preview behavior before adding any live child-order support.
+- Add user-defined template creation/edit/delete beyond the current built-in presets and saved default.
+- Refine cheap-premium template defaults so the stop helper does not default to `0.01` for low-premium contracts unless intended.
 - SPX-specific validation.
 - Multi-leg spreads.
-- Order journal export.
+- In-dashboard order journal.
+  - Capture orders placed/used from this rail in a dashboard journal later.
+  - Do not prioritize CSV/export-only behavior; the desired direction is an in-app journal view.
 
 ---
 
@@ -1216,6 +1276,20 @@ Stage 6:
 - [x] Add cancel support.
 - [x] Add position refresh.
 
+Stage 7:
+
+- [x] Add planning-only bracket panel.
+- [x] Add Thinkorswim-style bracket template choices.
+- [x] Add local default template saving.
+- [x] Add premium target/stop helpers.
+- [x] Add underlying-reference helper mode.
+- [x] Add opt-in chart-click helper reference.
+- [x] Add risk-budget sizing helper.
+- [x] Keep Schwab single-leg order JSON unchanged.
+- [ ] Validate Schwab bracket/OCO preview/place behavior before live support.
+- [ ] Add user-defined template editing beyond built-in presets.
+- [ ] Add in-dashboard order journal.
+
 ---
 
 ## 16. Non-Goals For Initial Build
@@ -1225,6 +1299,92 @@ Stage 6:
 - No market orders.
 - No spread orders.
 - No bracket/OCO orders in the first live stage.
+- Bracket/OCO template work should start as planning-only UI until Schwab preview/place behavior is validated.
+- Future journaling should be an in-dashboard order journal for orders placed or used from this rail, not an export-only workflow.
 - No changes to GEX/DEX/Vanna/Charm/Flow formulas.
 - No migration to a JS framework.
 - No splitting `ezoptionsschwab.py` into modules.
+
+---
+
+## 17. Prompt For A Fresh Codex Session
+
+Use this prompt to continue from the current state:
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard.
+
+Read AGENTS.md first, then read:
+- docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md
+- docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md
+
+Before editing, confirm branch/status with:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+We are continuing the dedicated fourth order-entry trading rail only:
+- #trade-rail-header
+- #trade-rail
+- .trade-rail-shell
+- Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders panels
+
+Do not change analytics formulas, chart behavior outside the explicit trade-helper reference path, existing analytics right rail, account redaction, Schwab endpoint safety behavior, or Schwab single-leg order JSON shape. Keep ezoptionsschwab.py as a single file and use vanilla JS/CSS tokens only.
+
+Current state:
+- Trading rail is implemented through Stage 7 planning helpers.
+- Account selection is in the trading rail header.
+- Position is directly below the header/account context.
+- Contract Picker, Selected Contract, Order Ticket, Preview, Orders, live-order guards, and account redaction are working.
+- Bracket Plan is planning-only and does not alter preview/place payloads.
+- Built-in bracket templates include Single, OCO, TRG w/ bracket, TRG w/ 2 brackets, TRG w/ 3 brackets, +1.00/-1.00, +2.00/-2.00, and Scalp.
+- Default bracket template is saved in localStorage as gex.tradeBracketDefault.
+- Chart click only sets an underlying helper reference when the Bracket Plan checkbox is enabled and no drawing mode is active.
+- Static HTML and buildTradeRailHtml() must stay in parity.
+
+Recently passed:
+- python3 -m py_compile ezoptionsschwab.py
+- git diff --check
+- python3 -m unittest tests.test_session_levels tests.test_trade_preview
+
+Next sensible scope:
+1. Refine bracket helper UX for cheap contracts so default stop/target presets scale better when the option premium is below the stop offset.
+2. Add user-defined bracket template create/edit/delete in the rail, still localStorage-only and planning-only.
+3. Add an in-dashboard order journal for orders placed/used from this rail.
+
+Do not implement yet without explicit approval:
+- Live Schwab bracket/OCO child orders.
+- SPX-specific validation.
+- Multi-leg spreads.
+- Automated trading from chart clicks, alerts, or flow.
+
+Important safety constraints:
+- Do not make chart-click submit, preview, stage, or select an order automatically.
+- Do not bypass preview-required/live-trading/final-confirmation guards.
+- Do not change existing single-leg order JSON unless explicitly required and covered by tests.
+- Preserve ENABLE_LIVE_TRADING=1 gating and final confirmation behavior.
+- Preserve SELL_TO_CLOSE position caps.
+
+Useful anchors:
+- buildTradeRailHtml
+- ensureTradeRailDom
+- renderTradeRail
+- renderTradeTicket
+- renderTradeBracketPlan
+- getTradeBracketPlan
+- getTradeRiskSize
+- tvHandleChartClick
+- requestTradePreview
+- placeTradeOrder
+- build_single_option_limit_order
+- /trade/preview_order
+- /trade/place_order
+- data-trade-bracket-template
+- data-trade-target-offset
+- data-trade-stop-offset
+- data-trade-risk-budget
+- data-trade-underlying-reference
+- data-trade-chart-reference-enabled
+
+Start by inspecting the current rail code and confirming static HTML/buildTradeRailHtml parity before editing.
+```
