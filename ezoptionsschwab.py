@@ -10936,6 +10936,16 @@ def index():
             text-transform: uppercase;
             letter-spacing: 0.06em;
         }
+        .trade-rail-badge.ready {
+            border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+            color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 10%, transparent);
+        }
+        .trade-rail-badge.armed {
+            border-color: color-mix(in srgb, var(--warn) 62%, var(--border));
+            color: var(--warn);
+            background: color-mix(in srgb, var(--warn) 12%, transparent);
+        }
         .trade-journal-button {
             flex: 0 0 auto;
             min-height: 24px;
@@ -10999,12 +11009,307 @@ def index():
             letter-spacing: 0.08em;
             text-transform: uppercase;
         }
+        .trade-panel-tools {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+        }
         .trade-panel-note,
         .trade-field-label,
         .trade-empty {
             color: var(--fg-2);
             font-size: 11px;
             line-height: 1.35;
+        }
+        .trade-active-panel {
+            border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+            background: color-mix(in srgb, var(--accent) 4%, var(--bg-1));
+        }
+        .trade-active-panel.collapsed .trade-active-body {
+            display: none;
+        }
+        .trade-active-toggle {
+            min-height: 22px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            font-size: 10px;
+            font-weight: 800;
+            line-height: 1;
+            cursor: pointer;
+            min-width: 24px;
+            padding: 0 6px;
+        }
+        .trade-active-contract {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: center;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            padding: 7px;
+            min-width: 0;
+        }
+        .trade-active-contract-main {
+            min-width: 0;
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 800;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-active-contract-sub {
+            margin-top: 2px;
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.25;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-active-mode {
+            justify-self: end;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-1);
+            color: var(--fg-1);
+            padding: 3px 7px;
+            font-size: 9px;
+            font-weight: 900;
+            letter-spacing: 0.06em;
+            line-height: 1;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .trade-active-mode.ready {
+            border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+            color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 9%, var(--bg-0));
+        }
+        .trade-active-mode.armed {
+            border-color: color-mix(in srgb, var(--warn) 58%, var(--border));
+            color: var(--warn);
+            background: color-mix(in srgb, var(--warn) 10%, var(--bg-0));
+        }
+        .trade-active-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr minmax(72px, 0.8fr);
+            gap: 5px;
+            margin-top: 7px;
+        }
+        .trade-fast-button {
+            min-height: 32px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            font-size: 11px;
+            font-weight: 900;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+        .trade-fast-button.buy {
+            color: var(--call);
+            border-color: color-mix(in srgb, var(--call) 50%, var(--border));
+            background: color-mix(in srgb, var(--call) 9%, var(--bg-0));
+        }
+        .trade-fast-button.sell,
+        .trade-fast-button.flatten {
+            color: var(--put);
+            border-color: color-mix(in srgb, var(--put) 50%, var(--border));
+            background: color-mix(in srgb, var(--put) 9%, var(--bg-0));
+        }
+        .trade-fast-button:disabled {
+            cursor: not-allowed;
+            opacity: 0.48;
+        }
+        .trade-active-setup {
+            display: grid;
+            grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
+            gap: 6px;
+            margin-top: 7px;
+        }
+        .trade-active-setup label {
+            min-width: 0;
+            color: var(--fg-2);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .trade-active-qty-line {
+            display: grid;
+            grid-template-columns: minmax(44px, 0.72fr) repeat(4, minmax(28px, 1fr));
+            gap: 4px;
+            margin-top: 3px;
+        }
+        .trade-active-qty-line input,
+        .trade-active-setup select {
+            width: 100%;
+            min-width: 0;
+            min-height: 28px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 0 7px;
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-active-qty-line button {
+            min-width: 0;
+            min-height: 28px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 0;
+            font-size: 10px;
+            font-weight: 800;
+            cursor: pointer;
+        }
+        .trade-active-arm {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-top: 7px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 6px 8px;
+            font-size: 11px;
+            font-weight: 900;
+            line-height: 1.2;
+            text-transform: uppercase;
+        }
+        .trade-active-arm input {
+            margin: 0;
+            width: 16px;
+            height: 16px;
+            accent-color: var(--warn);
+        }
+        .trade-active-arm.armed {
+            border-color: color-mix(in srgb, var(--warn) 58%, var(--border));
+            color: var(--warn);
+            background: color-mix(in srgb, var(--warn) 9%, var(--bg-0));
+        }
+        .trade-active-context {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 5px;
+            margin-top: 7px;
+        }
+        .trade-active-stat {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            padding: 5px 6px;
+            min-width: 0;
+        }
+        .trade-active-stat span {
+            display: block;
+            color: var(--fg-2);
+            font-size: 9px;
+            line-height: 1.15;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+        }
+        .trade-active-stat strong {
+            display: block;
+            margin-top: 2px;
+            min-width: 0;
+            color: var(--fg-0);
+            font-size: 11px;
+            line-height: 1.2;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-active-ladder {
+            margin-top: 7px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+            background: var(--bg-0);
+        }
+        .trade-active-ladder-head,
+        .trade-active-ladder-row {
+            display: grid;
+            grid-template-columns: minmax(44px, 0.8fr) minmax(44px, 0.8fr) minmax(50px, 0.72fr) minmax(44px, 0.8fr) minmax(44px, 0.8fr);
+            gap: 4px;
+            align-items: center;
+            min-width: 0;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-active-ladder-head {
+            background: var(--bg-2);
+            color: var(--fg-2);
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            padding: 5px 6px;
+        }
+        .trade-active-ladder-row {
+            width: 100%;
+            border: 0;
+            border-top: 1px solid var(--border);
+            background: transparent;
+            color: var(--fg-1);
+            padding: 5px 6px;
+            font-size: 10px;
+            text-align: right;
+            cursor: pointer;
+        }
+        .trade-active-ladder-row:hover,
+        .trade-active-ladder-row.current {
+            background: color-mix(in srgb, var(--accent) 9%, transparent);
+        }
+        .trade-active-ladder-row.limit {
+            box-shadow: inset 2px 0 0 var(--accent);
+        }
+        .trade-active-ladder-row.bid-zone {
+            background: color-mix(in srgb, var(--call) 5%, transparent);
+        }
+        .trade-active-ladder-row.ask-zone {
+            background: color-mix(in srgb, var(--put) 5%, transparent);
+        }
+        .trade-active-ladder-cell {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-active-price {
+            color: var(--fg-0);
+            text-align: center;
+            font-weight: 900;
+        }
+        .trade-active-bid {
+            color: var(--call);
+            font-weight: 800;
+        }
+        .trade-active-ask {
+            color: var(--put);
+            font-weight: 800;
+        }
+        .trade-active-message {
+            min-height: 18px;
+            margin-top: 7px;
+            color: var(--fg-2);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .trade-active-message.warn {
+            color: var(--warn);
         }
         .trade-segment {
             display: grid;
@@ -16977,7 +17282,7 @@ def index():
                     <button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button>
                 </div>
                 <button type="button" class="trade-journal-button" data-trade-journal-toggle>Journal</button>
-                <div class="trade-rail-badge">Preview Only</div>
+                <div class="trade-rail-badge" data-trade-rail-badge>Preview Only</div>
             </div>
             <button type="button" class="trade-rail-collapse-toggle" id="trade-rail-collapse-toggle" title="Collapse trading rail" aria-label="Collapse trading rail">›</button>
             <div class="trade-rail-resize-handle" id="trade-rail-resize-handle" role="separator" aria-label="Resize trading rail" aria-orientation="vertical"></div>
@@ -17257,6 +17562,57 @@ def index():
                         <span data-trade-account-status>Read only</span>
                         <span data-trade-account-warnings></span>
                     </div>
+                    <section class="trade-panel trade-active-panel" data-trade-active-panel>
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Active Trader</div>
+                            <div class="trade-panel-tools">
+                                <div class="trade-panel-note" data-trade-active-note>Fast scalps</div>
+                                <button type="button" class="trade-active-toggle" data-trade-active-toggle title="Collapse active trader" aria-label="Collapse active trader" aria-expanded="true">⌃</button>
+                            </div>
+                        </div>
+                        <div class="trade-active-body">
+                            <div class="trade-active-contract">
+                                <div>
+                                    <div class="trade-active-contract-main" data-trade-fast-contract>Choose a contract</div>
+                                    <div class="trade-active-contract-sub" data-trade-fast-quote>Bid / Ask unavailable</div>
+                                </div>
+                                <div class="trade-active-mode" data-trade-fast-mode>Preview</div>
+                            </div>
+                            <div class="trade-active-actions">
+                                <button type="button" class="trade-fast-button buy" data-trade-fast-action="BUY_TO_OPEN">Buy Ask</button>
+                                <button type="button" class="trade-fast-button sell" data-trade-fast-action="SELL_TO_CLOSE">Sell Bid</button>
+                                <button type="button" class="trade-fast-button flatten" data-trade-fast-flatten>Flatten</button>
+                            </div>
+                            <div class="trade-active-setup">
+                                <label>Qty
+                                    <div class="trade-active-qty-line">
+                                        <input data-trade-fast-qty type="number" min="1" max="100" step="1" value="1">
+                                        <button type="button" data-trade-fast-qty-preset="1">1</button>
+                                        <button type="button" data-trade-fast-qty-preset="2">2</button>
+                                        <button type="button" data-trade-fast-qty-preset="5">5</button>
+                                        <button type="button" data-trade-fast-qty-preset="10">10</button>
+                                    </div>
+                                </label>
+                                <label>Template
+                                    <select data-trade-fast-template></select>
+                                </label>
+                            </div>
+                            <label class="trade-active-arm" data-trade-fast-arm-wrap>
+                                <span>Auto-send</span>
+                                <input data-trade-fast-arm type="checkbox">
+                            </label>
+                            <div class="trade-active-context">
+                                <div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div>
+                                <div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div>
+                                <div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div>
+                            </div>
+                            <div class="trade-active-ladder">
+                                <div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span></div>
+                                <div data-trade-fast-ladder><div class="trade-empty">Select a contract to show the price ladder.</div></div>
+                            </div>
+                            <div class="trade-active-message" data-trade-fast-message>Auto-send starts off. Live sends still require a successful preview.</div>
+                        </div>
+                    </section>
                     <section class="trade-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Position</div>
@@ -27768,10 +28124,31 @@ def index():
             );
         }
 
+        function buildTradeActiveTraderPanelHtml() {
+            return (
+                '<section class="trade-panel trade-active-panel" data-trade-active-panel>' +
+                    '<div class="trade-panel-head"><div class="trade-panel-title">Active Trader</div><div class="trade-panel-tools"><div class="trade-panel-note" data-trade-active-note>Fast scalps</div><button type="button" class="trade-active-toggle" data-trade-active-toggle title="Collapse active trader" aria-label="Collapse active trader" aria-expanded="true">⌃</button></div></div>' +
+                    '<div class="trade-active-body">' +
+                        '<div class="trade-active-contract"><div><div class="trade-active-contract-main" data-trade-fast-contract>Choose a contract</div><div class="trade-active-contract-sub" data-trade-fast-quote>Bid / Ask unavailable</div></div><div class="trade-active-mode" data-trade-fast-mode>Preview</div></div>' +
+                        '<div class="trade-active-actions"><button type="button" class="trade-fast-button buy" data-trade-fast-action="BUY_TO_OPEN">Buy Ask</button><button type="button" class="trade-fast-button sell" data-trade-fast-action="SELL_TO_CLOSE">Sell Bid</button><button type="button" class="trade-fast-button flatten" data-trade-fast-flatten>Flatten</button></div>' +
+                        '<div class="trade-active-setup">' +
+                            '<label>Qty<div class="trade-active-qty-line"><input data-trade-fast-qty type="number" min="1" max="100" step="1" value="1"><button type="button" data-trade-fast-qty-preset="1">1</button><button type="button" data-trade-fast-qty-preset="2">2</button><button type="button" data-trade-fast-qty-preset="5">5</button><button type="button" data-trade-fast-qty-preset="10">10</button></div></label>' +
+                            '<label>Template<select data-trade-fast-template></select></label>' +
+                        '</div>' +
+                        '<label class="trade-active-arm" data-trade-fast-arm-wrap><span>Auto-send</span><input data-trade-fast-arm type="checkbox"></label>' +
+                        '<div class="trade-active-context"><div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div><div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div><div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div></div>' +
+                        '<div class="trade-active-ladder"><div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span></div><div data-trade-fast-ladder><div class="trade-empty">Select a contract to show the price ladder.</div></div></div>' +
+                        '<div class="trade-active-message" data-trade-fast-message>Auto-send starts off. Live sends still require a successful preview.</div>' +
+                    '</div>' +
+                '</section>'
+            );
+        }
+
         function buildTradeRailHtml() {
             return (
                 '<div class="trade-rail-shell">' +
                     '<div class="trade-account-context" data-trade-account-context><span data-trade-account-status>Read only</span><span data-trade-account-warnings></span></div>' +
+                    buildTradeActiveTraderPanelHtml() +
                     '<section class="trade-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Position</div><div class="trade-position-tools"><div class="trade-panel-note" data-trade-position-note>No account</div><button type="button" class="trade-position-toggle" data-trade-position-toggle title="Collapse positions" aria-label="Collapse positions" aria-expanded="true">⌃</button></div></div>' +
                         '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
@@ -27902,10 +28279,10 @@ def index():
                 header = document.createElement('div');
                 header.className = 'trade-rail-header';
                 header.id = 'trade-rail-header';
-                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-account-controls"><select class="trade-account-select" data-trade-account-select aria-label="Trading account"><option value="">Load linked accounts</option></select><div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div><button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button></div><button type="button" class="trade-journal-button" data-trade-journal-toggle>Journal</button><div class="trade-rail-badge">Preview Only</div>';
+                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-account-controls"><select class="trade-account-select" data-trade-account-select aria-label="Trading account"><option value="">Load linked accounts</option></select><div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div><button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button></div><button type="button" class="trade-journal-button" data-trade-journal-toggle>Journal</button><div class="trade-rail-badge" data-trade-rail-badge>Preview Only</div>';
                 grid.appendChild(header);
             } else if (!header.querySelector('[data-trade-account-select]')) {
-                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-account-controls"><select class="trade-account-select" data-trade-account-select aria-label="Trading account"><option value="">Load linked accounts</option></select><div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div><button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button></div><button type="button" class="trade-journal-button" data-trade-journal-toggle>Journal</button><div class="trade-rail-badge">Preview Only</div>';
+                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-account-controls"><select class="trade-account-select" data-trade-account-select aria-label="Trading account"><option value="">Load linked accounts</option></select><div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div><button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button></div><button type="button" class="trade-journal-button" data-trade-journal-toggle>Journal</button><div class="trade-rail-badge" data-trade-rail-badge>Preview Only</div>';
             } else if (!header.querySelector('[data-trade-journal-toggle]')) {
                 const badge = header.querySelector('.trade-rail-badge');
                 const btn = document.createElement('button');
@@ -27914,6 +28291,10 @@ def index():
                 btn.setAttribute('data-trade-journal-toggle', '');
                 btn.textContent = 'Journal';
                 header.insertBefore(btn, badge || null);
+            }
+            const modeBadge = header.querySelector('.trade-rail-badge');
+            if (modeBadge && !modeBadge.hasAttribute('data-trade-rail-badge')) {
+                modeBadge.setAttribute('data-trade-rail-badge', '');
             }
             ensureTradeRailControls(grid);
             let rail = document.getElementById('trade-rail');
@@ -27924,7 +28305,7 @@ def index():
                 rail.setAttribute('aria-label', 'Options trading rail');
                 rail.innerHTML = buildTradeRailHtml();
                 grid.appendChild(rail);
-            } else if (!rail.querySelector('.trade-rail-shell')) {
+            } else if (!rail.querySelector('.trade-rail-shell') || !rail.querySelector('[data-trade-active-panel]')) {
                 rail.innerHTML = buildTradeRailHtml();
             }
             if (!tradeRailState.__bracketDefaultRestored) {
@@ -28420,6 +28801,7 @@ def index():
         const TRADE_BRACKET_CUSTOM_KEY = 'gex.tradeBracketTemplates';
         const TRADE_POSITION_COLLAPSE_KEY = 'gex.tradePositionCollapsed';
         const TRADE_HELPER_COMPACT_KEY = 'gex.tradeHelperCompact';
+        const TRADE_ACTIVE_TRADER_COLLAPSE_KEY = 'gex.tradeActiveTraderCollapsed';
         const TRADE_RAIL_DEFAULT_WIDTH = 400;
         const TRADE_BUILTIN_BRACKET_TEMPLATES = {
             single: { label: 'Single', rows: 0, targetOffset: 1, stopOffset: 1 },
@@ -28492,6 +28874,9 @@ def index():
             journalMediaStoragePath: '',
             journalSaving: false,
             journalSaveError: '',
+            activeTraderCollapsed: getTradeStoredBool(TRADE_ACTIVE_TRADER_COLLAPSE_KEY, false),
+            activeTraderArmed: false,
+            fastTradeMessage: '',
             positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
             helperCompact: getTradeStoredBool(TRADE_HELPER_COMPACT_KEY, false),
         };
@@ -28678,6 +29063,7 @@ def index():
             tradeRailState.previewError = message;
             tradeRailState.placement = null;
             tradeRailState.placementError = '';
+            if (message) tradeRailState.fastTradeMessage = message;
             renderTradeTicket();
         }
         function getTradePresetPrice(contract, preset) {
@@ -28699,20 +29085,216 @@ def index():
             const templates = getTradeBracketTemplates();
             return templates[tradeRailState.bracketTemplate] || TRADE_BUILTIN_BRACKET_TEMPLATES.trg_1;
         }
+        function getSelectedTradePosition() {
+            const selectedSymbol = String(tradeRailState.selectedSymbol || '');
+            const positions = Array.isArray(tradeRailState.accountDetails && tradeRailState.accountDetails.positions)
+                ? tradeRailState.accountDetails.positions
+                : [];
+            if (!positions.length) return null;
+            return positions.find(pos => pos && pos.selected_contract_match)
+                || positions.find(pos => String((pos && pos.symbol) || '') === selectedSymbol)
+                || null;
+        }
+        function getSelectedTradePositionQuantity() {
+            const pos = getSelectedTradePosition();
+            const qty = Number(pos && pos.quantity);
+            return Number.isFinite(qty) ? Math.max(0, Math.floor(qty)) : 0;
+        }
+        function renderTradeModeBadge() {
+            const badge = document.querySelector('[data-trade-rail-badge]') || document.querySelector('.trade-rail-badge');
+            if (!badge) return;
+            let text = 'Preview Only';
+            let cls = '';
+            if (tradeRailState.placementLoading) {
+                text = 'Sending';
+                cls = 'armed';
+            } else if (tradeRailState.activeTraderArmed) {
+                text = 'Auto Send Armed';
+                cls = 'armed';
+            } else if (tradeRailState.previewToken) {
+                text = 'Live Ready';
+                cls = 'ready';
+            }
+            badge.textContent = text;
+            badge.classList.toggle('ready', cls === 'ready');
+            badge.classList.toggle('armed', cls === 'armed');
+        }
+        function getTradeTemplateOptionsHtml(currentKey = tradeRailState.bracketTemplate) {
+            const builtin = Object.keys(TRADE_BUILTIN_BRACKET_TEMPLATES).map(key => {
+                const spec = TRADE_BUILTIN_BRACKET_TEMPLATES[key];
+                return '<option value="' + _escapeHtml(key) + '"' + (key === currentKey ? ' selected' : '') + '>' + _escapeHtml(spec.label) + '</option>';
+            }).join('');
+            const custom = Object.keys(tradeCustomBracketTemplates).sort((a, b) => {
+                return String(tradeCustomBracketTemplates[a].label || '').localeCompare(String(tradeCustomBracketTemplates[b].label || ''));
+            }).map(key => {
+                const spec = tradeCustomBracketTemplates[key];
+                return '<option value="' + _escapeHtml(key) + '"' + (key === currentKey ? ' selected' : '') + '>' + _escapeHtml(spec.label || 'Custom') + '</option>';
+            }).join('');
+            return builtin + custom;
+        }
+        function getTradeFastQuoteError(selected, instruction = tradeRailState.action) {
+            if (!selected) return 'Select a contract.';
+            if (!tradeRailState.accountHash) return 'Select an account.';
+            const qty = Math.floor(Number(tradeRailState.quantity) || 0);
+            if (!qty || qty < 1) return 'Set quantity.';
+            const warnings = Array.isArray(selected.warnings) ? selected.warnings : [];
+            if (warnings.includes('stale_quote')) return 'Refresh the chain before auto-send; selected quote is stale.';
+            const preset = instruction === 'SELL_TO_CLOSE' ? 'bid' : 'ask';
+            const quote = Number(selected[preset]);
+            if (!Number.isFinite(quote) || quote <= 0) return 'Valid ' + preset + ' quote required.';
+            const limit = Number(tradeRailState.limitPrice);
+            if (!Number.isFinite(limit) || limit <= 0) return 'Set a valid limit.';
+            if (instruction === 'SELL_TO_CLOSE') {
+                const available = getSelectedTradePositionQuantity();
+                if (available < qty) return 'SELL_TO_CLOSE is capped by the selected-contract position.';
+            }
+            return '';
+        }
+        function getTradeFastModeState(selected) {
+            const quoteError = getTradeFastQuoteError(selected);
+            if (tradeRailState.activeTraderArmed) {
+                if (quoteError) return { text: 'Armed', cls: 'armed', detail: quoteError };
+                if (!tradeRailState.previewToken) return { text: 'Armed', cls: 'armed', detail: 'Preview exact order before auto-send.' };
+                return { text: 'Armed', cls: 'armed', detail: 'One-click live send uses the previewed DAY LIMIT order.' };
+            }
+            if (tradeRailState.previewToken) return { text: 'Ready', cls: 'ready', detail: 'Previewed order ready for live placement.' };
+            return { text: 'Preview', cls: '', detail: quoteError || 'Stage the ticket, then preview before live placement.' };
+        }
+        function buildTradeActiveLadderHtml(selected) {
+            if (!selected) return '<div class="trade-empty">Select a contract to show the price ladder.</div>';
+            const bid = Number(selected.bid);
+            const ask = Number(selected.ask);
+            const mid = Number(selected.mid == null ? selected.mark : selected.mid);
+            const mark = Number(selected.mark);
+            const last = Number(selected.last);
+            const limit = Number(tradeRailState.limitPrice);
+            const values = [bid, ask, mid, mark, last, limit].filter(v => Number.isFinite(v) && v > 0);
+            if (!values.length) return '<div class="trade-empty">No valid quote ladder for the selected contract.</div>';
+            const center = Number.isFinite(limit) && limit > 0 ? limit : (Number.isFinite(mid) && mid > 0 ? mid : values[0]);
+            const tick = center >= 5 ? 0.05 : 0.01;
+            const high = Math.max(...values, center) + tick * 5;
+            let start = Math.max(tick, Math.round(high / tick) * tick);
+            const rows = [];
+            for (let i = 0; i < 13; i += 1) {
+                const price = Math.max(0.01, Math.round((start - tick * i) * 100) / 100);
+                rows.push(price);
+            }
+            const workingOrders = Array.isArray(tradeRailState.orders) ? tradeRailState.orders : [];
+            return rows.map(price => {
+                const nearBid = Number.isFinite(bid) && Math.abs(price - bid) < tick / 2 + 0.0001;
+                const nearAsk = Number.isFinite(ask) && Math.abs(price - ask) < tick / 2 + 0.0001;
+                const nearLimit = Number.isFinite(limit) && Math.abs(price - limit) < tick / 2 + 0.0001;
+                const nearMid = Number.isFinite(mid) && Math.abs(price - mid) < tick / 2 + 0.0001;
+                const buyCount = workingOrders.filter(order => {
+                    const leg = getTradeOrderLegSummary(order);
+                    return String(leg.instruction || '').includes('BUY') && Number(order.price) && Math.abs(Number(order.price) - price) < tick / 2 + 0.0001;
+                }).length;
+                const sellCount = workingOrders.filter(order => {
+                    const leg = getTradeOrderLegSummary(order);
+                    return String(leg.instruction || '').includes('SELL') && Number(order.price) && Math.abs(Number(order.price) - price) < tick / 2 + 0.0001;
+                }).length;
+                const classes = [
+                    'trade-active-ladder-row',
+                    nearLimit ? 'limit' : '',
+                    nearMid ? 'current' : '',
+                    Number.isFinite(bid) && price <= bid ? 'bid-zone' : '',
+                    Number.isFinite(ask) && price >= ask ? 'ask-zone' : '',
+                ].filter(Boolean).join(' ');
+                return '<button type="button" class="' + classes + '" data-trade-fast-price="' + _escapeHtml(price.toFixed(2)) + '">' +
+                    '<span class="trade-active-ladder-cell">' + (buyCount ? _escapeHtml(String(buyCount)) : '') + '</span>' +
+                    '<span class="trade-active-ladder-cell trade-active-bid">' + (nearBid ? 'BID' : '') + '</span>' +
+                    '<span class="trade-active-ladder-cell trade-active-price">' + _escapeHtml(fmtTradePrice(price)) + '</span>' +
+                    '<span class="trade-active-ladder-cell trade-active-ask">' + (nearAsk ? 'ASK' : '') + '</span>' +
+                    '<span class="trade-active-ladder-cell">' + (sellCount ? _escapeHtml(String(sellCount)) : '') + '</span>' +
+                '</button>';
+            }).join('');
+        }
+        function renderTradeActiveTrader() {
+            const panel = document.querySelector('[data-trade-active-panel]');
+            if (!panel) return;
+            const selected = getSelectedTradeContract();
+            const position = getSelectedTradePosition();
+            const mode = getTradeFastModeState(selected);
+            const toggle = panel.querySelector('[data-trade-active-toggle]');
+            const note = panel.querySelector('[data-trade-active-note]');
+            const contractEl = panel.querySelector('[data-trade-fast-contract]');
+            const quoteEl = panel.querySelector('[data-trade-fast-quote]');
+            const modeEl = panel.querySelector('[data-trade-fast-mode]');
+            const qtyInput = panel.querySelector('[data-trade-fast-qty]');
+            const template = panel.querySelector('[data-trade-fast-template]');
+            const arm = panel.querySelector('[data-trade-fast-arm]');
+            const armWrap = panel.querySelector('[data-trade-fast-arm-wrap]');
+            const positionEl = panel.querySelector('[data-trade-fast-position]');
+            const previewEl = panel.querySelector('[data-trade-fast-preview]');
+            const ordersEl = panel.querySelector('[data-trade-fast-orders]');
+            const ladder = panel.querySelector('[data-trade-fast-ladder]');
+            const message = panel.querySelector('[data-trade-fast-message]');
+            const flatten = panel.querySelector('[data-trade-fast-flatten]');
+            panel.classList.toggle('collapsed', !!tradeRailState.activeTraderCollapsed);
+            if (toggle) {
+                toggle.textContent = tradeRailState.activeTraderCollapsed ? '⌄' : '⌃';
+                toggle.title = tradeRailState.activeTraderCollapsed ? 'Expand active trader' : 'Collapse active trader';
+                toggle.setAttribute('aria-label', toggle.title);
+                toggle.setAttribute('aria-expanded', tradeRailState.activeTraderCollapsed ? 'false' : 'true');
+            }
+            if (note) note.textContent = tradeRailState.activeTraderCollapsed ? 'Collapsed' : (tradeRailState.activeTraderArmed ? 'Auto-send armed' : 'Fast scalps');
+            if (contractEl) {
+                const side = selected && selected.option_type === 'PUT' ? 'P' : 'C';
+                contractEl.textContent = selected ? ((selected.underlying || tradeRailState.ticker || '') + ' ' + fmtTradePrice(selected.strike) + side + ' · ' + fmtTradeDte(selected.dte)) : 'Choose a contract';
+                contractEl.title = selected && selected.contract_symbol ? selected.contract_symbol : '';
+            }
+            if (quoteEl) {
+                quoteEl.textContent = selected
+                    ? 'B ' + fmtTradePrice(selected.bid) + ' / M ' + fmtTradePrice(selected.mid == null ? selected.mark : selected.mid) + ' / A ' + fmtTradePrice(selected.ask) + ' · Limit ' + (tradeRailState.limitPrice ? fmtTradePrice(tradeRailState.limitPrice) : '—')
+                    : 'Bid / Ask unavailable';
+            }
+            if (modeEl) {
+                modeEl.textContent = mode.text;
+                modeEl.classList.toggle('ready', mode.cls === 'ready');
+                modeEl.classList.toggle('armed', mode.cls === 'armed');
+            }
+            if (qtyInput && String(qtyInput.value) !== String(tradeRailState.quantity)) qtyInput.value = tradeRailState.quantity;
+            if (template) {
+                const options = getTradeTemplateOptionsHtml(tradeRailState.bracketTemplate);
+                if (template.innerHTML !== options) template.innerHTML = options;
+                if (template.value !== tradeRailState.bracketTemplate) template.value = tradeRailState.bracketTemplate;
+            }
+            if (arm) arm.checked = !!tradeRailState.activeTraderArmed;
+            if (armWrap) armWrap.classList.toggle('armed', !!tradeRailState.activeTraderArmed);
+            const posQty = position ? getSelectedTradePositionQuantity() : 0;
+            if (positionEl) positionEl.textContent = position ? ('Net ' + posQty + ' · Day ' + fmtTradeMoney(position.day_pnl)) : 'Flat';
+            if (previewEl) previewEl.textContent = tradeRailState.previewToken ? 'Ready' : (tradeRailState.previewLoading ? 'Loading' : 'Required');
+            const orders = Array.isArray(tradeRailState.orders) ? tradeRailState.orders : [];
+            if (ordersEl) ordersEl.textContent = tradeRailState.ordersLoading ? 'Loading' : (orders.length ? orders.length + ' open/recent' : 'None');
+            if (flatten) flatten.disabled = !selected || !posQty;
+            panel.querySelectorAll('[data-trade-fast-action]').forEach(btn => {
+                btn.disabled = !selected || tradeRailState.placementLoading || tradeRailState.previewLoading;
+            });
+            if (ladder) {
+                ladder.innerHTML = buildTradeActiveLadderHtml(selected);
+                ladder.querySelectorAll('[data-trade-fast-price]').forEach(btn => {
+                    if (btn.__tradeFastPriceBound) return;
+                    btn.__tradeFastPriceBound = true;
+                    btn.addEventListener('click', () => {
+                        tradeRailState.limitPrice = btn.dataset.tradeFastPrice || '';
+                        tradeRailState.fastTradeMessage = 'Limit staged at ' + fmtTradePrice(tradeRailState.limitPrice) + '. Preview again before live placement.';
+                        invalidateTradePreview('Limit price changed. Preview again.');
+                    });
+                });
+            }
+            const detail = tradeRailState.fastTradeMessage || mode.detail;
+            if (message) {
+                message.textContent = detail || '';
+                message.classList.toggle('warn', !!(tradeRailState.activeTraderArmed && (mode.detail || '').toLowerCase().includes('preview')));
+            }
+            renderTradeModeBadge();
+        }
         function renderTradeBracketTemplateOptions() {
             const input = document.querySelector('[data-trade-bracket-template]');
             if (!input) return;
             const templates = getTradeBracketTemplates();
             const current = templates[tradeRailState.bracketTemplate] ? tradeRailState.bracketTemplate : 'trg_1';
-            const optionHtml = Object.keys(TRADE_BUILTIN_BRACKET_TEMPLATES).map(key => {
-                const spec = TRADE_BUILTIN_BRACKET_TEMPLATES[key];
-                return '<option value="' + _escapeHtml(key) + '"' + (key === current ? ' selected' : '') + '>' + _escapeHtml(spec.label) + '</option>';
-            }).join('') + Object.keys(tradeCustomBracketTemplates).sort((a, b) => {
-                return String(tradeCustomBracketTemplates[a].label || '').localeCompare(String(tradeCustomBracketTemplates[b].label || ''));
-            }).map(key => {
-                const spec = tradeCustomBracketTemplates[key];
-                return '<option value="' + _escapeHtml(key) + '"' + (key === current ? ' selected' : '') + '>' + _escapeHtml(spec.label || 'Custom') + '</option>';
-            }).join('');
+            const optionHtml = getTradeTemplateOptionsHtml(current);
             if (input.innerHTML !== optionHtml) input.innerHTML = optionHtml;
             input.value = current;
         }
@@ -29002,6 +29584,8 @@ def index():
                 }
             }
             renderTradeBracketPlan();
+            renderTradeActiveTrader();
+            renderTradeModeBadge();
         }
         function getBestBuyingPower(details) {
             const balances = (details && details.balances) || {};
@@ -29055,16 +29639,19 @@ def index():
             }
             if (tradeRailState.positionsCollapsed) {
                 if (note) note.textContent = 'Hidden';
+                renderTradeActiveTrader();
                 return;
             }
             if (!tradeRailState.accountHash) {
                 if (note) note.textContent = 'No account';
                 list.innerHTML = '<div class="trade-empty">Select an account to show relevant positions.</div>';
+                renderTradeActiveTrader();
                 return;
             }
             if (tradeRailState.accountDetailsLoading) {
                 if (note) note.textContent = 'Loading';
                 list.innerHTML = '<div class="trade-empty">Loading account positions...</div>';
+                renderTradeActiveTrader();
                 return;
             }
             const positions = Array.isArray(tradeRailState.accountDetails && tradeRailState.accountDetails.positions) ? tradeRailState.accountDetails.positions : [];
@@ -29072,6 +29659,7 @@ def index():
             if (!positions.length) {
                 const selected = getSelectedTradeContract();
                 list.innerHTML = '<div class="trade-empty">No position found for ' + _escapeHtml((selected && selected.contract_symbol) || tradeRailState.ticker || 'selection') + '.</div>';
+                renderTradeActiveTrader();
                 return;
             }
             list.innerHTML = positions.map(pos => {
@@ -29113,6 +29701,7 @@ def index():
                     selectTradeContractSymbol(btn.dataset.tradePositionSymbol || '', 'Position contract selected. Preview again.');
                 });
             });
+            renderTradeActiveTrader();
         }
         function renderTradeOrders() {
             preserveTradeRailScroll(() => {
@@ -29125,26 +29714,31 @@ def index():
                 if (tradeRailState.ordersCollapsed) {
                     if (note) note.textContent = tradeRailState.accountHash ? (orders.length ? orders.length + ' open/recent' : 'Collapsed') : 'No account';
                     list.innerHTML = '';
+                    renderTradeActiveTrader();
                     return;
                 }
                 if (!tradeRailState.accountHash) {
                     if (note) note.textContent = 'No account';
                     list.innerHTML = '<div class="trade-empty">Select an account to show open and recent orders.</div>';
+                    renderTradeActiveTrader();
                     return;
                 }
                 if (tradeRailState.ordersLoading) {
                     if (note) note.textContent = 'Loading';
                     list.innerHTML = '<div class="trade-empty">Loading Schwab orders...</div>';
+                    renderTradeActiveTrader();
                     return;
                 }
                 if (tradeRailState.ordersError) {
                     if (note) note.textContent = 'Unavailable';
                     list.innerHTML = '<div class="trade-empty">' + _escapeHtml(tradeRailState.ordersError) + '</div>';
+                    renderTradeActiveTrader();
                     return;
                 }
                 if (note) note.textContent = orders.length ? orders.length + ' open/recent' : 'No matching orders';
                 if (!orders.length) {
                     list.innerHTML = '<div class="trade-empty">No open or recent orders for the selected context.</div>';
+                    renderTradeActiveTrader();
                     return;
                 }
                 list.innerHTML = orders.map(order => {
@@ -29164,6 +29758,7 @@ def index():
                     btn.__tradeCancelBound = true;
                     btn.addEventListener('click', () => cancelTradeOrder(btn.dataset.tradeCancelOrder || ''));
                 });
+                renderTradeActiveTrader();
             });
         }
         function renderTradeJournal() {
@@ -30345,6 +30940,7 @@ def index():
                 tradeRailState.previewError = '';
                 tradeRailState.placement = null;
                 tradeRailState.placementError = '';
+                tradeRailState.fastTradeMessage = 'Preview ready for the exact ticket. Arm auto-send only if you intend one-click live placement.';
                 renderTradeTicket();
                 if (tradeRailState.journalVisible) requestTradeJournal({ force: true });
             })
@@ -30355,6 +30951,85 @@ def index():
                 tradeRailState.previewError = err.message || 'Preview failed';
                 renderTradeTicket();
             });
+        }
+        function stageTradeFastTicket(instruction, preset, message) {
+            const selected = getSelectedTradeContract();
+            if (!selected) {
+                tradeRailState.fastTradeMessage = 'Select a cached contract first.';
+                renderTradeActiveTrader();
+                return { selected: null, changed: false, value: '' };
+            }
+            const value = getTradePresetPrice(selected, preset);
+            if (!value) {
+                tradeRailState.fastTradeMessage = 'No valid ' + preset + ' quote for the selected contract.';
+                renderTradeActiveTrader();
+                return { selected, changed: false, value: '' };
+            }
+            const changed = tradeRailState.action !== instruction || String(tradeRailState.limitPrice || '') !== String(value);
+            tradeRailState.action = instruction;
+            tradeRailState.limitPrice = value;
+            if (changed) {
+                invalidateTradePreview(message || 'Fast ticket changed. Preview again.');
+            } else {
+                renderTradeTicket();
+            }
+            return { selected, changed, value };
+        }
+        function handleTradeFastAction(instruction) {
+            const preset = instruction === 'SELL_TO_CLOSE' ? 'bid' : 'ask';
+            const staged = stageTradeFastTicket(instruction, preset, instruction === 'SELL_TO_CLOSE' ? 'Sell bid staged. Preview again.' : 'Buy ask staged. Preview again.');
+            if (!staged.selected || !staged.value) return;
+            if (!tradeRailState.activeTraderArmed) {
+                tradeRailState.fastTradeMessage = (instruction === 'SELL_TO_CLOSE' ? 'Sell bid' : 'Buy ask') + ' staged at ' + fmtTradePrice(staged.value) + '. Preview before live placement.';
+                renderTradeActiveTrader();
+                return;
+            }
+            const quoteError = getTradeFastQuoteError(staged.selected, instruction);
+            if (quoteError) {
+                tradeRailState.fastTradeMessage = quoteError;
+                renderTradeActiveTrader();
+                return;
+            }
+            if (staged.changed || !tradeRailState.previewToken) {
+                tradeRailState.fastTradeMessage = 'Auto-send is armed, but this exact order needs a successful preview first.';
+                renderTradeActiveTrader();
+                return;
+            }
+            tradeRailState.fastTradeMessage = 'Auto-send armed: sending previewed live order.';
+            placeTradeOrder({ skipConfirm: true, source: 'active_trader' });
+        }
+        function handleTradeFastFlatten() {
+            const selected = getSelectedTradeContract();
+            const qty = getSelectedTradePositionQuantity();
+            if (!selected || !qty) {
+                tradeRailState.fastTradeMessage = 'No selected-contract long position to flatten.';
+                renderTradeActiveTrader();
+                return;
+            }
+            const priorQty = String(tradeRailState.quantity || '');
+            tradeRailState.quantity = qty;
+            const staged = stageTradeFastTicket('SELL_TO_CLOSE', 'bid', 'Flatten staged. Preview again.');
+            if (!staged.value) return;
+            const changed = staged.changed || priorQty !== String(qty);
+            if (changed) invalidateTradePreview('Flatten staged. Preview again.');
+            if (!tradeRailState.activeTraderArmed) {
+                tradeRailState.fastTradeMessage = 'Flatten staged for ' + qty + ' @ bid. Preview before live placement.';
+                renderTradeTicket();
+                return;
+            }
+            const quoteError = getTradeFastQuoteError(selected, 'SELL_TO_CLOSE');
+            if (quoteError) {
+                tradeRailState.fastTradeMessage = quoteError;
+                renderTradeTicket();
+                return;
+            }
+            if (changed || !tradeRailState.previewToken) {
+                tradeRailState.fastTradeMessage = 'Auto-send is armed, but flatten needs a successful preview first.';
+                renderTradeTicket();
+                return;
+            }
+            tradeRailState.fastTradeMessage = 'Auto-send armed: sending previewed flatten order.';
+            placeTradeOrder({ skipConfirm: true, source: 'active_trader_flatten' });
         }
         function getTradeCaptureColor(name, fallback) {
             try {
@@ -30540,18 +31215,21 @@ def index():
                     });
             }, 0);
         }
-        function placeTradeOrder() {
+        function placeTradeOrder(options = {}) {
+            const skipConfirm = !!(options && options.skipConfirm);
             const selected = getSelectedTradeContract();
             if (!selected || !tradeRailState.accountHash || !tradeRailState.previewToken) {
                 tradeRailState.placementError = 'A successful preview is required before live placement.';
+                tradeRailState.fastTradeMessage = 'Live send blocked: preview the exact order first.';
                 renderTradeTicket();
                 return;
             }
             const summary = tradeRailState.action + ' ' + tradeRailState.quantity + ' ' + selected.contract_symbol + ' @ ' + tradeRailState.limitPrice;
-            if (!window.confirm('Send live order to Schwab?\\n\\n' + summary)) return;
+            if (!skipConfirm && !window.confirm('Send live order to Schwab?\\n\\n' + summary)) return;
             tradeRailState.placementLoading = true;
             tradeRailState.placementError = '';
             tradeRailState.placement = null;
+            if (skipConfirm) tradeRailState.fastTradeMessage = 'Sending live order to Schwab...';
             renderTradeTicket();
             fetch('/trade/place_order', {
                 method: 'POST',
@@ -30575,6 +31253,9 @@ def index():
                 if (!ok || data.error) throw new Error(data.error || 'Live placement failed');
                 tradeRailState.placement = data;
                 tradeRailState.placementError = '';
+                tradeRailState.preview = null;
+                tradeRailState.previewToken = '';
+                tradeRailState.fastTradeMessage = skipConfirm ? 'Live order sent. Preview is consumed; preview again for the next send.' : '';
                 renderTradeTicket();
                 requestTradeAccountDetails({ force: true });
                 requestTradeOrders({ force: true });
@@ -30585,6 +31266,7 @@ def index():
                 tradeRailState.placementLoading = false;
                 tradeRailState.placement = null;
                 tradeRailState.placementError = err.message || 'Live placement failed';
+                if (skipConfirm) tradeRailState.fastTradeMessage = tradeRailState.placementError;
                 renderTradeTicket();
             });
         }
@@ -30755,6 +31437,52 @@ def index():
                     tradeRailState.helperCompact = !tradeRailState.helperCompact;
                     try { localStorage.setItem(TRADE_HELPER_COMPACT_KEY, tradeRailState.helperCompact ? '1' : '0'); } catch (e) {}
                     renderTradeHelperCompact();
+                });
+            }
+            const activeToggle = root.querySelector('[data-trade-active-toggle]');
+            if (activeToggle) {
+                activeToggle.addEventListener('click', () => {
+                    tradeRailState.activeTraderCollapsed = !tradeRailState.activeTraderCollapsed;
+                    try { localStorage.setItem(TRADE_ACTIVE_TRADER_COLLAPSE_KEY, tradeRailState.activeTraderCollapsed ? '1' : '0'); } catch (e) {}
+                    renderTradeActiveTrader();
+                });
+            }
+            const fastArm = root.querySelector('[data-trade-fast-arm]');
+            if (fastArm) {
+                fastArm.addEventListener('change', () => {
+                    tradeRailState.activeTraderArmed = !!fastArm.checked;
+                    tradeRailState.fastTradeMessage = tradeRailState.activeTraderArmed
+                        ? 'Auto-send armed. Buy Ask, Sell Bid, or Flatten can live-send only the exact previewed order.'
+                        : 'Auto-send off. Fast buttons stage the ticket only.';
+                    renderTradeTicket();
+                });
+            }
+            const fastQty = root.querySelector('[data-trade-fast-qty]');
+            if (fastQty) {
+                fastQty.addEventListener('input', () => {
+                    tradeRailState.quantity = fastQty.value || 1;
+                    invalidateTradePreview('Quantity changed. Preview again.');
+                });
+            }
+            root.querySelectorAll('[data-trade-fast-qty-preset]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    tradeRailState.quantity = btn.dataset.tradeFastQtyPreset || 1;
+                    invalidateTradePreview('Quantity changed. Preview again.');
+                });
+            });
+            root.querySelectorAll('[data-trade-fast-action]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    handleTradeFastAction(btn.dataset.tradeFastAction === 'SELL_TO_CLOSE' ? 'SELL_TO_CLOSE' : 'BUY_TO_OPEN');
+                });
+            });
+            const fastFlatten = root.querySelector('[data-trade-fast-flatten]');
+            if (fastFlatten) fastFlatten.addEventListener('click', handleTradeFastFlatten);
+            const fastTemplate = root.querySelector('[data-trade-fast-template]');
+            if (fastTemplate) {
+                fastTemplate.addEventListener('change', () => {
+                    applyTradeBracketTemplate(fastTemplate.value || 'trg_1', true);
+                    tradeRailState.fastTradeMessage = 'Template changed for planning. Schwab preview/place payload remains single-leg DAY LIMIT.';
+                    renderTradeActiveTrader();
                 });
             }
             const ordersRefresh = root.querySelector('[data-trade-orders-refresh]');

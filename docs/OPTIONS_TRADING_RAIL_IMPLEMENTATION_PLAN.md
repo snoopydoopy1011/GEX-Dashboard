@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Local screenshot attachments built; active-trader ladder / low-click live entry design next; live bracket support later
+**Status:** Active Trader fast surface built with preview-mandatory armed auto-send; contract-helper shortcuts, rail ordering, and doc cleanup next; live bracket support later
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -1952,6 +1952,186 @@ Do not implement without explicit approval:
 - Multi-leg spreads.
 - Automated trading from chart clicks, alerts, or flow.
 - Automatic screen recordings.
+
+Run after changes:
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+
+If frontend JS changes, also syntax-check rendered inline JS:
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+```
+
+---
+
+## 20. 2026-05-02 Active Trader Fast Surface Update
+
+Accomplished:
+
+- Added a collapsible `Active Trader` panel at the top of the dedicated fourth order-entry rail.
+- Added fast scalping controls inspired by Thinkorswim Active Trader:
+  - selected contract header;
+  - Buy Ask, Sell Bid, and Flatten buttons;
+  - quantity input plus `1`, `2`, `5`, and `10` quantity presets;
+  - bracket-template selector for planning context;
+  - explicit `Auto-send` arm checkbox;
+  - position, preview, and open/recent order status summary;
+  - compact bid/ask/price ladder with current limit and quote zones.
+- Added `gex.tradeActiveTraderCollapsed` localStorage state for the Active Trader panel collapse state.
+- Added rail-level state badging:
+  - `Preview Only`;
+  - `Live Ready` after a successful exact preview;
+  - `Auto Send Armed` only after the user explicitly checks `Auto-send`.
+- Implemented the first one-click safety model conservatively:
+  - auto-send is off by default and is not persisted;
+  - fast buttons stage the rich order ticket when auto-send is off;
+  - when auto-send is on, fast buttons can submit only an already-previewed exact single-leg DAY LIMIT ticket;
+  - the frontend skips the browser `confirm()` only in the armed fast path;
+  - the backend `/trade/place_order` still requires `ENABLE_LIVE_TRADING=1`, `confirmed: true`, exact recent preview token, exact cached Schwab contract, unchanged order JSON, and SELL_TO_CLOSE position caps.
+- Preserved the existing rich order-entry section. Active Trader is a fast surface, not a replacement for Contract Picker, Selected Contract, Order Ticket, Bracket Plan, Preview, Orders, or Journal.
+- Kept Bracket Plan/template selection planning-only. It still does not alter Schwab preview/place payloads or create live bracket/OCO child orders.
+- Kept static HTML and rebuild helper parity for the Active Trader panel through static `#trade-rail` markup and `buildTradeRailHtml()`.
+
+Tricky parts / implementation notes:
+
+- The right safety model is preview-mandatory for this first version. It gives the user a low-click send path after intentional arming while keeping the server-side live placement contract unchanged.
+- `/trade/place_order` consumes successful previews, so after any live send the next fast send requires a fresh preview.
+- Fast Buy Ask / Sell Bid changes the ticket action and limit to current ask/bid. If that differs from the previewed ticket, auto-send blocks and tells the user to preview again.
+- Flatten is intentionally `SELL_TO_CLOSE` for the selected contract only. It uses the selected-contract long position quantity when available and does not create multi-leg exits or bracket children.
+- The price ladder is a local display/staging surface built from cached contract bid/mid/ask/mark/last plus the current ticket limit. It does not add a streaming Level II feed or Schwab order-book behavior.
+- Working-order marks in the ladder are best-effort from the normalized `/trade/orders` rows and selected context; they are display-only.
+- Because `ensurePriceChartDom()` can rebuild the rail, the Active Trader DOM had to be added to both static HTML and the JS rebuild helper.
+- Frontend JS changed, so rendered inline scripts need `node --check`; Python syntax checks alone do not validate the embedded browser code.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+- Rendered inline JavaScript extraction found 4 scripts and `node --check /tmp/gex-inline-scripts.js` passed.
+- Local Flask smoke on `http://127.0.0.1:5014/` returned HTTP 200 and served the Active Trader markup.
+- Port `5014` was stopped after smoke verification.
+
+Still left to do:
+
+- Browser-smoke the Active Trader panel with real cached chain/account/order data:
+  - panel collapse/expand;
+  - Buy Ask/Sell Bid staging;
+  - preview-ready badge state;
+  - armed auto-send blocking when the ticket no longer matches preview;
+  - armed auto-send success with a mocked or carefully controlled live placement path;
+  - screenshot attachment still runs after successful live sidebar placement and does not make placement appear failed if capture fails.
+- Make Contract Helper candidate boxes actionable:
+  - clicking the Call candidate selects the exact cached call contract into Selected Contract, Order Ticket, and Active Trader;
+  - clicking the Put candidate does the same for the exact cached put contract;
+  - if the helper candidate is not in the cached `/trade_chain` payload, show a clear refresh/widen-range message instead of reconstructing symbols.
+- Add quick contract buttons for scalping:
+  - ATM Call;
+  - ATM Put;
+  - +1 strike OTM Call;
+  - +1 strike OTM Put;
+  - +2 strike OTM Call;
+  - +2 strike OTM Put.
+- Decide where those quick contract buttons live:
+  - likely in or near Active Trader;
+  - possibly also near Contract Helper;
+  - preserve exact cached Schwab `contract_symbol` selection only.
+- Rethink the order-entry rail card ordering for the fastest 0-1 DTE workflow. Candidate order to evaluate:
+  - Active Trader;
+  - Contract Helper / quick contract buttons;
+  - Position;
+  - Selected Contract;
+  - Order Ticket / Preview;
+  - Contract Picker;
+  - Orders;
+  - Bracket Plan;
+  - Journal.
+- Clean up this implementation plan. It is now long and repetitive:
+  - keep the current state and latest handoff near the top;
+  - archive older stage logs into a condensed history section;
+  - preserve critical safety constraints and anchors;
+  - remove stale "next step" sections that are already complete;
+  - make the continuation prompt easier to find.
+- Improve deterministic closed-trade P/L only when the order/position lifecycle proves entry, exit, quantities, and prices reliably.
+- Keep deferred/non-goals unchanged until explicitly approved: live Schwab bracket/OCO child orders, SPX-specific validation, multi-leg spreads, automated trading from chart clicks/alerts/flow, automatic screen recordings, and analytical formula changes.
+
+### Prompt For Next Session
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard on branch codex/options-trading-rail-plan.
+
+Read AGENTS.md first, then read:
+- docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md
+- docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md
+
+Before editing, run:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Continue only the dedicated fourth order-entry trading rail and related Journal surfaces:
+- #trade-rail-header
+- #trade-rail
+- .trade-rail-shell
+- #trade-journal-workspace
+- Journal panel/workspace
+- Active Trader
+- Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders panels
+
+Current state:
+- Trading rail has preview support and guarded live single-leg DAY LIMIT option order placement. Live placement must continue to work and must not be treated as preview-only.
+- Active Trader v1 exists as a collapsible fast surface at the top of the fourth rail.
+- Active Trader has selected contract header, Buy Ask, Sell Bid, Flatten, quantity presets, template selector, explicit Auto-send arm checkbox, position/preview/orders summary, and a compact price ladder.
+- Auto-send is off by default and not persisted.
+- Current one-click safety model is preview-mandatory:
+  - fast buttons stage the ticket when Auto-send is off;
+  - when Auto-send is armed, fast buttons can live-send only the already-previewed exact order;
+  - `/trade/place_order` still requires `ENABLE_LIVE_TRADING=1`, `confirmed: true`, exact recent preview token, exact cached Schwab contract, unchanged order JSON, and SELL_TO_CLOSE position caps.
+- `/trade/place_order` consumes successful previews, so every new live send needs a fresh successful preview.
+- Bracket Plan remains planning-only and must not alter Schwab preview/place payloads.
+- Screenshot attachments exist in local SQLite `trade_event_media` plus files under `Screenshots/trade_journal`.
+- On successful live sidebar placement only, the browser best-effort captures chart canvas layers and attaches a PNG screenshot to the matching placed-order journal event.
+- Screenshot failure must not make the live order appear failed.
+- Journal rail/workspace details show screenshot thumbnails, local paths, open links, delete controls, and cleanup controls.
+- Static HTML and JS rebuild helpers must stay in parity:
+  - trade rail markup in static HTML and `buildTradeRailHtml()`;
+  - journal workspace markup in static HTML and `buildTradeJournalWorkspaceHtml()`;
+  - rebuild path through `ensurePriceChartDom()`, `ensureTradeRailDom()`, and `ensureTradeJournalWorkspace()`.
+
+Main next undertaking:
+1. Browser-smoke Active Trader with real cached chain/account/order data, especially armed-state behavior and preview mismatch blocking.
+2. Make Contract Helper candidate boxes actionable:
+   - clicking the Call candidate selects the exact cached call contract into Selected Contract, Order Ticket, and Active Trader;
+   - clicking the Put candidate selects the exact cached put contract the same way;
+   - do not reconstruct option symbols by hand; if the candidate is not in cached `/trade_chain`, show a refresh/widen-range message.
+3. Add quick contract-selection buttons for:
+   - ATM Call;
+   - ATM Put;
+   - +1 strike OTM Call;
+   - +1 strike OTM Put;
+   - +2 strike OTM Call;
+   - +2 strike OTM Put.
+4. Rethink the order-entry rail card ordering for a fast 0-1 DTE SPY scalping workflow. Keep the rich order-entry controls, but decide whether Contract Picker should move lower and quick-selection/Active Trader should dominate the top.
+5. Clean up `docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md` because it is getting too long:
+   - preserve current state, safety constraints, anchors, and latest handoff;
+   - condense older completed stage logs;
+   - remove stale completed "next step" text;
+   - keep the newest continuation prompt easy to find.
+
+Safety constraints:
+- Do not silently enable Auto-send.
+- Do not add previewless live placement unless explicitly approved later.
+- Do not bypass `ENABLE_LIVE_TRADING=1`.
+- Do not bypass exact cached contract validation.
+- Do not bypass successful preview-token binding for live placement.
+- Preserve SELL_TO_CLOSE position caps.
+- Do not make Bracket Plan alter Schwab payloads unless live bracket/OCO is explicitly approved later.
+- Do not implement live Schwab bracket/OCO child orders.
+- Do not implement SPX-specific validation.
+- Do not implement multi-leg spreads.
+- Do not implement automated trading from chart clicks, alerts, or flow.
+- Do not implement automatic screen recordings.
 
 Run after changes:
 python3 -m py_compile ezoptionsschwab.py
