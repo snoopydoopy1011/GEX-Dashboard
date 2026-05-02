@@ -1,6 +1,6 @@
 # GEX Dashboard - Options Trading Rail UI Polish Plan
 
-**Status:** Journal persistence/editor added; Journal toggle/open bug queued
+**Status:** Rail Journal framework built; full journal workspace/statistics and desktop-app feasibility deferred
 **Created:** 2026-05-01  
 **Branch at draft time:** `codex/options-trading-rail-plan`  
 **Primary file:** `ezoptionsschwab.py`  
@@ -1077,32 +1077,43 @@ Accomplished:
 - Added `POST /trade/journal/update` for saving journal annotations.
 - Kept automatic journal entries attached to successful previews and successful live placements.
 - Default journal statuses are `planned` for preview events and `open` for placed events.
-- Upgraded the rail Journal panel with compact event rows, status pills, setup/tags display, and an edit action.
+- Fixed the rail Journal button/open path so clicking `Journal` opens the trade rail if needed, toggles `tradeRailState.journalVisible`, refreshes journal data, and scrolls the Journal panel into view.
+- Upgraded the rail Journal panel with compact event rows, status pills, setup/tags display, status/event filters, text search, selected-entry detail, and edit actions.
 - Added a journal editor dialog/modal for status, tags, setup, thesis, notes, and outcome.
-- Mirrored the Journal list/editor markup in static `#trade-rail` HTML and `buildTradeRailHtml()`.
-- Added focused tests for editable journal annotations and missing journal-event rejection.
+- Added `POST /trade/journal/create` for local-only manual notes from the current rail context.
+- Added successful cancel-order journal events through the existing explicitly confirmed cancel path.
+- Mirrored the Journal list/editor/filter/detail markup in static `#trade-rail` HTML and `buildTradeRailHtml()`.
+- Added focused tests for editable journal annotations, missing journal-event rejection, manual journal creation, and cancel journal events.
 
 Tricky parts:
 
 - The journal editor is local-only and annotation-only. It does not change Schwab preview/place payloads, final confirmation behavior, live-trading gates, or bracket planning behavior.
 - Static HTML and `buildTradeRailHtml()` must stay in parity. The Journal panel and editor are under the fourth trading rail and can be dropped by chart DOM rebuilds if future markup is added in only one path.
 - Port `5014` can be stale. During smoke testing, the old process served older DOM until it was restarted; use this as a first check before assuming frontend code is missing.
-- The user reported that clicking the Journal button in the in-app browser did not open anything. That is not expected behavior and should be treated as a next-session bug, not as intended UX.
+- The user-facing Journal bug was likely visibility/scroll-state confusion rather than a missing route: the panel lives low in the scrollable rail. The open path now scrolls the panel into view.
+- Header Journal controls are outside `#trade-rail`; panel/editor/filter controls are inside it. `wireTradeRailPickerControls()` has to bind both global and rail-scoped controls.
+- Cancel journaling records only after Schwab confirms cancellation and preserves the explicit cancel confirmation requirement.
 
 Verification completed:
 
 - `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
 - `git diff --check` passed.
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
-- Browser smoke on `http://127.0.0.1:5014/` confirmed the served current tree contains the Journal modal/editor DOM after restarting a stale `5014` process. No screenshots or screen recordings were taken.
+- Browser smoke on `http://127.0.0.1:5014/` confirmed the Journal button opens the panel, the panel gets `.visible`, and status filter / New / detail controls render. No screenshots or screen recordings were taken.
+- Port `5014` was stopped after verification.
 
 Still left to do:
 
-- Reproduce and fix the Journal button/toggle open issue from the user's current in-app browser state.
-- Verify whether the issue is caused by collapsed rail state, invisible header controls, missing event binding in `wireTradeRailPickerControls()`, `renderTradeJournal()` not toggling `.visible`, stale port `5014`, or a DOM rebuild that lost the editor/panel nodes.
-- Add journal filters/search by status, ticker, contract, tag, and event type.
+- Build a full journal workspace/page with meaningful stats and review ergonomics. A likely direction is a new full-width section below the existing Live Alerts and Flow Pulse lane so it behaves like a new page after scrolling down, without crowding the order-entry rail.
+- Journal workspace should include trade/event table filters, selected-entry detail, lifecycle grouping, daily/weekly counts, event-type/status summaries, ticker/contract summaries, setup/tag summaries, and deterministic P/L only when safe.
+- Decide whether the below-alerts/flow-pulse Journal workspace is always rendered, collapsed behind a section header, opened by the existing rail `Journal` button, or paired with the rail quick-annotation panel.
+- Explore desktop-app feasibility before implementing:
+  - PySide6/PyQt6 + `QWebEngineView` wrapper around the local Flask dashboard
+  - in-process/threaded Flask server vs managed subprocess
+  - Schwab OAuth/token callback implications
+  - SQLite/file path handling
+  - macOS packaging and whether this should be a lightweight launcher instead of a full packaged app
 - Add clearer lifecycle grouping across preview, placed, canceled, closed/reviewed, and manually annotated entries.
-- Consider cancel-order journal events with safe metadata and existing explicit-confirmation behavior.
 - Add realized/marked P/L enrichment only when deterministic enough from positions/orders.
 - Keep screenshot/screen-recording attachments deferred until there is explicit opt-in UI and storage controls.
 - Keep deferred/non-goals unchanged: no live Schwab bracket/OCO child orders, no SPX-specific validation, no multi-leg spreads, no automated trading from chart clicks/alerts/flow, and no analytical formula changes.
@@ -1135,24 +1146,28 @@ Current latest state:
 - Contract Picker rows use explicit columns: Contract, B, M, A, IV, Δ, Vol, OI.
 - Contract Picker behaves like a strike ladder: calls sort low-to-high and puts sort high-to-low. On side/expiry/range changes, the side-specific ATM anchor is selected and auto-scrolled to the top of the chain list. Do not reintroduce ATM/OTM/ITM grouping.
 - Journal persistence exists in local SQLite `trade_events`.
-- Successful previews and successful live placements auto-record local journal events.
+- Successful previews, successful live placements, and successful confirmed cancels auto-record local journal events.
 - Journal entries have editable local annotation fields: status, tags, setup, thesis, notes, outcome.
-- `/trade/journal` returns recent events and `/trade/journal/update` saves annotations.
+- `/trade/journal` returns recent events, `/trade/journal/update` saves annotations, and `/trade/journal/create` creates local-only manual notes.
+- The rail Journal button now opens the trade rail if collapsed, toggles `tradeRailState.journalVisible`, requests fresh journal data, and scrolls the Journal panel into view.
+- The rail Journal panel now has status/event filters, text search, selected-entry detail, manual New entry, and edit modal controls.
 - Static HTML and `buildTradeRailHtml()` must stay in parity.
 
-Known issue to start with:
-- The user reported that clicking the `Journal` button in the in-app browser does not open anything. That is not expected behavior.
-- Reproduce using the user's current in-app browser at http://127.0.0.1:5014/.
-- Do not take screenshots or screen recordings unless explicitly asked.
-- First verify port `5014` is serving the current working tree; stale Flask processes have served older rail DOM before.
-- Check whether the rail is collapsed, whether `[data-trade-journal-toggle]` is visible/clickable, whether `wireTradeRailPickerControls()` binds the click listener, whether `tradeRailState.journalVisible` changes, and whether `renderTradeJournal()` toggles `.trade-journal-panel.visible`.
-- Fix that Journal button/toggle issue before adding new journal features.
-
-Potential next scope after the toggle bug:
-- Add journal filters/search by status, ticker, contract, tags, and event type.
-- Add lifecycle grouping across previewed, placed, canceled, and reviewed/closed entries.
-- Consider cancel-order journal events with safe metadata and existing explicit-confirmation behavior.
-- Add deterministic P/L enrichment from positions/orders if safe and reliable.
+Important next scope:
+- Design and build a full Journal workspace/page for actually reviewing journal entries and stats. The current rail panel is good for quick annotations, but it is not enough for serious review.
+- Strong candidate placement: a full-width Journal section below the existing Live Alerts and Flow Pulse lane. That area is effectively a new page after scrolling down, so it can expose journal tables/stats without crowding the fourth order-entry rail.
+- Decide whether the existing rail `Journal` button should scroll to/open that workspace, keep opening the rail quick panel, or offer both quick panel and full workspace behavior.
+- Journal workspace should include:
+  - event/trade table with filters/search
+  - selected-entry detail
+  - lifecycle grouping across previewed, placed, canceled, closed/reviewed, and manual notes
+  - daily/weekly event counts
+  - status and event-type summaries
+  - ticker/contract summaries
+  - setup/tag summaries
+  - deterministic P/L enrichment from positions/orders only when safe and reliable
+  - clear empty states for days with no local journal events
+- Explore how hard it would be to convert or wrap this localhost dashboard as a lightweight desktop app before implementing. Evaluate PySide6/PyQt6 + `QWebEngineView`, running Flask in-process vs subprocess, Schwab OAuth/token callback implications, SQLite/file paths, macOS packaging, and whether a local launcher is enough.
 - Re-check the Contract Picker table at very narrow rail widths and with larger live volume/OI values.
 - Continue visual polish of Selected Contract, Order Ticket, Orders, or Journal panels as needed.
 

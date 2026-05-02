@@ -5030,7 +5030,12 @@ TRADE_JOURNAL_TEXT_LIMITS = {
 
 
 def _default_trade_journal_status(event_type):
-    return 'open' if str(event_type or '') == 'placed_order' else 'planned'
+    event_type = str(event_type or '')
+    if event_type == 'placed_order':
+        return 'open'
+    if event_type in {'manual_note', 'cancelled_order'}:
+        return 'review'
+    return 'planned'
 
 
 def _clean_trade_journal_text(value, limit):
@@ -5090,6 +5095,22 @@ def _write_trade_event(event_type, payload):
             ))
             conn.commit()
             return cursor.lastrowid
+
+
+def _create_manual_trade_journal_event(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    fields = _normalize_trade_journal_fields(payload, existing_status='review')
+    event_payload = {
+        'ticker': format_ticker(payload.get('ticker') or ''),
+        'contract_symbol': str(payload.get('contract_symbol') or payload.get('contractSymbol') or '').strip(),
+        'instruction': str(payload.get('instruction') or '').strip(),
+        'quantity': payload.get('quantity') or '',
+        'limit_price': str(payload.get('limit_price') or payload.get('limitPrice') or '').strip(),
+        'account_hash': str(payload.get('account_hash') or payload.get('accountHash') or '').strip(),
+        'source': 'manual_journal_entry',
+    }
+    event_id = _write_trade_event('manual_note', event_payload)
+    return _update_trade_journal_event(event_id, fields)
 
 
 def _trade_event_from_row(row):
@@ -11683,6 +11704,35 @@ def index():
             flex-direction: column;
             gap: 6px;
         }
+        .trade-journal-tools {
+            display: grid;
+            grid-template-columns: minmax(0, 0.9fr) minmax(0, 1fr) minmax(0, 1.25fr) auto;
+            gap: 5px;
+            margin: 7px 0;
+            min-width: 0;
+        }
+        .trade-journal-tools select,
+        .trade-journal-tools input,
+        .trade-journal-tools button {
+            width: 100%;
+            min-width: 0;
+            min-height: 28px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 0 7px;
+            font-size: 10px;
+            font-family: inherit;
+        }
+        .trade-journal-tools button {
+            cursor: pointer;
+            font-weight: 800;
+            text-transform: uppercase;
+            color: var(--fg-0);
+            background: color-mix(in srgb, var(--accent) 10%, var(--bg-0));
+            border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+        }
         .trade-journal-row {
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto;
@@ -11694,6 +11744,11 @@ def index():
             background: var(--bg-0);
             padding: 8px;
             font-size: 11px;
+            cursor: pointer;
+        }
+        .trade-journal-row.active {
+            border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+            background: color-mix(in srgb, var(--accent) 8%, var(--bg-0));
         }
         .trade-journal-row.open { border-left-color: var(--call); }
         .trade-journal-row.closed { border-left-color: var(--fg-2); }
@@ -11749,6 +11804,68 @@ def index():
             font-weight: 800;
             text-transform: uppercase;
             cursor: pointer;
+        }
+        .trade-journal-detail {
+            margin-top: 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            padding: 8px;
+            min-width: 0;
+        }
+        .trade-journal-detail-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            align-items: flex-start;
+            margin-bottom: 7px;
+        }
+        .trade-journal-detail-title {
+            min-width: 0;
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 800;
+            line-height: 1.25;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-journal-detail-meta,
+        .trade-journal-detail-body {
+            color: var(--fg-1);
+            font-size: 11px;
+            line-height: 1.4;
+        }
+        .trade-journal-detail-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+            margin-top: 7px;
+        }
+        .trade-journal-detail-field {
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-1);
+            padding: 6px;
+        }
+        .trade-journal-detail-field span {
+            display: block;
+            color: var(--fg-2);
+            font-size: 9px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 3px;
+        }
+        .trade-journal-detail-field strong {
+            display: block;
+            color: var(--fg-0);
+            font-size: 11px;
+            line-height: 1.35;
+            font-weight: 600;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
         }
         .trade-journal-modal {
             border: 1px solid var(--border);
@@ -11872,6 +11989,10 @@ def index():
             line-height: 1.35;
         }
         @container (max-width: 360px) {
+            .trade-journal-tools,
+            .trade-journal-detail-grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
             .trade-journal-row {
                 grid-template-columns: minmax(0, 1fr);
             }
@@ -16636,8 +16757,29 @@ def index():
                             <button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button>
                         </div>
                         <div class="trade-panel-note" data-trade-journal-note>Local rail events</div>
+                        <div class="trade-journal-tools">
+                            <select data-trade-journal-status-filter aria-label="Journal status filter">
+                                <option value="">All status</option>
+                                <option value="planned">Planned</option>
+                                <option value="open">Open</option>
+                                <option value="closed">Closed</option>
+                                <option value="review">Review</option>
+                            </select>
+                            <select data-trade-journal-type-filter aria-label="Journal event type filter">
+                                <option value="">All events</option>
+                                <option value="previewed_order">Previewed</option>
+                                <option value="placed_order">Placed</option>
+                                <option value="cancelled_order">Canceled</option>
+                                <option value="manual_note">Manual</option>
+                            </select>
+                            <input data-trade-journal-search type="search" maxlength="80" placeholder="Search ticker, tags, notes">
+                            <button type="button" data-trade-journal-new>New</button>
+                        </div>
                         <div class="trade-journal-list" data-trade-journal-list>
                             <div class="trade-empty">Previewed and placed rail orders will appear here.</div>
+                        </div>
+                        <div class="trade-journal-detail" data-trade-journal-detail>
+                            <div class="trade-empty">Select an event to review journal details.</div>
                         </div>
                     </section>
                     <dialog class="trade-journal-modal" data-trade-journal-modal>
@@ -26902,7 +27044,14 @@ def index():
                     '<section class="trade-panel trade-journal-panel" data-trade-journal-panel>' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Journal</div><button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button></div>' +
                         '<div class="trade-panel-note" data-trade-journal-note>Local rail events</div>' +
+                        '<div class="trade-journal-tools">' +
+                            '<select data-trade-journal-status-filter aria-label="Journal status filter"><option value="">All status</option><option value="planned">Planned</option><option value="open">Open</option><option value="closed">Closed</option><option value="review">Review</option></select>' +
+                            '<select data-trade-journal-type-filter aria-label="Journal event type filter"><option value="">All events</option><option value="previewed_order">Previewed</option><option value="placed_order">Placed</option><option value="cancelled_order">Canceled</option><option value="manual_note">Manual</option></select>' +
+                            '<input data-trade-journal-search type="search" maxlength="80" placeholder="Search ticker, tags, notes">' +
+                            '<button type="button" data-trade-journal-new>New</button>' +
+                        '</div>' +
                         '<div class="trade-journal-list" data-trade-journal-list><div class="trade-empty">Previewed and placed rail orders will appear here.</div></div>' +
+                        '<div class="trade-journal-detail" data-trade-journal-detail><div class="trade-empty">Select an event to review journal details.</div></div>' +
                     '</section>' +
                     '<dialog class="trade-journal-modal" data-trade-journal-modal>' +
                         '<form method="dialog" class="trade-journal-editor" data-trade-journal-editor>' +
@@ -27504,6 +27653,11 @@ def index():
             journalLoading: false,
             journalError: '',
             journalEditorId: '',
+            journalEditorMode: 'edit',
+            journalSelectedId: '',
+            journalStatusFilter: '',
+            journalTypeFilter: '',
+            journalSearch: '',
             journalSaving: false,
             journalSaveError: '',
             positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
@@ -28185,35 +28339,56 @@ def index():
             const list = document.querySelector('[data-trade-journal-list]');
             const note = document.querySelector('[data-trade-journal-note]');
             const toggle = document.querySelector('[data-trade-journal-toggle]');
+            const statusFilter = document.querySelector('[data-trade-journal-status-filter]');
+            const typeFilter = document.querySelector('[data-trade-journal-type-filter]');
+            const searchInput = document.querySelector('[data-trade-journal-search]');
             if (panel) panel.classList.toggle('visible', !!tradeRailState.journalVisible);
             if (toggle) {
                 toggle.classList.toggle('active', !!tradeRailState.journalVisible);
                 toggle.setAttribute('aria-pressed', tradeRailState.journalVisible ? 'true' : 'false');
             }
+            if (statusFilter && statusFilter.value !== tradeRailState.journalStatusFilter) statusFilter.value = tradeRailState.journalStatusFilter || '';
+            if (typeFilter && typeFilter.value !== tradeRailState.journalTypeFilter) typeFilter.value = tradeRailState.journalTypeFilter || '';
+            if (searchInput && searchInput.value !== tradeRailState.journalSearch) searchInput.value = tradeRailState.journalSearch || '';
             if (!list) return;
             if (tradeRailState.journalLoading) {
                 if (note) note.textContent = 'Loading';
                 list.innerHTML = '<div class="trade-empty">Loading local trade events...</div>';
+                renderTradeJournalDetail(null);
                 return;
             }
             if (tradeRailState.journalError) {
                 if (note) note.textContent = 'Unavailable';
                 list.innerHTML = '<div class="trade-empty">' + _escapeHtml(tradeRailState.journalError) + '</div>';
+                renderTradeJournalDetail(null);
                 return;
             }
             const events = Array.isArray(tradeRailState.journalEvents) ? tradeRailState.journalEvents : [];
-            if (note) note.textContent = events.length ? events.length + ' local events' : 'No events yet';
+            const filtered = getFilteredTradeJournalEvents();
+            const selectedStillVisible = filtered.some(event => String(event.id) === String(tradeRailState.journalSelectedId));
+            if (!selectedStillVisible) tradeRailState.journalSelectedId = filtered[0] ? String(filtered[0].id) : '';
+            if (note) {
+                note.textContent = events.length
+                    ? (filtered.length === events.length ? events.length + ' local events' : filtered.length + ' of ' + events.length + ' events')
+                    : 'No events yet';
+            }
             if (!events.length) {
-                list.innerHTML = '<div class="trade-empty">Previewed and placed rail orders will appear here.</div>';
+                list.innerHTML = '<div class="trade-empty">Previewed, placed, canceled, and manual rail notes will appear here.</div>';
+                renderTradeJournalDetail(null);
                 return;
             }
-            list.innerHTML = events.map(event => {
+            if (!filtered.length) {
+                list.innerHTML = '<div class="trade-empty">No journal events match the current filters.</div>';
+                renderTradeJournalDetail(null);
+                return;
+            }
+            list.innerHTML = filtered.map(event => {
                 const status = String(event.journal_status || 'planned').toLowerCase();
                 const main = [event.ticker, event.instruction, event.quantity ? 'x' + event.quantity : '', event.contract_symbol].filter(Boolean).join(' ');
                 const price = event.limit_price ? ' @ ' + event.limit_price : '';
                 const meta = [
                     fmtTradeOrderTime(event.created_at),
-                    String(event.event_type || '').replace(/_/g, ' '),
+                    formatTradeJournalEventType(event.event_type),
                     event.order_hash ? '#' + String(event.order_hash).slice(0, 8) : '',
                     event.schwab_status ? 'Schwab ' + event.schwab_status : '',
                     event.updated_at ? 'edited ' + fmtTradeOrderTime(event.updated_at) : '',
@@ -28221,16 +28396,100 @@ def index():
                 const tags = String(event.journal_tags || '').trim();
                 const setup = String(event.journal_setup || '').trim();
                 const detail = [setup, tags].filter(Boolean).join(' · ');
-                return '<div class="trade-journal-row ' + _escapeHtml(status) + '">' +
-                    '<div><div class="trade-journal-main">' + _escapeHtml(main + price) + '</div><div class="trade-journal-meta">' + _escapeHtml(meta) + '</div>' + (detail ? '<div class="trade-journal-tags">' + _escapeHtml(detail) + '</div>' : '') + '</div>' +
+                const active = String(event.id) === String(tradeRailState.journalSelectedId);
+                return '<div class="trade-journal-row ' + _escapeHtml(status) + (active ? ' active' : '') + '" data-trade-journal-row="' + _escapeHtml(event.id) + '">' +
+                    '<div><div class="trade-journal-main">' + _escapeHtml((main || 'Manual journal note') + price) + '</div><div class="trade-journal-meta">' + _escapeHtml(meta) + '</div>' + (detail ? '<div class="trade-journal-tags">' + _escapeHtml(detail) + '</div>' : '') + '</div>' +
                     '<div class="trade-journal-side"><div class="trade-journal-status">' + _escapeHtml(status) + '</div><button type="button" class="trade-journal-edit" data-trade-journal-edit="' + _escapeHtml(event.id) + '">Edit</button></div>' +
                 '</div>';
             }).join('');
+            list.querySelectorAll('[data-trade-journal-row]').forEach(row => {
+                if (row.__tradeJournalRowBound) return;
+                row.__tradeJournalRowBound = true;
+                row.addEventListener('click', () => {
+                    tradeRailState.journalSelectedId = row.dataset.tradeJournalRow || '';
+                    renderTradeJournal();
+                });
+            });
             list.querySelectorAll('[data-trade-journal-edit]').forEach(btn => {
                 if (btn.__tradeJournalEditBound) return;
                 btn.__tradeJournalEditBound = true;
-                btn.addEventListener('click', () => openTradeJournalEditor(btn.dataset.tradeJournalEdit || ''));
+                btn.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openTradeJournalEditor(btn.dataset.tradeJournalEdit || '');
+                });
             });
+            renderTradeJournalDetail(getTradeJournalEvent(tradeRailState.journalSelectedId));
+        }
+        function formatTradeJournalEventType(eventType) {
+            const text = String(eventType || '').replace(/_/g, ' ');
+            return text ? text.split(' ').map(part => part ? part.charAt(0).toUpperCase() + part.slice(1) : '').join(' ') : 'Journal';
+        }
+        function getTradeJournalEventText(event) {
+            if (!event) return '';
+            const details = event.details || {};
+            return [
+                event.ticker,
+                event.contract_symbol,
+                event.instruction,
+                event.quantity,
+                event.limit_price,
+                event.event_type,
+                event.journal_status,
+                event.journal_tags,
+                event.journal_setup,
+                event.journal_thesis,
+                event.journal_notes,
+                event.journal_outcome,
+                details.order_id,
+                details.source,
+            ].filter(value => value != null && value !== '').join(' ').toLowerCase();
+        }
+        function getFilteredTradeJournalEvents() {
+            const status = String(tradeRailState.journalStatusFilter || '').toLowerCase();
+            const type = String(tradeRailState.journalTypeFilter || '').toLowerCase();
+            const query = String(tradeRailState.journalSearch || '').trim().toLowerCase();
+            return (Array.isArray(tradeRailState.journalEvents) ? tradeRailState.journalEvents : []).filter(event => {
+                if (status && String(event.journal_status || '').toLowerCase() !== status) return false;
+                if (type && String(event.event_type || '').toLowerCase() !== type) return false;
+                if (query && !getTradeJournalEventText(event).includes(query)) return false;
+                return true;
+            });
+        }
+        function renderTradeJournalDetail(event) {
+            const detail = document.querySelector('[data-trade-journal-detail]');
+            if (!detail) return;
+            if (!event) {
+                detail.innerHTML = '<div class="trade-empty">Select an event to review journal details.</div>';
+                return;
+            }
+            const details = event.details || {};
+            const title = formatTradeJournalTitle(event) || 'Manual journal note';
+            const meta = [
+                formatTradeJournalEventType(event.event_type),
+                fmtTradeOrderTime(event.created_at),
+                event.updated_at ? 'Edited ' + fmtTradeOrderTime(event.updated_at) : '',
+                event.order_hash ? 'Hash #' + String(event.order_hash).slice(0, 12) : '',
+                details.order_id ? 'Order #' + details.order_id : '',
+            ].filter(Boolean).join(' · ');
+            const fields = [
+                ['Status', event.journal_status || 'planned'],
+                ['Tags', event.journal_tags || '—'],
+                ['Setup', event.journal_setup || '—'],
+                ['Thesis', event.journal_thesis || '—'],
+                ['Notes', event.journal_notes || '—'],
+                ['Outcome', event.journal_outcome || '—'],
+            ];
+            detail.innerHTML =
+                '<div class="trade-journal-detail-head">' +
+                    '<div><div class="trade-journal-detail-title" title="' + _escapeHtml(title) + '">' + _escapeHtml(title) + '</div><div class="trade-journal-detail-meta">' + _escapeHtml(meta) + '</div></div>' +
+                    '<button type="button" class="trade-journal-edit" data-trade-journal-detail-edit="' + _escapeHtml(event.id) + '">Edit</button>' +
+                '</div>' +
+                '<div class="trade-journal-detail-grid">' + fields.map(([label, value]) => (
+                    '<div class="trade-journal-detail-field"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(value) + '</strong></div>'
+                )).join('') + '</div>';
+            const edit = detail.querySelector('[data-trade-journal-detail-edit]');
+            if (edit) edit.addEventListener('click', () => openTradeJournalEditor(edit.dataset.tradeJournalDetailEdit || ''));
         }
         function getTradeJournalEvent(eventId) {
             const id = String(eventId || '');
@@ -28239,11 +28498,54 @@ def index():
         function formatTradeJournalTitle(event) {
             if (!event) return 'Journal Entry';
             const main = [event.ticker, event.instruction, event.quantity ? 'x' + event.quantity : '', event.contract_symbol].filter(Boolean).join(' ');
-            return main + (event.limit_price ? ' @ ' + event.limit_price : '');
+            return (main || 'Manual journal note') + (event.limit_price ? ' @ ' + event.limit_price : '');
+        }
+        function scrollTradeJournalIntoView() {
+            const panel = document.querySelector('[data-trade-journal-panel]');
+            if (!panel || !tradeRailState.journalVisible) return;
+            try {
+                panel.scrollIntoView({ block: 'start', behavior: 'smooth' });
+            } catch (e) {
+                panel.scrollIntoView(true);
+            }
+        }
+        function openTradeJournalPanel(options = {}) {
+            if (isTradeRailCollapsed()) {
+                try { localStorage.setItem(TRADE_RAIL_COLLAPSE_KEY, '0'); } catch (e) {}
+                applyTradeRailCollapse(false);
+            }
+            tradeRailState.journalVisible = true;
+            renderTradeJournal();
+            if (options.force || !tradeRailState.journalEvents.length) requestTradeJournal({ force: !!options.force, scroll: true });
+            setTimeout(scrollTradeJournalIntoView, 0);
+        }
+        function openNewTradeJournalEntry() {
+            tradeRailState.journalEditorMode = 'create';
+            tradeRailState.journalEditorId = '';
+            tradeRailState.journalSaveError = '';
+            const selected = getSelectedTradeContract();
+            const modal = document.querySelector('[data-trade-journal-modal]');
+            const title = document.querySelector('[data-trade-journal-editor-title]');
+            const meta = document.querySelector('[data-trade-journal-editor-meta]');
+            const error = document.querySelector('[data-trade-journal-editor-error]');
+            if (title) title.textContent = 'New Journal Entry';
+            if (meta) meta.textContent = [tradeRailState.ticker || getTradeRailTicker(), selected && selected.contract_symbol].filter(Boolean).join(' · ') || 'Local manual note';
+            document.querySelectorAll('[data-trade-journal-field]').forEach(field => {
+                const key = field.dataset.tradeJournalField;
+                if (key === 'journal_status') field.value = 'review';
+                else field.value = '';
+            });
+            if (error) error.textContent = '';
+            renderTradeJournalEditorSaving();
+            if (modal) {
+                if (modal.showModal && !modal.open) modal.showModal();
+                else modal.setAttribute('open', '');
+            }
         }
         function openTradeJournalEditor(eventId) {
             const event = getTradeJournalEvent(eventId);
             if (!event) return;
+            tradeRailState.journalEditorMode = 'edit';
             tradeRailState.journalEditorId = String(event.id);
             tradeRailState.journalSaveError = '';
             const modal = document.querySelector('[data-trade-journal-modal]');
@@ -28272,6 +28574,7 @@ def index():
         function closeTradeJournalEditor() {
             const modal = document.querySelector('[data-trade-journal-modal]');
             tradeRailState.journalEditorId = '';
+            tradeRailState.journalEditorMode = 'edit';
             tradeRailState.journalSaveError = '';
             if (modal) {
                 if (modal.close) modal.close();
@@ -28289,15 +28592,24 @@ def index():
         }
         function saveTradeJournalEvent() {
             const eventId = tradeRailState.journalEditorId;
-            if (!eventId || tradeRailState.journalSaving) return;
-            const payload = { id: eventId };
+            const createMode = tradeRailState.journalEditorMode === 'create';
+            if ((!eventId && !createMode) || tradeRailState.journalSaving) return;
+            const selected = getSelectedTradeContract();
+            const payload = createMode ? {
+                ticker: tradeRailState.ticker || getTradeRailTicker(),
+                contract_symbol: selected ? selected.contract_symbol : tradeRailState.selectedSymbol,
+                instruction: tradeRailState.action,
+                quantity: tradeRailState.quantity,
+                limit_price: tradeRailState.limitPrice,
+                account_hash: tradeRailState.accountHash,
+            } : { id: eventId };
             document.querySelectorAll('[data-trade-journal-field]').forEach(field => {
                 payload[field.dataset.tradeJournalField] = field.value || '';
             });
             tradeRailState.journalSaving = true;
             tradeRailState.journalSaveError = '';
             renderTradeJournalEditorSaving();
-            fetch('/trade/journal/update', {
+            fetch(createMode ? '/trade/journal/create' : '/trade/journal/update', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
@@ -28306,7 +28618,13 @@ def index():
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Journal save failed');
                 const updated = data.event;
-                tradeRailState.journalEvents = tradeRailState.journalEvents.map(event => String(event.id) === String(eventId) ? updated : event);
+                if (createMode) {
+                    tradeRailState.journalEvents = [updated].concat(tradeRailState.journalEvents || []);
+                    tradeRailState.journalSelectedId = String(updated.id);
+                } else {
+                    tradeRailState.journalEvents = tradeRailState.journalEvents.map(event => String(event.id) === String(eventId) ? updated : event);
+                    tradeRailState.journalSelectedId = String(updated.id);
+                }
                 tradeRailState.journalSaving = false;
                 renderTradeJournal();
                 closeTradeJournalEditor();
@@ -28320,6 +28638,7 @@ def index():
         function requestTradeJournal(options = {}) {
             if (!options.force && tradeRailState.journalEvents.length) {
                 renderTradeJournal();
+                if (options.scroll) setTimeout(scrollTradeJournalIntoView, 0);
                 return;
             }
             tradeRailState.journalLoading = true;
@@ -28333,12 +28652,14 @@ def index():
                 tradeRailState.journalLoading = false;
                 tradeRailState.journalError = '';
                 renderTradeJournal();
+                if (options.scroll) setTimeout(scrollTradeJournalIntoView, 0);
             })
             .catch(err => {
                 tradeRailState.journalEvents = [];
                 tradeRailState.journalLoading = false;
                 tradeRailState.journalError = err.message || 'Journal unavailable';
                 renderTradeJournal();
+                if (options.scroll) setTimeout(scrollTradeJournalIntoView, 0);
             });
         }
         function requestTradeAccountDetails(options = {}) {
@@ -28772,6 +29093,7 @@ def index():
             orderId = String(orderId || '').trim();
             if (!orderId || !tradeRailState.accountHash) return;
             if (!window.confirm('Cancel selected Schwab order?\\n\\nOrder #' + orderId)) return;
+            const selected = getSelectedTradeContract();
             tradeRailState.cancelLoadingId = orderId;
             tradeRailState.ordersError = '';
             renderTradeOrders();
@@ -28781,6 +29103,8 @@ def index():
                 body: JSON.stringify({
                     account_hash: tradeRailState.accountHash,
                     order_id: orderId,
+                    ticker: tradeRailState.ticker || getTradeRailTicker(),
+                    contract_symbol: selected ? selected.contract_symbol : tradeRailState.selectedSymbol,
                     confirmed: true,
                 }),
             })
@@ -28790,6 +29114,7 @@ def index():
                 if (!ok || data.error || data.cancelled === false) throw new Error(data.error || 'Cancel failed');
                 requestTradeOrders({ force: true });
                 requestTradeAccountDetails({ force: true });
+                if (tradeRailState.journalVisible) requestTradeJournal({ force: true });
             })
             .catch(err => {
                 tradeRailState.cancelLoadingId = '';
@@ -28829,15 +29154,35 @@ def index():
             if (journalToggle && !journalToggle.__tradeJournalToggleWired) {
                 journalToggle.__tradeJournalToggleWired = true;
                 journalToggle.addEventListener('click', () => {
-                    tradeRailState.journalVisible = !tradeRailState.journalVisible;
-                    renderTradeJournal();
-                    if (tradeRailState.journalVisible) requestTradeJournal({ force: true });
+                    if (tradeRailState.journalVisible) {
+                        tradeRailState.journalVisible = false;
+                        renderTradeJournal();
+                    } else {
+                        openTradeJournalPanel({ force: true });
+                    }
                 });
             }
             if (!root || root.__tradePickerWired) return;
             root.__tradePickerWired = true;
             const journalRefresh = root.querySelector('[data-trade-journal-refresh]');
-            if (journalRefresh) journalRefresh.addEventListener('click', () => requestTradeJournal({ force: true }));
+            if (journalRefresh) journalRefresh.addEventListener('click', () => requestTradeJournal({ force: true, scroll: true }));
+            const journalStatusFilter = root.querySelector('[data-trade-journal-status-filter]');
+            if (journalStatusFilter) journalStatusFilter.addEventListener('change', () => {
+                tradeRailState.journalStatusFilter = journalStatusFilter.value || '';
+                renderTradeJournal();
+            });
+            const journalTypeFilter = root.querySelector('[data-trade-journal-type-filter]');
+            if (journalTypeFilter) journalTypeFilter.addEventListener('change', () => {
+                tradeRailState.journalTypeFilter = journalTypeFilter.value || '';
+                renderTradeJournal();
+            });
+            const journalSearch = root.querySelector('[data-trade-journal-search]');
+            if (journalSearch) journalSearch.addEventListener('input', () => {
+                tradeRailState.journalSearch = journalSearch.value || '';
+                renderTradeJournal();
+            });
+            const journalNew = root.querySelector('[data-trade-journal-new]');
+            if (journalNew) journalNew.addEventListener('click', () => openNewTradeJournalEntry());
             root.querySelectorAll('[data-trade-journal-close]').forEach(btn => {
                 btn.addEventListener('click', event => {
                     event.preventDefault();
@@ -28855,10 +29200,12 @@ def index():
             if (journalModal) {
                 journalModal.addEventListener('cancel', () => {
                     tradeRailState.journalEditorId = '';
+                    tradeRailState.journalEditorMode = 'edit';
                     tradeRailState.journalSaveError = '';
                 });
                 journalModal.addEventListener('close', () => {
                     if (!tradeRailState.journalSaving) tradeRailState.journalEditorId = '';
+                    if (!tradeRailState.journalSaving) tradeRailState.journalEditorMode = 'edit';
                 });
             }
             const positionToggle = root.querySelector('[data-trade-position-toggle]');
@@ -33431,6 +33778,8 @@ def trade_cancel_order():
         return _trade_api_error('Missing account hash.', 400)
     if not order_id:
         return _trade_api_error('Missing order id.', 400)
+    ticker = format_ticker(data.get('ticker') or '')
+    contract_symbol = str(data.get('contract_symbol') or data.get('contractSymbol') or '').strip()
     try:
         response = client.cancel_order(account_hash, order_id)
     except Exception as e:
@@ -33448,6 +33797,14 @@ def trade_cancel_order():
     if not schwab_ok:
         result['warnings'].append(f"Schwab cancel returned status {status_code or 'unknown'}.")
         return jsonify(result), 502
+    _write_trade_event('cancelled_order', {
+        'ticker': ticker,
+        'contract_symbol': contract_symbol,
+        'account_hash': account_hash,
+        'order_id': order_id,
+        'schwab_status': status_code,
+        'schwab_response': result.get('schwab_response'),
+    })
     return jsonify(result)
 
 
@@ -33455,6 +33812,14 @@ def trade_cancel_order():
 def trade_journal():
     """Local order-entry rail journal."""
     return jsonify({'events': _read_trade_events(request.args.get('limit', 50)), 'warnings': []})
+
+
+@app.route('/trade/journal/create', methods=['POST'])
+def trade_journal_create():
+    """Create a local-only manual journal entry for the order-entry rail."""
+    data = request.get_json(silent=True) or {}
+    event = _create_manual_trade_journal_event(data)
+    return jsonify({'event': event, 'warnings': []})
 
 
 @app.route('/trade/journal/update', methods=['POST'])

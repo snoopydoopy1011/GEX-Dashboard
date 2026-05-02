@@ -310,6 +310,29 @@ class TradePreviewEndpointTest(unittest.TestCase):
         response = self.app.post('/trade/journal/update', json={'id': 999, 'journal_notes': 'No row'})
         self.assertEqual(response.status_code, 404)
 
+    def test_manual_journal_event_can_be_created(self):
+        response = self.app.post('/trade/journal/create', json={
+            'ticker': 'SPY',
+            'contract_symbol': 'SPY   260501C00722000',
+            'instruction': 'BUY_TO_OPEN',
+            'quantity': 1,
+            'limit_price': '0.57',
+            'journal_status': 'review',
+            'journal_tags': 'manual, watchlist',
+            'journal_setup': 'Pullback setup',
+            'journal_notes': 'Watching the same contract without previewing.',
+        })
+        self.assertEqual(response.status_code, 200)
+        event = response.get_json()['event']
+        self.assertEqual(event['event_type'], 'manual_note')
+        self.assertEqual(event['ticker'], 'SPY')
+        self.assertEqual(event['journal_status'], 'review')
+        self.assertEqual(event['journal_tags'], 'manual, watchlist')
+        self.assertEqual(event['details']['source'], 'manual_journal_entry')
+
+        journal = self.app.get('/trade/journal').get_json()
+        self.assertEqual(journal['events'][0]['id'], event['id'])
+
 
 class TradePlaceOrderEndpointTest(unittest.TestCase):
     def setUp(self):
@@ -493,11 +516,22 @@ class TradeOrderManagementEndpointTest(unittest.TestCase):
     def setUp(self):
         seed_chain()
         self.original_client = ezoptionsschwab.client
+        self.original_db_path = ezoptionsschwab.DB_PATH
+        tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        self.temp_db_path = tmp.name
+        tmp.close()
+        ezoptionsschwab.DB_PATH = self.temp_db_path
+        ezoptionsschwab.init_db()
         ezoptionsschwab.client = MockPreviewClient()
         self.app = ezoptionsschwab.app.test_client()
 
     def tearDown(self):
         ezoptionsschwab.client = self.original_client
+        ezoptionsschwab.DB_PATH = self.original_db_path
+        try:
+            os.unlink(self.temp_db_path)
+        except OSError:
+            pass
         ezoptionsschwab._options_cache.clear()
 
     def post_orders(self, **overrides):
@@ -575,6 +609,22 @@ class TradeOrderManagementEndpointTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()['cancelled'])
         self.assertEqual(ezoptionsschwab.client.cancel_calls, [('HASH123', '111')])
+
+    def test_successful_cancel_records_local_journal_event(self):
+        response = self.app.post('/trade/cancel_order', json={
+            'account_hash': 'HASH123',
+            'order_id': '111',
+            'ticker': 'SPY',
+            'contract_symbol': 'SPY   260501C00722000',
+            'confirmed': True,
+        })
+        self.assertEqual(response.status_code, 200)
+        events = self.app.get('/trade/journal').get_json()['events']
+        self.assertEqual(events[0]['event_type'], 'cancelled_order')
+        self.assertEqual(events[0]['ticker'], 'SPY')
+        self.assertEqual(events[0]['contract_symbol'], 'SPY   260501C00722000')
+        self.assertEqual(events[0]['journal_status'], 'review')
+        self.assertEqual(events[0]['details']['order_id'], '111')
 
 
 if __name__ == '__main__':

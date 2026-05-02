@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Journal persistence/editor added; Journal toggle/open bug queued; live bracket support later
+**Status:** Rail Journal framework built; full journal workspace/statistics and desktop-app feasibility deferred; live bracket support later
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -360,6 +360,73 @@ Verification completed:
 - `git diff --check` passed.
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
 - Browser smoke on `http://127.0.0.1:5014/` confirmed the served current tree contains the Journal modal/editor DOM after restarting a stale `5014` process. No screenshots or screen recordings were taken.
+
+### 2026-05-02 Journal Framework + Toggle Fix Update
+
+The third journal slice is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Verified port `5014` was not serving before repro, then started it from the current working tree and confirmed the served DOM contained the current Journal panel/editor markup.
+- Reproduced the likely user-facing failure mode: the header `Journal` click changed state, but the Journal panel lived near the bottom of the scrollable fourth rail, so it could look like nothing opened.
+- Hardened the Journal header button:
+  - opens the fourth trading rail if it is collapsed
+  - sets `tradeRailState.journalVisible`
+  - calls `renderTradeJournal()`
+  - requests fresh `/trade/journal` data
+  - scrolls `[data-trade-journal-panel]` into view
+- Added rail Journal filters/search:
+  - status filter
+  - event-type filter
+  - search across ticker, contract, tags, setup, thesis, notes, outcome, and safe event metadata
+- Added selected-event detail rendering inside the fourth trading rail with status, tags, setup, thesis, notes, and outcome.
+- Added `POST /trade/journal/create` for local-only manual journal notes tied to the current rail context when available.
+- Added successful cancel-order journal events through the existing explicitly confirmed `/trade/cancel_order` path.
+- Kept Journal create/update/cancel entries local-only in SQLite; no screenshots, screen recordings, imports, exports, or external services were added.
+- Mirrored all new Journal controls/detail markup in static `#trade-rail` HTML and `buildTradeRailHtml()`.
+- Extended `tests/test_trade_preview.py` with manual journal create coverage and cancel journal event coverage.
+
+Tricky parts / implementation notes:
+
+- The Journal panel still lives inside the dedicated fourth order-entry rail, not as a full-page workspace. This keeps the implementation scoped but is not enough for a robust journal review workflow.
+- Header controls are outside `#trade-rail`, while the Journal panel and modal are inside it. `wireTradeRailPickerControls()` must wire both global header controls and rail-scoped controls.
+- `openTradeJournalPanel()` deliberately opens a collapsed trade rail before scrolling to the panel. Otherwise a valid Journal click can still appear to do nothing.
+- Cancel journaling reuses the existing explicit frontend confirmation and backend `confirmed: true` requirement. It records only safe local metadata after Schwab confirms cancellation.
+- Manual journal creation records `event_type = manual_note` and stores optional current rail context, but it does not preview, stage, submit, or modify any Schwab order.
+- Static HTML and `buildTradeRailHtml()` parity remains critical for every new Journal control because `ensurePriceChartDom()` can rebuild the fourth rail.
+
+Still left to do:
+
+- Build a full journal workspace/page with meaningful stats and review ergonomics. A likely direction is a new full-width section below the existing Live Alerts and Flow Pulse lane so it behaves like a new page after scrolling down, without crowding the order-entry rail.
+- Journal workspace should include, at minimum:
+  - trade/event table with filters/search
+  - selected-entry detail view
+  - lifecycle grouping across previewed, placed, canceled, closed/reviewed, and manual notes
+  - daily/weekly counts by status and event type
+  - ticker/contract summaries
+  - setup/tag summaries
+  - realized/marked P/L only when deterministic enough from positions/orders
+  - clear empty states for days with no local journal events
+- Decide whether the below-alerts/flow-pulse placement should be always rendered, collapsed behind a `Journal` section header, or opened by the existing rail `Journal` button.
+- Consider whether Journal belongs only in the fourth rail, only in a full workspace, or both: rail for quick annotations, workspace for review/stats.
+- Explore how hard it would be to wrap/convert this localhost Flask dashboard into a lightweight desktop app:
+  - evaluate PySide6/PyQt6 + `QWebEngineView` wrapping the local Flask app
+  - evaluate whether the Flask server runs in-process/threaded or as a managed subprocess
+  - evaluate token/OAuth callback implications
+  - evaluate local SQLite/file path handling in an app bundle
+  - evaluate packaging on macOS and whether this should stay a developer-local launcher instead of a fully packaged app
+  - do not start the conversion until there is an explicit implementation decision
+- Add delete/archive for manual journal notes only after deciding retention rules; avoid deleting auto-recorded trade lifecycle events without a clear audit stance.
+- Add screenshot/screen-recording attachments only after explicit opt-in UI and storage controls; do not start capture automatically.
+- Deferred/non-goals remain unchanged: no live Schwab bracket/OCO child orders, no SPX-specific validation, no multi-leg spreads, no automated trading from chart clicks/alerts/flow, and no analytical formula changes.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+- Browser smoke on `http://127.0.0.1:5014/` confirmed the Journal button opens the panel, the panel gets `.visible`, and status filter / New / detail controls render. No screenshots or screen recordings were taken.
+- Port `5014` was stopped after verification.
 
 ### 2026-05-01 Order Rail Annotation Polish Update
 
@@ -1508,7 +1575,11 @@ Stage 7:
   - [x] Add journal button/view in the dashboard.
   - [x] Auto-record rail trade events into local storage/SQLite.
   - [x] Add editable local notes/tags/setup/thesis/outcome fields.
-  - [ ] Fix reported Journal button/toggle open issue in the in-app browser if reproducible.
+  - [x] Fix reported Journal button/toggle open issue in the in-app browser if reproducible.
+  - [x] Add rail-level journal filters/search and selected-event detail.
+  - [x] Add local-only manual journal notes.
+  - [x] Add successful cancel-order journal events.
+  - [ ] Add full journal workspace/page and stats below the Live Alerts / Flow Pulse lane or another dedicated review surface.
   - [ ] Add screenshot/screen-recording attachments with explicit opt-in and storage controls.
 
 ---
