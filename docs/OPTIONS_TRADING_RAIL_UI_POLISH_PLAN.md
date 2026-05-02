@@ -1,6 +1,6 @@
 # GEX Dashboard - Options Trading Rail UI Polish Plan
 
-**Status:** Full journal workspace built; automatic sidebar-trade screenshots next
+**Status:** Full journal workspace, local screenshot attachments, and Active Trader ladder/template polish are implemented; branch is functionally PR-ready pending final review.
 **Created:** 2026-05-01  
 **Branch at draft time:** `codex/options-trading-rail-plan`  
 **Primary file:** `ezoptionsschwab.py`  
@@ -1206,16 +1206,13 @@ Tricky parts:
 
 Still left to do:
 
-- Add automatic dashboard screenshot attachments for trades entered from the sidebar:
-  - capture after successful live sidebar placement;
-  - attach the screenshot to the matching local journal event;
-  - keep media local and add clear storage/delete controls;
-  - do not add automatic screen recording without a separate request.
+- Do a fresh human diff review and create the PR next session.
+- A real ladder-marker cancel smoke still depends on having a cancelable selected-contract Schwab order in the account.
+- A true successful armed live-send path still needs a carefully controlled live test or mocked browser path. The stale-quote block and preview-mandatory model were browser-smoked.
 - Use `/Users/scottmunger/Desktop/Trading/Options_Trading_Journal` only for product/data-shape ideas such as fields, review flows, setup/tag/outcome concepts, stats, and lifecycle views. Do not port its Vue/Vite + Node/Express + MongoDB/Parse/Docker architecture.
 - Improve deterministic closed-trade P/L only when order/position lifecycle data is reliable.
-- Add a media/attachments area to the full journal detail panel once screenshots exist.
-- Re-check the workspace visually with real journal data across narrow and wide widths.
+- Keep monitoring workspace/rail visual polish with larger live journal/order datasets.
 
 ### Prompt For Next Session
 
-Use `docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md` section `18. 2026-05-02 Full Journal Workspace Update` for the current handoff prompt.
+Use `docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md` section `6. Latest Handoff` for the current handoff prompt.

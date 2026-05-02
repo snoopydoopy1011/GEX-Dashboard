@@ -1,6 +1,6 @@
 # GEX Dashboard - Options Trading Rail Implementation Plan
 
-**Status:** Active Trader fast surface is live with preview-mandatory armed auto-send; helper/quick contract selection and journal media are in place; next pass should finish TOS-style ladder/template ergonomics and get the branch PR-ready.
+**Status:** Active Trader ladder/template ergonomics are implemented; helper/quick contract selection, journal workspace/media, preview-mandatory armed auto-send, and guarded live placement are in place. Branch is functionally PR-ready pending a fresh review/commit/PR pass.
 **Last updated:** 2026-05-02
 **Branch:** `codex/options-trading-rail-plan`
 **Primary file:** `ezoptionsschwab.py`
@@ -258,37 +258,21 @@ Tricky parts:
 
 - The helper candidates come from `compute_contract_helper(...)`, while the trading rail can only trade contracts present in the cached `/trade_chain` payload. Candidate clicks therefore check that exact symbol is present in the cached picker before selecting it.
 - Quick contracts use the same side-aware anchor as the contract ladder: calls anchor at the nearest strike at/above spot; puts anchor at the nearest strike at/below spot. Offsets are then taken from that side's ordered cached rows.
-- The Active Trader ladder currently displays price rows and best-effort working-order counts, but it does not yet render a TOS-style order marker with an inline cancel `x`.
-- The Active Trader template selector currently chooses the planning template, but the editable bracket rows still live lower in Bracket Plan. The TOS screenshots show template rows editable directly in the Active Trader area, which is the next UX gap.
+- The Active Trader ladder now renders working-order markers at price levels when Schwab returns cancelable selected-contract orders. The inline `x` reuses the existing explicitly confirmed cancel path and refreshes account positions/orders after cancel.
+- The Active Trader ladder stages ticket limits directly from price-row clicks. With Auto-send off this only stages and requires preview; with Auto-send armed it still follows the existing preview-mandatory model.
+- The Active Trader template selector now has nearby planning-only bracket rows with TRG/LIMIT/STOP labels, offset inputs, TIF DAY, and quantity-link display. The lower Bracket Plan remains the richer editor.
 - Browser smoke proved the armed-state stale-quote block. A true successful armed live-send path still needs either a carefully controlled live test or a mocked browser path, because live Schwab placement is intentionally guarded.
 
-Still left to do before PR/merge:
+Still left before PR/merge:
 
-- Finish a TOS-style Active Trader ladder experience:
-  - show the user's working order directly on the ladder at its price level;
-  - make the marker visually distinct from bid/ask/limit rows;
-  - add an inline `x` on that ladder marker to cancel the selected Schwab order;
-  - keep cancel explicitly confirmed unless the user approves a lower-friction cancel model;
-  - refresh positions/orders after ladder cancel.
-- Let the ladder itself stage trades:
-  - clicking a ladder price should set the ticket limit at that price;
-  - with Auto-send off, ladder clicks should stage only and require preview;
-  - with Auto-send armed, ladder clicks must still obey the current preview-mandatory safety model unless a different model is explicitly approved later.
-- Move or mirror bracket-template editing into Active Trader:
-  - expose enabled rows, quantity link, TRG/LIMIT/STOP labels, offsets, and TIF close to the template selector;
-  - keep the existing Bracket Plan as the richer lower-panel editor if useful;
-  - keep all bracket/template behavior planning-only and out of Schwab preview/place payloads.
-- Run one final PR-readiness sweep:
-  - check static HTML / `buildTradeRailHtml()` parity;
-  - check `buildTradeJournalWorkspaceHtml()` parity;
-  - check no unrelated analytics/chart behavior changed;
-  - browser-smoke open/close/resize/rebuild paths;
-  - rerun compile, diff check, unit tests, and rendered inline JS node check;
-  - prepare the branch for a PR and merge to `main`.
+- Do a fresh human diff review and create the PR next session.
+- A real ladder-marker cancel smoke still depends on having a cancelable selected-contract Schwab order in the account. The marker/cancel wiring is implemented and syntax/browser-smoked to the no-order state, but there was no matching working order to cancel in the latest account data.
+- A true successful armed live-send path still needs a carefully controlled live test or mocked browser path. The stale-quote block and preview-mandatory model were browser-smoked.
+- Improve deterministic closed-trade P/L only if order/position lifecycle data proves entry, exit, quantities, and prices reliably.
 
 ---
 
-## 6. Latest Continuation Prompt
+## 6. Latest Handoff
 
 ```text
 We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard on branch codex/options-trading-rail-plan.
@@ -312,38 +296,24 @@ Continue only the dedicated fourth order-entry trading rail and Journal surfaces
 - Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders / Journal panels
 
 Current state:
-- Active Trader v1 exists as a collapsible fast surface at the top of the fourth rail.
+- Active Trader is a collapsible fast surface at the top of the fourth rail.
 - Auto-send is off by default, not persisted, and still preview-mandatory.
 - Armed fast buttons can live-send only the already-previewed exact single-leg DAY LIMIT order.
 - /trade/place_order still requires ENABLE_LIVE_TRADING=1, confirmed=true, exact recent preview token, exact cached Schwab contract, unchanged order JSON, and SELL_TO_CLOSE position caps.
 - Bracket Plan remains planning-only and must not alter Schwab preview/place payloads.
 - Screenshot attachments and Journal media controls exist; screenshot failure must not make live order appear failed.
 - Helper candidate boxes and quick contract buttons select exact cached Schwab/OCC contracts only.
-- Browser smoke with real cached SPY chain/account/order data confirmed quick +1 OTM Put selection, helper Call selection, masked account refresh, position/order summaries, Buy Ask staging, and armed stale-quote blocking.
+- Active Trader ladder price clicks stage ticket limits and invalidate preview as needed.
+- Active Trader ladder renders working-order markers with inline x cancel when cancelable selected-contract Schwab orders are present. Cancel still uses explicit confirmation and refreshes positions/orders afterward.
+- Active Trader mirrors bracket-template rows near the template selector with TRG/LIMIT/STOP labels, target/stop offsets, TIF DAY, and quantity-link display. This remains planning-only.
+- Browser smoke with real cached SPY chain/account/order data confirmed quick +1 OTM Put selection, helper Call selection, masked account refresh, position/order summaries, Preview, armed stale-quote blocking, Orders empty-state, Journal workspace, and the Active Trader template layout fix.
 - Static HTML and JS rebuild helpers must stay in parity.
 
 Main next work:
-1. Finish the TOS-style Active Trader ladder so this branch can become PR-ready:
-   - show working orders directly on the ladder at their price level;
-   - add a clear order marker with an inline x to cancel from the ladder;
-   - keep cancel explicitly confirmed unless the user explicitly approves lower-friction cancel behavior;
-   - refresh positions/orders after ladder cancel;
-   - do not make the marker or cancel path alter preview/place payloads.
-2. Let the ladder itself stage trades:
-   - clicking a ladder price sets the ticket limit at that price;
-   - with Auto-send off, ladder clicks stage only and require preview;
-   - with Auto-send armed, ladder clicks still must obey the current preview-mandatory live-send model unless a different model is explicitly approved.
-3. Move or mirror bracket-template editing into Active Trader, inspired by the TOS screenshots:
-   - expose enabled bracket rows, quantity link, TRG/LIMIT/STOP labels, offset values, and TIF near the Active Trader template selector;
-   - keep the lower Bracket Plan as a richer editor if useful;
-   - keep Bracket Plan/template behavior planning-only and do not alter Schwab preview/place payloads.
-4. Do one final PR-readiness sweep:
-   - verify static HTML and buildTradeRailHtml() parity;
-   - verify buildTradeJournalWorkspaceHtml() parity;
-   - verify rail collapse/resize/rebuild behavior;
-   - browser-smoke Active Trader, quick contract selection, account/position/orders, Preview, armed blocking, Journal, and screenshot attachment failure isolation;
-   - rerun compile, diff check, unit tests, and rendered inline JS node check;
-   - get the branch into shape to open a PR and merge with main.
+1. Do a fresh human diff review, stage/commit intentionally, push, and open the PR.
+2. Re-run the verification commands after any rebase/merge from main.
+3. Real-smoke ladder-marker cancel only when a cancelable selected-contract Schwab order exists, or add a mocked browser path if desired.
+4. Real-smoke successful armed live-send only with explicit controlled-live approval, or add a mocked browser path.
 5. Improve deterministic closed-trade P/L only if order/position lifecycle data proves entry, exit, quantities, and prices reliably.
 
 Safety constraints:
@@ -359,4 +329,8 @@ git diff --check
 python3 -m unittest tests.test_session_levels tests.test_trade_preview
 
 If frontend JS changes, also run the rendered inline JS node check from this plan.
+
+Current worktree note:
+- Modified expected files: ezoptionsschwab.py, docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md, docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md.
+- Existing untracked file left untouched: Trading_from_dashboard.txt.
 ```
