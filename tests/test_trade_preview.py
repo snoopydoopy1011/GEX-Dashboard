@@ -278,7 +278,37 @@ class TradePreviewEndpointTest(unittest.TestCase):
         self.assertEqual(event['event_type'], 'previewed_order')
         self.assertEqual(event['ticker'], 'SPY')
         self.assertEqual(event['contract_symbol'], 'SPY   260501C00722000')
+        self.assertEqual(event['journal_status'], 'planned')
         self.assertIn('bracket_plan', event['details'])
+
+    def test_journal_event_annotations_are_editable(self):
+        self.post_preview()
+        event = self.app.get('/trade/journal').get_json()['events'][0]
+        response = self.app.post('/trade/journal/update', json={
+            'id': event['id'],
+            'journal_status': 'review',
+            'journal_tags': 'scalp, momentum',
+            'journal_setup': 'VWAP reclaim',
+            'journal_thesis': 'Price reclaimed VWAP with calls holding bid.',
+            'journal_notes': 'Preview looked clean; waited for confirmation.',
+            'journal_outcome': 'Closed flat after momentum faded.',
+        })
+        self.assertEqual(response.status_code, 200)
+        updated = response.get_json()['event']
+        self.assertEqual(updated['journal_status'], 'review')
+        self.assertEqual(updated['journal_tags'], 'scalp, momentum')
+        self.assertEqual(updated['journal_setup'], 'VWAP reclaim')
+        self.assertIn('calls holding bid', updated['journal_thesis'])
+        self.assertIn('waited for confirmation', updated['journal_notes'])
+        self.assertIn('Closed flat', updated['journal_outcome'])
+        self.assertTrue(updated['updated_at'])
+
+        journal = self.app.get('/trade/journal').get_json()
+        self.assertEqual(journal['events'][0]['journal_status'], 'review')
+
+    def test_journal_update_rejects_missing_event(self):
+        response = self.app.post('/trade/journal/update', json={'id': 999, 'journal_notes': 'No row'})
+        self.assertEqual(response.status_code, 404)
 
 
 class TradePlaceOrderEndpointTest(unittest.TestCase):

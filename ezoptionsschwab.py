@@ -177,6 +177,19 @@ def init_db():
                     event_json TEXT NOT NULL
                 )
             ''')
+            for column_sql in (
+                'ALTER TABLE trade_events ADD COLUMN journal_status TEXT',
+                'ALTER TABLE trade_events ADD COLUMN journal_tags TEXT',
+                'ALTER TABLE trade_events ADD COLUMN journal_setup TEXT',
+                'ALTER TABLE trade_events ADD COLUMN journal_thesis TEXT',
+                'ALTER TABLE trade_events ADD COLUMN journal_notes TEXT',
+                'ALTER TABLE trade_events ADD COLUMN journal_outcome TEXT',
+                'ALTER TABLE trade_events ADD COLUMN updated_at TEXT',
+            ):
+                try:
+                    cursor.execute(column_sql)
+                except sqlite3.OperationalError:
+                    pass
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_trade_events_created_at
                 ON trade_events (created_at DESC, id DESC)
@@ -5005,6 +5018,45 @@ def _redact_trade_payload(value):
     return value
 
 
+TRADE_JOURNAL_STATUS_VALUES = {'planned', 'open', 'closed', 'review'}
+TRADE_JOURNAL_TEXT_LIMITS = {
+    'journal_status': 16,
+    'journal_tags': 160,
+    'journal_setup': 120,
+    'journal_thesis': 800,
+    'journal_notes': 1200,
+    'journal_outcome': 800,
+}
+
+
+def _default_trade_journal_status(event_type):
+    return 'open' if str(event_type or '') == 'placed_order' else 'planned'
+
+
+def _clean_trade_journal_text(value, limit):
+    text = '' if value is None else str(value)
+    text = text.replace('\x00', '').strip()
+    return text[:limit]
+
+
+def _normalize_trade_journal_fields(payload, existing_status='planned'):
+    payload = payload if isinstance(payload, dict) else {}
+    fields = {}
+    status = _clean_trade_journal_text(
+        payload.get('journal_status') if 'journal_status' in payload else payload.get('status', existing_status),
+        TRADE_JOURNAL_TEXT_LIMITS['journal_status'],
+    ).lower()
+    if status not in TRADE_JOURNAL_STATUS_VALUES:
+        status = existing_status if existing_status in TRADE_JOURNAL_STATUS_VALUES else 'planned'
+    fields['journal_status'] = status
+    for key in ('journal_tags', 'journal_setup', 'journal_thesis', 'journal_notes', 'journal_outcome'):
+        fields[key] = _clean_trade_journal_text(
+            payload.get(key) if key in payload else payload.get(key.replace('journal_', ''), ''),
+            TRADE_JOURNAL_TEXT_LIMITS[key],
+        )
+    return fields
+
+
 def _write_trade_event(event_type, payload):
     """Persist deterministic rail trade events for the local in-dashboard journal."""
     if not isinstance(payload, dict):
@@ -5017,9 +5069,10 @@ def _write_trade_event(event_type, payload):
             cursor.execute('''
                 INSERT INTO trade_events (
                     created_at, event_type, ticker, contract_symbol, instruction, quantity,
-                    limit_price, account_hash, order_hash, schwab_status, location, event_json
+                    limit_price, account_hash, order_hash, schwab_status, location, event_json,
+                    journal_status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 created_at,
                 str(event_type or ''),
@@ -5033,9 +5086,54 @@ def _write_trade_event(event_type, payload):
                 safe_payload.get('schwab_status'),
                 safe_payload.get('location'),
                 event_json,
+                _default_trade_journal_status(event_type),
             ))
             conn.commit()
             return cursor.lastrowid
+
+
+def _trade_event_from_row(row):
+    details = {}
+    try:
+        details = json.loads(row[12] or '{}')
+    except Exception:
+        details = {}
+    event_type = row[2]
+    journal_status = row[13] or _default_trade_journal_status(event_type)
+    return {
+        'id': row[0],
+        'created_at': row[1],
+        'event_type': event_type,
+        'ticker': row[3],
+        'contract_symbol': row[4],
+        'instruction': row[5],
+        'quantity': row[6],
+        'limit_price': row[7],
+        'account_hash': row[8],
+        'order_hash': row[9],
+        'schwab_status': row[10],
+        'location': row[11],
+        'details': details,
+        'journal_status': journal_status,
+        'journal_tags': row[14] or '',
+        'journal_setup': row[15] or '',
+        'journal_thesis': row[16] or '',
+        'journal_notes': row[17] or '',
+        'journal_outcome': row[18] or '',
+        'updated_at': row[19] or '',
+    }
+
+
+def _trade_event_select_sql(where_clause=''):
+    return '''
+        SELECT id, created_at, event_type, ticker, contract_symbol, instruction,
+               quantity, limit_price, account_hash, order_hash, schwab_status,
+               location, event_json, journal_status, journal_tags, journal_setup,
+               journal_thesis, journal_notes, journal_outcome, updated_at
+        FROM trade_events
+        {where_clause}
+        ORDER BY created_at DESC, id DESC
+    '''.format(where_clause=where_clause)
 
 
 def _read_trade_events(limit=50):
@@ -5046,38 +5144,45 @@ def _read_trade_events(limit=50):
     limit = max(1, min(limit, 200))
     with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
-            cursor.execute('''
-                SELECT id, created_at, event_type, ticker, contract_symbol, instruction,
-                       quantity, limit_price, account_hash, order_hash, schwab_status,
-                       location, event_json
-                FROM trade_events
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-            ''', (limit,))
+            cursor.execute(_trade_event_select_sql('') + ' LIMIT ?', (limit,))
             rows = cursor.fetchall()
-    events = []
-    for row in rows:
-        details = {}
-        try:
-            details = json.loads(row[12] or '{}')
-        except Exception:
-            details = {}
-        events.append({
-            'id': row[0],
-            'created_at': row[1],
-            'event_type': row[2],
-            'ticker': row[3],
-            'contract_symbol': row[4],
-            'instruction': row[5],
-            'quantity': row[6],
-            'limit_price': row[7],
-            'account_hash': row[8],
-            'order_hash': row[9],
-            'schwab_status': row[10],
-            'location': row[11],
-            'details': details,
-        })
-    return events
+    return [_trade_event_from_row(row) for row in rows]
+
+
+def _read_trade_event(event_id):
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(_trade_event_select_sql('WHERE id = ?') + ' LIMIT 1', (event_id,))
+            row = cursor.fetchone()
+    return _trade_event_from_row(row) if row else None
+
+
+def _update_trade_journal_event(event_id, payload):
+    event = _read_trade_event(event_id)
+    if not event:
+        return None
+    fields = _normalize_trade_journal_fields(payload, existing_status=event.get('journal_status') or 'planned')
+    updated_at = datetime.now(pytz.UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute('''
+                UPDATE trade_events
+                SET journal_status = ?, journal_tags = ?, journal_setup = ?,
+                    journal_thesis = ?, journal_notes = ?, journal_outcome = ?,
+                    updated_at = ?
+                WHERE id = ?
+            ''', (
+                fields['journal_status'],
+                fields['journal_tags'],
+                fields['journal_setup'],
+                fields['journal_thesis'],
+                fields['journal_notes'],
+                fields['journal_outcome'],
+                updated_at,
+                event_id,
+            ))
+            conn.commit()
+    return _read_trade_event(event_id)
 
 
 def _selected_contract_position_quantity(raw_details, contract_symbol):
@@ -11573,18 +11678,26 @@ def index():
         .trade-journal-panel.visible {
             display: block;
         }
+        .trade-journal-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
         .trade-journal-row {
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto;
             gap: 8px;
-            border-top: 1px solid var(--border);
-            padding: 7px 0;
+            align-items: center;
+            border: 1px solid var(--border);
+            border-left: 3px solid color-mix(in srgb, var(--accent) 48%, var(--border));
+            border-radius: 6px;
+            background: var(--bg-0);
+            padding: 8px;
             font-size: 11px;
         }
-        .trade-journal-row:first-child {
-            border-top: 0;
-            padding-top: 0;
-        }
+        .trade-journal-row.open { border-left-color: var(--call); }
+        .trade-journal-row.closed { border-left-color: var(--fg-2); }
+        .trade-journal-row.review { border-left-color: var(--warn); }
         .trade-journal-main {
             min-width: 0;
             color: var(--fg-0);
@@ -11597,11 +11710,179 @@ def index():
             font-size: 10px;
             line-height: 1.35;
         }
+        .trade-journal-tags {
+            margin-top: 4px;
+            color: var(--info);
+            font-size: 10px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-journal-side {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 5px;
+        }
+        .trade-journal-status,
         .trade-journal-type {
             color: var(--fg-1);
             font-size: 10px;
             font-weight: 800;
             text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .trade-journal-status {
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-1);
+            padding: 2px 7px;
+        }
+        .trade-journal-edit {
+            min-height: 24px;
+            border: 1px solid var(--border);
+            background: var(--bg-1);
+            color: var(--fg-1);
+            border-radius: 6px;
+            padding: 0 8px;
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+        .trade-journal-modal {
+            border: 1px solid var(--border);
+            background: var(--bg-1);
+            color: var(--fg-0);
+            border-radius: var(--radius-lg);
+            padding: 0;
+            width: min(520px, 94vw);
+            max-height: min(760px, 92vh);
+        }
+        .trade-journal-modal::backdrop {
+            background: rgba(0, 0, 0, 0.58);
+        }
+        .trade-journal-editor {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 14px;
+        }
+        .trade-journal-editor-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: flex-start;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+        }
+        .trade-journal-editor-title {
+            min-width: 0;
+            color: var(--fg-0);
+            font-size: 13px;
+            font-weight: 800;
+            line-height: 1.25;
+        }
+        .trade-journal-editor-meta {
+            margin-top: 4px;
+            color: var(--fg-2);
+            font-size: 11px;
+        }
+        .trade-journal-close {
+            min-width: 30px;
+            min-height: 30px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            color: var(--fg-1);
+            border-radius: 6px;
+            font-size: 17px;
+            cursor: pointer;
+        }
+        .trade-journal-editor-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+            gap: 8px;
+        }
+        .trade-journal-editor label {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 0;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .trade-journal-editor input,
+        .trade-journal-editor select,
+        .trade-journal-editor textarea {
+            width: 100%;
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-0);
+            padding: 7px 8px;
+            font-size: 12px;
+            font-family: inherit;
+            text-transform: none;
+            letter-spacing: 0;
+        }
+        .trade-journal-editor textarea {
+            resize: vertical;
+            min-height: 70px;
+            line-height: 1.35;
+        }
+        .trade-journal-editor-actions {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 8px;
+            border-top: 1px solid var(--border);
+            padding-top: 10px;
+        }
+        .trade-journal-save,
+        .trade-journal-cancel {
+            min-height: 30px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            color: var(--fg-1);
+            border-radius: 6px;
+            padding: 0 10px;
+            font-size: 11px;
+            font-weight: 800;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+        .trade-journal-save {
+            border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+            background: color-mix(in srgb, var(--accent) 12%, var(--bg-0));
+            color: var(--fg-0);
+        }
+        .trade-journal-save:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+        .trade-journal-editor-error {
+            flex: 1;
+            min-width: 0;
+            color: var(--warn);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        @container (max-width: 360px) {
+            .trade-journal-row {
+                grid-template-columns: minmax(0, 1fr);
+            }
+            .trade-journal-side {
+                align-items: flex-start;
+                flex-direction: row;
+                justify-content: space-between;
+            }
+            .trade-journal-editor-grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
         }
 
         .rail-flow-shell {
@@ -16355,10 +16636,51 @@ def index():
                             <button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button>
                         </div>
                         <div class="trade-panel-note" data-trade-journal-note>Local rail events</div>
-                        <div data-trade-journal-list>
+                        <div class="trade-journal-list" data-trade-journal-list>
                             <div class="trade-empty">Previewed and placed rail orders will appear here.</div>
                         </div>
                     </section>
+                    <dialog class="trade-journal-modal" data-trade-journal-modal>
+                        <form method="dialog" class="trade-journal-editor" data-trade-journal-editor>
+                            <div class="trade-journal-editor-head">
+                                <div>
+                                    <div class="trade-journal-editor-title" data-trade-journal-editor-title>Journal Entry</div>
+                                    <div class="trade-journal-editor-meta" data-trade-journal-editor-meta>Local trade event</div>
+                                </div>
+                                <button type="button" class="trade-journal-close" data-trade-journal-close aria-label="Close journal editor">×</button>
+                            </div>
+                            <div class="trade-journal-editor-grid">
+                                <label>Status
+                                    <select data-trade-journal-field="journal_status">
+                                        <option value="planned">Planned</option>
+                                        <option value="open">Open</option>
+                                        <option value="closed">Closed</option>
+                                        <option value="review">Review</option>
+                                    </select>
+                                </label>
+                                <label>Tags
+                                    <input data-trade-journal-field="journal_tags" type="text" maxlength="160" placeholder="scalp, trend, reversal">
+                                </label>
+                            </div>
+                            <label>Setup
+                                <input data-trade-journal-field="journal_setup" type="text" maxlength="120" placeholder="Opening drive, VWAP reclaim">
+                            </label>
+                            <label>Thesis
+                                <textarea data-trade-journal-field="journal_thesis" maxlength="800" placeholder="Why this trade made sense"></textarea>
+                            </label>
+                            <label>Notes
+                                <textarea data-trade-journal-field="journal_notes" maxlength="1200" placeholder="Execution notes, management, adjustments"></textarea>
+                            </label>
+                            <label>Outcome
+                                <textarea data-trade-journal-field="journal_outcome" maxlength="800" placeholder="Result and lesson"></textarea>
+                            </label>
+                            <div class="trade-journal-editor-actions">
+                                <div class="trade-journal-editor-error" data-trade-journal-editor-error></div>
+                                <button type="button" class="trade-journal-cancel" data-trade-journal-close>Cancel</button>
+                                <button type="button" class="trade-journal-save" data-trade-journal-save>Save</button>
+                            </div>
+                        </form>
+                    </dialog>
                 </div>
             </aside>
             <div class="flow-event-lane" id="flow-event-lane">
@@ -26580,8 +26902,22 @@ def index():
                     '<section class="trade-panel trade-journal-panel" data-trade-journal-panel>' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Journal</div><button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button></div>' +
                         '<div class="trade-panel-note" data-trade-journal-note>Local rail events</div>' +
-                        '<div data-trade-journal-list><div class="trade-empty">Previewed and placed rail orders will appear here.</div></div>' +
+                        '<div class="trade-journal-list" data-trade-journal-list><div class="trade-empty">Previewed and placed rail orders will appear here.</div></div>' +
                     '</section>' +
+                    '<dialog class="trade-journal-modal" data-trade-journal-modal>' +
+                        '<form method="dialog" class="trade-journal-editor" data-trade-journal-editor>' +
+                            '<div class="trade-journal-editor-head"><div><div class="trade-journal-editor-title" data-trade-journal-editor-title>Journal Entry</div><div class="trade-journal-editor-meta" data-trade-journal-editor-meta>Local trade event</div></div><button type="button" class="trade-journal-close" data-trade-journal-close aria-label="Close journal editor">×</button></div>' +
+                            '<div class="trade-journal-editor-grid">' +
+                                '<label>Status<select data-trade-journal-field="journal_status"><option value="planned">Planned</option><option value="open">Open</option><option value="closed">Closed</option><option value="review">Review</option></select></label>' +
+                                '<label>Tags<input data-trade-journal-field="journal_tags" type="text" maxlength="160" placeholder="scalp, trend, reversal"></label>' +
+                            '</div>' +
+                            '<label>Setup<input data-trade-journal-field="journal_setup" type="text" maxlength="120" placeholder="Opening drive, VWAP reclaim"></label>' +
+                            '<label>Thesis<textarea data-trade-journal-field="journal_thesis" maxlength="800" placeholder="Why this trade made sense"></textarea></label>' +
+                            '<label>Notes<textarea data-trade-journal-field="journal_notes" maxlength="1200" placeholder="Execution notes, management, adjustments"></textarea></label>' +
+                            '<label>Outcome<textarea data-trade-journal-field="journal_outcome" maxlength="800" placeholder="Result and lesson"></textarea></label>' +
+                            '<div class="trade-journal-editor-actions"><div class="trade-journal-editor-error" data-trade-journal-editor-error></div><button type="button" class="trade-journal-cancel" data-trade-journal-close>Cancel</button><button type="button" class="trade-journal-save" data-trade-journal-save>Save</button></div>' +
+                        '</form>' +
+                    '</dialog>' +
                 '</div>'
             );
         }
@@ -27167,6 +27503,9 @@ def index():
             journalEvents: [],
             journalLoading: false,
             journalError: '',
+            journalEditorId: '',
+            journalSaving: false,
+            journalSaveError: '',
             positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
             helperCompact: getTradeStoredBool(TRADE_HELPER_COMPACT_KEY, false),
         };
@@ -27869,14 +28208,114 @@ def index():
                 return;
             }
             list.innerHTML = events.map(event => {
+                const status = String(event.journal_status || 'planned').toLowerCase();
                 const main = [event.ticker, event.instruction, event.quantity ? 'x' + event.quantity : '', event.contract_symbol].filter(Boolean).join(' ');
                 const price = event.limit_price ? ' @ ' + event.limit_price : '';
-                const meta = [fmtTradeOrderTime(event.created_at), event.order_hash ? '#' + String(event.order_hash).slice(0, 8) : '', event.schwab_status ? 'Schwab ' + event.schwab_status : ''].filter(Boolean).join(' · ');
-                return '<div class="trade-journal-row">' +
-                    '<div><div class="trade-journal-main">' + _escapeHtml(main + price) + '</div><div class="trade-journal-meta">' + _escapeHtml(meta) + '</div></div>' +
-                    '<div class="trade-journal-type">' + _escapeHtml(String(event.event_type || '').replace(/_/g, ' ')) + '</div>' +
+                const meta = [
+                    fmtTradeOrderTime(event.created_at),
+                    String(event.event_type || '').replace(/_/g, ' '),
+                    event.order_hash ? '#' + String(event.order_hash).slice(0, 8) : '',
+                    event.schwab_status ? 'Schwab ' + event.schwab_status : '',
+                    event.updated_at ? 'edited ' + fmtTradeOrderTime(event.updated_at) : '',
+                ].filter(Boolean).join(' · ');
+                const tags = String(event.journal_tags || '').trim();
+                const setup = String(event.journal_setup || '').trim();
+                const detail = [setup, tags].filter(Boolean).join(' · ');
+                return '<div class="trade-journal-row ' + _escapeHtml(status) + '">' +
+                    '<div><div class="trade-journal-main">' + _escapeHtml(main + price) + '</div><div class="trade-journal-meta">' + _escapeHtml(meta) + '</div>' + (detail ? '<div class="trade-journal-tags">' + _escapeHtml(detail) + '</div>' : '') + '</div>' +
+                    '<div class="trade-journal-side"><div class="trade-journal-status">' + _escapeHtml(status) + '</div><button type="button" class="trade-journal-edit" data-trade-journal-edit="' + _escapeHtml(event.id) + '">Edit</button></div>' +
                 '</div>';
             }).join('');
+            list.querySelectorAll('[data-trade-journal-edit]').forEach(btn => {
+                if (btn.__tradeJournalEditBound) return;
+                btn.__tradeJournalEditBound = true;
+                btn.addEventListener('click', () => openTradeJournalEditor(btn.dataset.tradeJournalEdit || ''));
+            });
+        }
+        function getTradeJournalEvent(eventId) {
+            const id = String(eventId || '');
+            return (Array.isArray(tradeRailState.journalEvents) ? tradeRailState.journalEvents : []).find(event => String(event.id) === id) || null;
+        }
+        function formatTradeJournalTitle(event) {
+            if (!event) return 'Journal Entry';
+            const main = [event.ticker, event.instruction, event.quantity ? 'x' + event.quantity : '', event.contract_symbol].filter(Boolean).join(' ');
+            return main + (event.limit_price ? ' @ ' + event.limit_price : '');
+        }
+        function openTradeJournalEditor(eventId) {
+            const event = getTradeJournalEvent(eventId);
+            if (!event) return;
+            tradeRailState.journalEditorId = String(event.id);
+            tradeRailState.journalSaveError = '';
+            const modal = document.querySelector('[data-trade-journal-modal]');
+            const title = document.querySelector('[data-trade-journal-editor-title]');
+            const meta = document.querySelector('[data-trade-journal-editor-meta]');
+            const error = document.querySelector('[data-trade-journal-editor-error]');
+            if (title) title.textContent = formatTradeJournalTitle(event);
+            if (meta) {
+                meta.textContent = [
+                    fmtTradeOrderTime(event.created_at),
+                    String(event.event_type || '').replace(/_/g, ' '),
+                    event.location ? 'Schwab location saved' : '',
+                ].filter(Boolean).join(' · ');
+            }
+            document.querySelectorAll('[data-trade-journal-field]').forEach(field => {
+                const key = field.dataset.tradeJournalField;
+                field.value = event[key] || (key === 'journal_status' ? 'planned' : '');
+            });
+            if (error) error.textContent = '';
+            renderTradeJournalEditorSaving();
+            if (modal) {
+                if (modal.showModal && !modal.open) modal.showModal();
+                else modal.setAttribute('open', '');
+            }
+        }
+        function closeTradeJournalEditor() {
+            const modal = document.querySelector('[data-trade-journal-modal]');
+            tradeRailState.journalEditorId = '';
+            tradeRailState.journalSaveError = '';
+            if (modal) {
+                if (modal.close) modal.close();
+                else modal.removeAttribute('open');
+            }
+        }
+        function renderTradeJournalEditorSaving() {
+            const save = document.querySelector('[data-trade-journal-save]');
+            const error = document.querySelector('[data-trade-journal-editor-error]');
+            if (save) {
+                save.disabled = !!tradeRailState.journalSaving;
+                save.textContent = tradeRailState.journalSaving ? 'Saving...' : 'Save';
+            }
+            if (error) error.textContent = tradeRailState.journalSaveError || '';
+        }
+        function saveTradeJournalEvent() {
+            const eventId = tradeRailState.journalEditorId;
+            if (!eventId || tradeRailState.journalSaving) return;
+            const payload = { id: eventId };
+            document.querySelectorAll('[data-trade-journal-field]').forEach(field => {
+                payload[field.dataset.tradeJournalField] = field.value || '';
+            });
+            tradeRailState.journalSaving = true;
+            tradeRailState.journalSaveError = '';
+            renderTradeJournalEditorSaving();
+            fetch('/trade/journal/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || 'Journal save failed');
+                const updated = data.event;
+                tradeRailState.journalEvents = tradeRailState.journalEvents.map(event => String(event.id) === String(eventId) ? updated : event);
+                tradeRailState.journalSaving = false;
+                renderTradeJournal();
+                closeTradeJournalEditor();
+            })
+            .catch(err => {
+                tradeRailState.journalSaving = false;
+                tradeRailState.journalSaveError = err.message || 'Journal save failed';
+                renderTradeJournalEditorSaving();
+            });
         }
         function requestTradeJournal(options = {}) {
             if (!options.force && tradeRailState.journalEvents.length) {
@@ -28399,6 +28838,29 @@ def index():
             root.__tradePickerWired = true;
             const journalRefresh = root.querySelector('[data-trade-journal-refresh]');
             if (journalRefresh) journalRefresh.addEventListener('click', () => requestTradeJournal({ force: true }));
+            root.querySelectorAll('[data-trade-journal-close]').forEach(btn => {
+                btn.addEventListener('click', event => {
+                    event.preventDefault();
+                    closeTradeJournalEditor();
+                });
+            });
+            const journalSave = root.querySelector('[data-trade-journal-save]');
+            if (journalSave) {
+                journalSave.addEventListener('click', event => {
+                    event.preventDefault();
+                    saveTradeJournalEvent();
+                });
+            }
+            const journalModal = root.querySelector('[data-trade-journal-modal]');
+            if (journalModal) {
+                journalModal.addEventListener('cancel', () => {
+                    tradeRailState.journalEditorId = '';
+                    tradeRailState.journalSaveError = '';
+                });
+                journalModal.addEventListener('close', () => {
+                    if (!tradeRailState.journalSaving) tradeRailState.journalEditorId = '';
+                });
+            }
             const positionToggle = root.querySelector('[data-trade-position-toggle]');
             if (positionToggle) {
                 positionToggle.addEventListener('click', () => {
@@ -32991,8 +33453,24 @@ def trade_cancel_order():
 
 @app.route('/trade/journal', methods=['GET'])
 def trade_journal():
-    """Local read-only order-entry rail journal."""
+    """Local order-entry rail journal."""
     return jsonify({'events': _read_trade_events(request.args.get('limit', 50)), 'warnings': []})
+
+
+@app.route('/trade/journal/update', methods=['POST'])
+def trade_journal_update():
+    """Edit local journal annotations attached to persisted rail trade events."""
+    data = request.get_json(silent=True) or {}
+    try:
+        event_id = int(data.get('id') or data.get('event_id') or 0)
+    except Exception:
+        event_id = 0
+    if event_id <= 0:
+        return _trade_api_error('Missing journal event id.', 400)
+    event = _update_trade_journal_event(event_id, data)
+    if not event:
+        return _trade_api_error('Journal event not found.', 404)
+    return jsonify({'event': event, 'warnings': []})
 
 
 @app.route('/trade/preview_order', methods=['POST'])

@@ -1,6 +1,6 @@
 # GEX Dashboard - Options Trading Rail UI Polish Plan
 
-**Status:** Stage 4 contract picker ATM ladder/scroll polish complete; trading journal build-out queued
+**Status:** Journal persistence/editor added; Journal toggle/open bug queued
 **Created:** 2026-05-01  
 **Branch at draft time:** `codex/options-trading-rail-plan`  
 **Primary file:** `ezoptionsschwab.py`  
@@ -150,6 +150,10 @@ Use grep by anchor name rather than relying on these line numbers, because this 
 - `requestTradeChain`
 - `requestTradeAccountDetails`
 - `requestTradeOrders`
+- `requestTradeJournal`
+- `renderTradeJournal`
+- `openTradeJournalEditor`
+- `saveTradeJournalEvent`
 
 ### CSS
 
@@ -166,6 +170,9 @@ Use grep by anchor name rather than relying on these line numbers, because this 
 - `.trade-position-row`
 - `.trade-ticket-grid`
 - `.trade-ticket-input`
+- `.trade-journal-panel`
+- `.trade-journal-row`
+- `.trade-journal-modal`
 
 ---
 
@@ -1056,4 +1063,108 @@ Do not implement without explicit approval:
 - Multi-leg spreads.
 - Automated trading from chart clicks, alerts, or flow.
 - Automatic screenshots/screen recordings.
+```
+
+---
+
+## 16. 2026-05-02 Trading Journal Build-out Update
+
+Accomplished:
+
+- Built on the existing local SQLite `trade_events` journal table instead of porting the external TradeNote-style app architecture.
+- Added editable journal fields to `trade_events`: status, tags, setup, thesis, notes, outcome, and updated timestamp.
+- Added local schema migration in `init_db()` so existing `options_data.db` files keep old journal rows.
+- Added `POST /trade/journal/update` for saving journal annotations.
+- Kept automatic journal entries attached to successful previews and successful live placements.
+- Default journal statuses are `planned` for preview events and `open` for placed events.
+- Upgraded the rail Journal panel with compact event rows, status pills, setup/tags display, and an edit action.
+- Added a journal editor dialog/modal for status, tags, setup, thesis, notes, and outcome.
+- Mirrored the Journal list/editor markup in static `#trade-rail` HTML and `buildTradeRailHtml()`.
+- Added focused tests for editable journal annotations and missing journal-event rejection.
+
+Tricky parts:
+
+- The journal editor is local-only and annotation-only. It does not change Schwab preview/place payloads, final confirmation behavior, live-trading gates, or bracket planning behavior.
+- Static HTML and `buildTradeRailHtml()` must stay in parity. The Journal panel and editor are under the fourth trading rail and can be dropped by chart DOM rebuilds if future markup is added in only one path.
+- Port `5014` can be stale. During smoke testing, the old process served older DOM until it was restarted; use this as a first check before assuming frontend code is missing.
+- The user reported that clicking the Journal button in the in-app browser did not open anything. That is not expected behavior and should be treated as a next-session bug, not as intended UX.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+- Browser smoke on `http://127.0.0.1:5014/` confirmed the served current tree contains the Journal modal/editor DOM after restarting a stale `5014` process. No screenshots or screen recordings were taken.
+
+Still left to do:
+
+- Reproduce and fix the Journal button/toggle open issue from the user's current in-app browser state.
+- Verify whether the issue is caused by collapsed rail state, invisible header controls, missing event binding in `wireTradeRailPickerControls()`, `renderTradeJournal()` not toggling `.visible`, stale port `5014`, or a DOM rebuild that lost the editor/panel nodes.
+- Add journal filters/search by status, ticker, contract, tag, and event type.
+- Add clearer lifecycle grouping across preview, placed, canceled, closed/reviewed, and manually annotated entries.
+- Consider cancel-order journal events with safe metadata and existing explicit-confirmation behavior.
+- Add realized/marked P/L enrichment only when deterministic enough from positions/orders.
+- Keep screenshot/screen-recording attachments deferred until there is explicit opt-in UI and storage controls.
+- Keep deferred/non-goals unchanged: no live Schwab bracket/OCO child orders, no SPX-specific validation, no multi-leg spreads, no automated trading from chart clicks/alerts/flow, and no analytical formula changes.
+
+### Prompt For Next Session
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard on branch codex/options-trading-rail-plan.
+
+Read AGENTS.md first, then read:
+- docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md
+- docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md
+
+Before editing, run:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Continue only the dedicated fourth order-entry trading rail:
+- #trade-rail-header
+- #trade-rail
+- .trade-rail-shell
+- Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders / Journal panels
+
+Current latest state:
+- Trading rail has preview-only and guarded live single-leg DAY LIMIT option orders.
+- Contract Helper lives at the top of Contract Picker, with compact/expanded localStorage state.
+- Position panel has hide/show state and row-level Use pills that select exact cached contracts only.
+- Bracket Plan is planning-only and must not alter Schwab preview/place payloads.
+- Contract Picker rows use explicit columns: Contract, B, M, A, IV, Δ, Vol, OI.
+- Contract Picker behaves like a strike ladder: calls sort low-to-high and puts sort high-to-low. On side/expiry/range changes, the side-specific ATM anchor is selected and auto-scrolled to the top of the chain list. Do not reintroduce ATM/OTM/ITM grouping.
+- Journal persistence exists in local SQLite `trade_events`.
+- Successful previews and successful live placements auto-record local journal events.
+- Journal entries have editable local annotation fields: status, tags, setup, thesis, notes, outcome.
+- `/trade/journal` returns recent events and `/trade/journal/update` saves annotations.
+- Static HTML and `buildTradeRailHtml()` must stay in parity.
+
+Known issue to start with:
+- The user reported that clicking the `Journal` button in the in-app browser does not open anything. That is not expected behavior.
+- Reproduce using the user's current in-app browser at http://127.0.0.1:5014/.
+- Do not take screenshots or screen recordings unless explicitly asked.
+- First verify port `5014` is serving the current working tree; stale Flask processes have served older rail DOM before.
+- Check whether the rail is collapsed, whether `[data-trade-journal-toggle]` is visible/clickable, whether `wireTradeRailPickerControls()` binds the click listener, whether `tradeRailState.journalVisible` changes, and whether `renderTradeJournal()` toggles `.trade-journal-panel.visible`.
+- Fix that Journal button/toggle issue before adding new journal features.
+
+Potential next scope after the toggle bug:
+- Add journal filters/search by status, ticker, contract, tags, and event type.
+- Add lifecycle grouping across previewed, placed, canceled, and reviewed/closed entries.
+- Consider cancel-order journal events with safe metadata and existing explicit-confirmation behavior.
+- Add deterministic P/L enrichment from positions/orders if safe and reliable.
+- Re-check the Contract Picker table at very narrow rail widths and with larger live volume/OI values.
+- Continue visual polish of Selected Contract, Order Ticket, Orders, or Journal panels as needed.
+
+Do not implement without explicit approval:
+- Live Schwab bracket/OCO child orders.
+- SPX-specific validation.
+- Multi-leg spreads.
+- Automated trading from chart clicks, alerts, or flow.
+- Automatic screenshots/screen recordings.
+
+Verification commands to run after changes:
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
 ```

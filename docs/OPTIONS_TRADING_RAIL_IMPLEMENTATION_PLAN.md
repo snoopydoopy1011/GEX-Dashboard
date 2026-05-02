@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Stage 7 planning helpers complete / live bracket support later
+**Status:** Journal persistence/editor added; Journal toggle/open bug queued; live bracket support later
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -305,6 +305,61 @@ Verification completed:
 - `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
 - `git diff --check` passed.
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+
+### 2026-05-02 Trading Journal Build-out Update
+
+The second journal slice is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Extended the existing local SQLite `trade_events` table with editable journal annotation fields:
+  - `journal_status`
+  - `journal_tags`
+  - `journal_setup`
+  - `journal_thesis`
+  - `journal_notes`
+  - `journal_outcome`
+  - `updated_at`
+- Added safe schema migration via `ALTER TABLE ... ADD COLUMN` inside `init_db()` so existing `options_data.db` files keep prior journal rows.
+- Added `POST /trade/journal/update` for editing annotations on persisted local rail events.
+- Kept automatic journal writes attached to successful Schwab previews and successful live placements only.
+- Defaulted successful preview events to `planned` and successful placement events to `open`.
+- Upgraded the fourth trading rail Journal panel from a starter list into a compact event list with status pills, setup/tags display, and an `Edit` action.
+- Added a journal editor dialog/modal with status, tags, setup, thesis, notes, and outcome fields.
+- Mirrored the Journal list/editor markup in both static `#trade-rail` HTML and `buildTradeRailHtml()` so `ensurePriceChartDom()` rebuilds keep the UI.
+- Extended `tests/test_trade_preview.py` with editable journal annotation coverage and missing-event rejection coverage.
+- Did not add screenshot/screen-recording capture, delete behavior, imports, exports, or any automated trading behavior.
+
+Tricky parts / implementation notes:
+
+- The journal is intentionally built on the existing `trade_events` table rather than introducing a second database or a TradeNote-style architecture.
+- Journal annotations are local-only SQLite fields. The Schwab preview/place order payloads remain unchanged.
+- `bracket_plan` remains journal metadata only. It still does not alter `build_single_option_limit_order()`, `/trade/preview_order`, `/trade/place_order`, live-trading gates, or Schwab order JSON.
+- The editor state is held in the existing vanilla JS `tradeRailState`; no framework was introduced.
+- Static/rebuild parity remains critical: any future journal controls under the fourth rail must exist in both initial Flask-rendered HTML and `buildTradeRailHtml()`.
+
+Known issue / next-session bug:
+
+- The user reported that clicking the `Journal` button in the in-app browser did not open anything. That is not expected behavior.
+- Do not assume the latest smoke result proves the bug fixed. Next session should reproduce from the user's current `http://127.0.0.1:5014/` browser state, verify whether the rail is collapsed, whether `[data-trade-journal-toggle]` is visible/clickable, whether `wireTradeRailPickerControls()` bound the listener, and whether `renderTradeJournal()` toggles `.trade-journal-panel.visible`.
+- Also verify the server on port `5014` is serving the current working tree. A stale Flask process can serve older rail DOM even when the file has been patched.
+
+Still left to do:
+
+- Fix the Journal button/toggle open behavior if reproducible.
+- Add richer journal filtering/search by status, ticker, contract, tags, and event type.
+- Add grouped lifecycle views that connect previewed, placed, canceled, closed/reviewed, and manually annotated events when deterministic.
+- Consider adding cancel-order journal events with safe metadata and explicit-confirmation semantics.
+- Add realized/marked P/L enrichment from positions/orders only when deterministic enough.
+- Add screenshot/screen-recording attachments only after explicit opt-in UI and clear storage controls; do not start capture automatically.
+- Deferred/non-goals remain unchanged: no live Schwab bracket/OCO child orders, no SPX-specific validation, no multi-leg spreads, no automated trading from chart clicks/alerts/flow, and no analytical formula changes.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+- Browser smoke on `http://127.0.0.1:5014/` confirmed the served current tree contains the Journal modal/editor DOM after restarting a stale `5014` process. No screenshots or screen recordings were taken.
 
 ### 2026-05-01 Order Rail Annotation Polish Update
 
@@ -1449,9 +1504,11 @@ Stage 7:
 - [x] Keep Schwab single-leg order JSON unchanged.
 - [ ] Validate Schwab bracket/OCO preview/place behavior before live support.
 - [ ] Add user-defined template editing beyond built-in presets.
-- [ ] Add in-dashboard order journal.
-  - [ ] Add journal button/view in the dashboard.
-  - [ ] Auto-record rail trade events into local storage/SQLite.
+- [x] Add in-dashboard order journal.
+  - [x] Add journal button/view in the dashboard.
+  - [x] Auto-record rail trade events into local storage/SQLite.
+  - [x] Add editable local notes/tags/setup/thesis/outcome fields.
+  - [ ] Fix reported Journal button/toggle open issue in the in-app browser if reproducible.
   - [ ] Add screenshot/screen-recording attachments with explicit opt-in and storage controls.
 
 ---
@@ -1472,9 +1529,11 @@ Stage 7:
 
 ---
 
-## 17. Prompt For A Fresh Codex Session
+## 17. Historical Prompt For A Fresh Codex Session
 
-Use this prompt to continue from the current state:
+Historical prompt from an earlier stage. For the current next-session prompt, use `docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md` section `16. 2026-05-02 Trading Journal Build-out Update`.
+
+Earlier prompt:
 
 ```text
 We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard.
