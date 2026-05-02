@@ -1,6 +1,7 @@
 import importlib
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -180,11 +181,22 @@ class TradePreviewEndpointTest(unittest.TestCase):
         seed_chain()
         ezoptionsschwab._trade_preview_records.clear()
         self.original_client = ezoptionsschwab.client
+        self.original_db_path = ezoptionsschwab.DB_PATH
+        tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        self.temp_db_path = tmp.name
+        tmp.close()
+        ezoptionsschwab.DB_PATH = self.temp_db_path
+        ezoptionsschwab.init_db()
         ezoptionsschwab.client = MockPreviewClient()
         self.app = ezoptionsschwab.app.test_client()
 
     def tearDown(self):
         ezoptionsschwab.client = self.original_client
+        ezoptionsschwab.DB_PATH = self.original_db_path
+        try:
+            os.unlink(self.temp_db_path)
+        except OSError:
+            pass
         ezoptionsschwab._options_cache.clear()
         ezoptionsschwab._trade_preview_records.clear()
 
@@ -257,17 +269,39 @@ class TradePreviewEndpointTest(unittest.TestCase):
         self.assertNotIn('123456789', body)
         self.assertIn('[redacted]', body)
 
+    def test_successful_preview_records_local_journal_event(self):
+        response = self.post_preview()
+        self.assertEqual(response.status_code, 200)
+        journal = self.app.get('/trade/journal').get_json()
+        self.assertEqual(len(journal['events']), 1)
+        event = journal['events'][0]
+        self.assertEqual(event['event_type'], 'previewed_order')
+        self.assertEqual(event['ticker'], 'SPY')
+        self.assertEqual(event['contract_symbol'], 'SPY   260501C00722000')
+        self.assertIn('bracket_plan', event['details'])
+
 
 class TradePlaceOrderEndpointTest(unittest.TestCase):
     def setUp(self):
         seed_chain()
         ezoptionsschwab._trade_preview_records.clear()
         self.original_client = ezoptionsschwab.client
+        self.original_db_path = ezoptionsschwab.DB_PATH
+        tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        self.temp_db_path = tmp.name
+        tmp.close()
+        ezoptionsschwab.DB_PATH = self.temp_db_path
+        ezoptionsschwab.init_db()
         ezoptionsschwab.client = MockPreviewClient()
         self.app = ezoptionsschwab.app.test_client()
 
     def tearDown(self):
         ezoptionsschwab.client = self.original_client
+        ezoptionsschwab.DB_PATH = self.original_db_path
+        try:
+            os.unlink(self.temp_db_path)
+        except OSError:
+            pass
         ezoptionsschwab._options_cache.clear()
         ezoptionsschwab._trade_preview_records.clear()
 
@@ -379,6 +413,9 @@ class TradePlaceOrderEndpointTest(unittest.TestCase):
         self.assertEqual(data['schwab_status'], 201)
         self.assertIn('/orders/987654321', data['location'])
         self.assertEqual(ezoptionsschwab.client.place_calls, [('HASH123', preview['order'])])
+        events = self.app.get('/trade/journal').get_json()['events']
+        self.assertEqual(events[0]['event_type'], 'placed_order')
+        self.assertEqual(events[0]['location'], 'https://api.schwabapi.com/trader/v1/accounts/HASH123/orders/987654321')
 
     def test_successful_placement_consumes_preview_token(self):
         preview = self.post_preview().get_json()

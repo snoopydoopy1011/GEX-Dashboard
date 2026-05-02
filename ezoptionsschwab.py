@@ -49,7 +49,9 @@ MAX_RETAINED_SESSION_DATES = 2
 _retention_lock = threading.Lock()
 
 
-def sqlite_connect(db_path=DB_PATH, timeout=10, retries=2, retry_delay=0.25):
+def sqlite_connect(db_path=None, timeout=10, retries=2, retry_delay=0.25):
+    if db_path is None:
+        db_path = DB_PATH
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -157,6 +159,27 @@ def init_db():
                     put_volume INTEGER NOT NULL,
                     date TEXT NOT NULL
                 )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trade_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    ticker TEXT,
+                    contract_symbol TEXT,
+                    instruction TEXT,
+                    quantity INTEGER,
+                    limit_price TEXT,
+                    account_hash TEXT,
+                    order_hash TEXT,
+                    schwab_status INTEGER,
+                    location TEXT,
+                    event_json TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_trade_events_created_at
+                ON trade_events (created_at DESC, id DESC)
             ''')
             conn.commit()
 
@@ -4980,6 +5003,81 @@ def _redact_trade_payload(value):
     if isinstance(value, list):
         return [_redact_trade_payload(child) for child in value]
     return value
+
+
+def _write_trade_event(event_type, payload):
+    """Persist deterministic rail trade events for the local in-dashboard journal."""
+    if not isinstance(payload, dict):
+        payload = {}
+    safe_payload = _redact_trade_payload(copy.deepcopy(payload))
+    created_at = datetime.now(pytz.UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    event_json = json.dumps(safe_payload, sort_keys=True, default=str)
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute('''
+                INSERT INTO trade_events (
+                    created_at, event_type, ticker, contract_symbol, instruction, quantity,
+                    limit_price, account_hash, order_hash, schwab_status, location, event_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                created_at,
+                str(event_type or ''),
+                format_ticker(safe_payload.get('ticker') or ''),
+                str(safe_payload.get('contract_symbol') or ''),
+                str(safe_payload.get('instruction') or ''),
+                safe_payload.get('quantity'),
+                str(safe_payload.get('limit_price') or ''),
+                str(safe_payload.get('account_hash') or ''),
+                str(safe_payload.get('order_hash') or safe_payload.get('preview_token') or ''),
+                safe_payload.get('schwab_status'),
+                safe_payload.get('location'),
+                event_json,
+            ))
+            conn.commit()
+            return cursor.lastrowid
+
+
+def _read_trade_events(limit=50):
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, 200))
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute('''
+                SELECT id, created_at, event_type, ticker, contract_symbol, instruction,
+                       quantity, limit_price, account_hash, order_hash, schwab_status,
+                       location, event_json
+                FROM trade_events
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            ''', (limit,))
+            rows = cursor.fetchall()
+    events = []
+    for row in rows:
+        details = {}
+        try:
+            details = json.loads(row[12] or '{}')
+        except Exception:
+            details = {}
+        events.append({
+            'id': row[0],
+            'created_at': row[1],
+            'event_type': row[2],
+            'ticker': row[3],
+            'contract_symbol': row[4],
+            'instruction': row[5],
+            'quantity': row[6],
+            'limit_price': row[7],
+            'account_hash': row[8],
+            'order_hash': row[9],
+            'schwab_status': row[10],
+            'location': row[11],
+            'details': details,
+        })
+    return events
 
 
 def _selected_contract_position_quantity(raw_details, contract_symbol):
@@ -10482,6 +10580,25 @@ def index():
             text-transform: uppercase;
             letter-spacing: 0.06em;
         }
+        .trade-journal-button {
+            flex: 0 0 auto;
+            min-height: 24px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 0 9px;
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+        .trade-journal-button.active {
+            border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+            color: var(--fg-0);
+            background: color-mix(in srgb, var(--accent) 12%, var(--bg-0));
+        }
         .trade-rail {
             height: var(--workspace-pane-h);
             min-width: 0;
@@ -11068,7 +11185,7 @@ def index():
         }
         .trade-plan-actions {
             display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: 4px;
             margin: 8px 0;
         }
@@ -11088,6 +11205,36 @@ def index():
         .trade-risk-button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+        }
+        .trade-template-tools {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto;
+            gap: 4px;
+            margin: 8px 0;
+        }
+        .trade-template-tools input {
+            width: 100%;
+            min-width: 0;
+            min-height: 28px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            color: var(--fg-1);
+            border-radius: 6px;
+            padding: 0 7px;
+            font-size: 11px;
+        }
+        .trade-template-tools button,
+        .trade-journal-refresh {
+            min-height: 28px;
+            border: 1px solid var(--border);
+            background: var(--bg-0);
+            color: var(--fg-1);
+            border-radius: 6px;
+            padding: 0 8px;
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            cursor: pointer;
         }
         .trade-bracket-table {
             border: 1px solid var(--border);
@@ -11192,6 +11339,42 @@ def index():
             padding: 8px;
             white-space: pre-wrap;
             word-break: break-word;
+        }
+        .trade-journal-panel {
+            display: none;
+        }
+        .trade-journal-panel.visible {
+            display: block;
+        }
+        .trade-journal-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            border-top: 1px solid var(--border);
+            padding: 7px 0;
+            font-size: 11px;
+        }
+        .trade-journal-row:first-child {
+            border-top: 0;
+            padding-top: 0;
+        }
+        .trade-journal-main {
+            min-width: 0;
+            color: var(--fg-0);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-journal-meta {
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.35;
+        }
+        .trade-journal-type {
+            color: var(--fg-1);
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
         }
 
         .rail-flow-shell {
@@ -15458,6 +15641,7 @@ def index():
                     <div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div>
                     <button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button>
                 </div>
+                <button type="button" class="trade-journal-button" data-trade-journal-toggle>Journal</button>
                 <div class="trade-rail-badge">Preview Only</div>
             </div>
             <button type="button" class="trade-rail-collapse-toggle" id="trade-rail-collapse-toggle" title="Collapse trading rail" aria-label="Collapse trading rail">›</button>
@@ -15853,7 +16037,13 @@ def index():
                         <label class="trade-check-row"><input data-trade-chart-reference-enabled type="checkbox"> Chart click sets helper reference</label>
                         <div class="trade-plan-actions">
                             <button type="button" data-trade-save-default-template>Save Default</button>
+                            <button type="button" data-trade-scale-cheap-template>Scale Cheap</button>
                             <button type="button" data-trade-apply-risk-size>Use Risk Size</button>
+                        </div>
+                        <div class="trade-template-tools">
+                            <input data-trade-template-name type="text" maxlength="24" placeholder="Template name">
+                            <button type="button" data-trade-save-template>Save</button>
+                            <button type="button" data-trade-delete-template>Delete</button>
                         </div>
                         <div class="trade-helper-grid">
                             <label class="trade-field"><div class="trade-field-label">Risk Budget</div><input data-trade-risk-budget type="number" min="0" step="25" inputmode="decimal" placeholder="$"></label>
@@ -15885,6 +16075,16 @@ def index():
                         <div class="trade-panel-note" data-trade-orders-note>No account</div>
                         <div data-trade-orders-list>
                             <div class="trade-empty">Select an account to show open and recent orders.</div>
+                        </div>
+                    </section>
+                    <section class="trade-panel trade-journal-panel" data-trade-journal-panel>
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Journal</div>
+                            <button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button>
+                        </div>
+                        <div class="trade-panel-note" data-trade-journal-note>Local rail events</div>
+                        <div data-trade-journal-list>
+                            <div class="trade-empty">Previewed and placed rail orders will appear here.</div>
                         </div>
                     </section>
                 </div>
@@ -26133,7 +26333,8 @@ def index():
                             '<label class="trade-field"><div class="trade-field-label">Stop -</div><input data-trade-stop-offset class="trade-ticket-input" type="number" min="0.01" step="0.01" value="1.00"></label>' +
                         '</div>' +
                         '<label class="trade-check-row"><input data-trade-chart-reference-enabled type="checkbox"> Chart click sets helper reference</label>' +
-                        '<div class="trade-plan-actions"><button type="button" data-trade-save-default-template>Save Default</button><button type="button" data-trade-apply-risk-size>Use Risk Size</button></div>' +
+                        '<div class="trade-plan-actions"><button type="button" data-trade-save-default-template>Save Default</button><button type="button" data-trade-scale-cheap-template>Scale Cheap</button><button type="button" data-trade-apply-risk-size>Use Risk Size</button></div>' +
+                        '<div class="trade-template-tools"><input data-trade-template-name type="text" maxlength="24" placeholder="Template name"><button type="button" data-trade-save-template>Save</button><button type="button" data-trade-delete-template>Delete</button></div>' +
                         '<div class="trade-helper-grid">' +
                             '<label class="trade-field"><div class="trade-field-label">Risk Budget</div><input data-trade-risk-budget type="number" min="0" step="25" inputmode="decimal" placeholder="$"></label>' +
                             '<label class="trade-field"><div class="trade-field-label">Underlying Ref</div><input data-trade-underlying-reference type="number" min="0" step="0.01" inputmode="decimal" placeholder="click chart"></label>' +
@@ -26152,6 +26353,11 @@ def index():
                         '<div class="trade-panel-note" data-trade-orders-note>No account</div>' +
                         '<div data-trade-orders-list><div class="trade-empty">Select an account to show open and recent orders.</div></div>' +
                     '</section>' +
+                    '<section class="trade-panel trade-journal-panel" data-trade-journal-panel>' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Journal</div><button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button></div>' +
+                        '<div class="trade-panel-note" data-trade-journal-note>Local rail events</div>' +
+                        '<div data-trade-journal-list><div class="trade-empty">Previewed and placed rail orders will appear here.</div></div>' +
+                    '</section>' +
                 '</div>'
             );
         }
@@ -26163,10 +26369,18 @@ def index():
                 header = document.createElement('div');
                 header.className = 'trade-rail-header';
                 header.id = 'trade-rail-header';
-                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-account-controls"><select class="trade-account-select" data-trade-account-select aria-label="Trading account"><option value="">Load linked accounts</option></select><div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div><button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button></div><div class="trade-rail-badge">Preview Only</div>';
+                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-account-controls"><select class="trade-account-select" data-trade-account-select aria-label="Trading account"><option value="">Load linked accounts</option></select><div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div><button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button></div><button type="button" class="trade-journal-button" data-trade-journal-toggle>Journal</button><div class="trade-rail-badge">Preview Only</div>';
                 grid.appendChild(header);
             } else if (!header.querySelector('[data-trade-account-select]')) {
-                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-account-controls"><select class="trade-account-select" data-trade-account-select aria-label="Trading account"><option value="">Load linked accounts</option></select><div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div><button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button></div><div class="trade-rail-badge">Preview Only</div>';
+                header.innerHTML = '<div class="trade-rail-title">Order Entry</div><div class="trade-rail-account-controls"><select class="trade-account-select" data-trade-account-select aria-label="Trading account"><option value="">Load linked accounts</option></select><div class="trade-rail-buying-power"><span>BP</span><strong data-trade-buying-power>—</strong></div><button type="button" class="trade-account-refresh" data-trade-account-refresh title="Refresh accounts" aria-label="Refresh linked accounts">↻</button></div><button type="button" class="trade-journal-button" data-trade-journal-toggle>Journal</button><div class="trade-rail-badge">Preview Only</div>';
+            } else if (!header.querySelector('[data-trade-journal-toggle]')) {
+                const badge = header.querySelector('.trade-rail-badge');
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'trade-journal-button';
+                btn.setAttribute('data-trade-journal-toggle', '');
+                btn.textContent = 'Journal';
+                header.insertBefore(btn, badge || null);
             }
             ensureTradeRailControls(grid);
             let rail = document.getElementById('trade-rail');
@@ -26667,8 +26881,9 @@ def index():
         const TRADE_RAIL_COLLAPSE_KEY = 'gex.tradeRailCollapsed';
         const TRADE_RAIL_WIDTH_KEY = 'gex.tradeRailWidthPx';
         const TRADE_BRACKET_DEFAULT_KEY = 'gex.tradeBracketDefault';
+        const TRADE_BRACKET_CUSTOM_KEY = 'gex.tradeBracketTemplates';
         const TRADE_RAIL_DEFAULT_WIDTH = 400;
-        const TRADE_BRACKET_TEMPLATES = {
+        const TRADE_BUILTIN_BRACKET_TEMPLATES = {
             single: { label: 'Single', rows: 0, targetOffset: 1, stopOffset: 1 },
             oco: { label: 'OCO', rows: 1, targetOffset: 1, stopOffset: 1 },
             trg_1: { label: 'TRG w/ bracket', rows: 1, targetOffset: 1, stopOffset: 1 },
@@ -26678,6 +26893,7 @@ def index():
             plus_2_minus_2: { label: '+2.00/-2.00', rows: 2, targetOffset: 2, stopOffset: 2 },
             scalp: { label: 'Scalp', rows: 1, targetOffset: 0.3, stopOffset: 0.15 },
         };
+        let tradeCustomBracketTemplates = {};
         const tradeRailState = {
             ticker: '',
             optionType: 'CALL',
@@ -26714,10 +26930,15 @@ def index():
             bracketTemplate: 'trg_1',
             bracketTargetOffset: 1,
             bracketStopOffset: 1,
+            bracketTemplateName: '',
             helperMode: 'premium',
             riskBudget: '',
             chartReferenceEnabled: false,
             underlyingReference: '',
+            journalVisible: false,
+            journalEvents: [],
+            journalLoading: false,
+            journalError: '',
         };
 
         function fmtTradePrice(value) {
@@ -26841,23 +27062,119 @@ def index():
             if (!qty || !Number.isFinite(price) || price <= 0) return null;
             return price * qty * 100;
         }
+        function getTradeBracketTemplates() {
+            return Object.assign({}, TRADE_BUILTIN_BRACKET_TEMPLATES, tradeCustomBracketTemplates);
+        }
         function getTradeBracketTemplateSpec() {
-            return TRADE_BRACKET_TEMPLATES[tradeRailState.bracketTemplate] || TRADE_BRACKET_TEMPLATES.trg_1;
+            const templates = getTradeBracketTemplates();
+            return templates[tradeRailState.bracketTemplate] || TRADE_BUILTIN_BRACKET_TEMPLATES.trg_1;
+        }
+        function renderTradeBracketTemplateOptions() {
+            const input = document.querySelector('[data-trade-bracket-template]');
+            if (!input) return;
+            const templates = getTradeBracketTemplates();
+            const current = templates[tradeRailState.bracketTemplate] ? tradeRailState.bracketTemplate : 'trg_1';
+            const optionHtml = Object.keys(TRADE_BUILTIN_BRACKET_TEMPLATES).map(key => {
+                const spec = TRADE_BUILTIN_BRACKET_TEMPLATES[key];
+                return '<option value="' + _escapeHtml(key) + '"' + (key === current ? ' selected' : '') + '>' + _escapeHtml(spec.label) + '</option>';
+            }).join('') + Object.keys(tradeCustomBracketTemplates).sort((a, b) => {
+                return String(tradeCustomBracketTemplates[a].label || '').localeCompare(String(tradeCustomBracketTemplates[b].label || ''));
+            }).map(key => {
+                const spec = tradeCustomBracketTemplates[key];
+                return '<option value="' + _escapeHtml(key) + '"' + (key === current ? ' selected' : '') + '>' + _escapeHtml(spec.label || 'Custom') + '</option>';
+            }).join('');
+            if (input.innerHTML !== optionHtml) input.innerHTML = optionHtml;
+            input.value = current;
+        }
+        function loadTradeCustomBracketTemplates() {
+            try {
+                const parsed = JSON.parse(localStorage.getItem(TRADE_BRACKET_CUSTOM_KEY) || '{}');
+                tradeCustomBracketTemplates = {};
+                if (parsed && typeof parsed === 'object') {
+                    Object.keys(parsed).forEach(key => {
+                        const item = parsed[key] || {};
+                        const rows = Math.max(0, Math.min(3, Math.floor(Number(item.rows) || 1)));
+                        const targetOffset = Math.max(0.01, Number(item.targetOffset) || 1);
+                        const stopOffset = Math.max(0.01, Number(item.stopOffset) || 1);
+                        const label = String(item.label || '').trim().slice(0, 24);
+                        if (label) tradeCustomBracketTemplates[key] = { label, rows, targetOffset, stopOffset };
+                    });
+                }
+            } catch (e) {
+                tradeCustomBracketTemplates = {};
+            }
+        }
+        function persistTradeCustomBracketTemplates() {
+            try { localStorage.setItem(TRADE_BRACKET_CUSTOM_KEY, JSON.stringify(tradeCustomBracketTemplates)); } catch (e) {}
+        }
+        function slugTradeTemplateName(name) {
+            const clean = String(name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32);
+            return clean ? 'custom_' + clean : '';
         }
         function applyTradeBracketTemplate(templateKey, updateOffsets = true) {
-            const spec = TRADE_BRACKET_TEMPLATES[templateKey] || TRADE_BRACKET_TEMPLATES.trg_1;
-            tradeRailState.bracketTemplate = TRADE_BRACKET_TEMPLATES[templateKey] ? templateKey : 'trg_1';
+            const templates = getTradeBracketTemplates();
+            const spec = templates[templateKey] || TRADE_BUILTIN_BRACKET_TEMPLATES.trg_1;
+            tradeRailState.bracketTemplate = templates[templateKey] ? templateKey : 'trg_1';
+            tradeRailState.bracketTemplateName = spec.label || '';
             if (updateOffsets) {
                 tradeRailState.bracketTargetOffset = spec.targetOffset;
                 tradeRailState.bracketStopOffset = spec.stopOffset;
             }
+            renderTradeBracketTemplateOptions();
             renderTradeBracketPlan();
         }
         function restoreTradeBracketDefault() {
+            loadTradeCustomBracketTemplates();
+            renderTradeBracketTemplateOptions();
             try {
                 const saved = localStorage.getItem(TRADE_BRACKET_DEFAULT_KEY);
-                if (saved && TRADE_BRACKET_TEMPLATES[saved]) applyTradeBracketTemplate(saved, true);
+                if (saved && getTradeBracketTemplates()[saved]) applyTradeBracketTemplate(saved, true);
             } catch (e) {}
+        }
+        function saveTradeBracketTemplate() {
+            const name = String(tradeRailState.bracketTemplateName || '').trim();
+            const key = slugTradeTemplateName(name);
+            const warning = document.querySelector('[data-trade-bracket-warning]');
+            if (!key) {
+                if (warning) warning.textContent = 'Name the bracket template before saving. Planning only; Schwab order JSON is unchanged.';
+                return;
+            }
+            tradeCustomBracketTemplates[key] = {
+                label: name.slice(0, 24),
+                rows: Math.max(0, Math.min(3, Number(getTradeBracketTemplateSpec().rows) || 1)),
+                targetOffset: Math.max(0.01, Number(tradeRailState.bracketTargetOffset) || 1),
+                stopOffset: Math.max(0.01, Number(tradeRailState.bracketStopOffset) || 1),
+            };
+            persistTradeCustomBracketTemplates();
+            applyTradeBracketTemplate(key, true);
+            if (warning) warning.textContent = 'Custom bracket template saved locally. Planning only; Schwab order JSON is unchanged.';
+        }
+        function deleteTradeBracketTemplate() {
+            const key = tradeRailState.bracketTemplate;
+            const warning = document.querySelector('[data-trade-bracket-warning]');
+            if (!tradeCustomBracketTemplates[key]) {
+                if (warning) warning.textContent = 'Built-in templates cannot be deleted.';
+                return;
+            }
+            delete tradeCustomBracketTemplates[key];
+            persistTradeCustomBracketTemplates();
+            applyTradeBracketTemplate('trg_1', true);
+            if (warning) warning.textContent = 'Custom bracket template deleted locally.';
+        }
+        function scaleTradeBracketForCheapContract() {
+            const selected = getSelectedTradeContract();
+            const base = getTradePremiumBase(selected);
+            const warning = document.querySelector('[data-trade-bracket-warning]');
+            if (!Number.isFinite(base) || base <= 0) {
+                if (warning) warning.textContent = 'Select a contract with a valid premium before scaling offsets.';
+                return;
+            }
+            const target = Math.max(0.01, Math.round(Math.max(base * 0.5, 0.02) * 100) / 100);
+            const stop = Math.max(0.01, Math.round(Math.max(base * 0.35, 0.01) * 100) / 100);
+            tradeRailState.bracketTargetOffset = target;
+            tradeRailState.bracketStopOffset = Math.min(stop, Math.max(0.01, base - 0.01));
+            if (warning) warning.textContent = 'Offsets scaled from selected premium for cheap-contract planning. Schwab order JSON is unchanged.';
+            renderTradeBracketPlan();
         }
         function getTradePremiumBase(contract) {
             const limit = Number(tradeRailState.limitPrice);
@@ -26878,16 +27195,21 @@ def index():
             const delta = Number(contract && contract.delta);
             const isPut = contract && contract.option_type === 'PUT';
             const direction = isPut ? -1 : 1;
-            const plan = { base, rows, targetOffset, stopOffset, target: null, stop: null, targetUnderlying: null, stopUnderlying: null };
+            const plan = { base, rows, targetOffset, stopOffset, effectiveTargetOffset: targetOffset, effectiveStopOffset: stopOffset, cheapContractAdjusted: false, target: null, stop: null, targetUnderlying: null, stopUnderlying: null };
             if (!Number.isFinite(base) || base <= 0) return plan;
+            if (tradeRailState.helperMode === 'premium' && stopOffset >= base) {
+                plan.effectiveStopOffset = Math.max(0.01, Math.min(stopOffset, base * 0.5));
+                plan.effectiveTargetOffset = Math.max(0.01, Math.min(targetOffset, Math.max(base, plan.effectiveStopOffset * 2)));
+                plan.cheapContractAdjusted = true;
+            }
             if (tradeRailState.helperMode === 'underlying' && Number.isFinite(ref) && ref > 0 && Number.isFinite(delta)) {
-                plan.targetUnderlying = ref + direction * targetOffset;
-                plan.stopUnderlying = ref - direction * stopOffset;
+                plan.targetUnderlying = ref + direction * plan.effectiveTargetOffset;
+                plan.stopUnderlying = ref - direction * plan.effectiveStopOffset;
                 plan.target = Math.max(0.01, base + delta * (plan.targetUnderlying - ref));
                 plan.stop = Math.max(0.01, base + delta * (plan.stopUnderlying - ref));
             } else {
-                plan.target = base + targetOffset;
-                plan.stop = Math.max(0.01, base - stopOffset);
+                plan.target = base + plan.effectiveTargetOffset;
+                plan.stop = Math.max(0.01, base - plan.effectiveStopOffset);
             }
             return plan;
         }
@@ -26901,12 +27223,33 @@ def index():
             const quantity = Math.max(0, Math.min(100, Math.floor(budget / riskPerContract)));
             return { quantity, riskPerContract };
         }
+        function getTradeBracketPlanSnapshot(contract) {
+            const plan = getTradeBracketPlan(contract);
+            const spec = getTradeBracketTemplateSpec();
+            return {
+                planning_only: true,
+                template: tradeRailState.bracketTemplate,
+                template_label: spec.label || '',
+                helper_mode: tradeRailState.helperMode,
+                target_offset: Number(tradeRailState.bracketTargetOffset) || null,
+                stop_offset: Number(tradeRailState.bracketStopOffset) || null,
+                effective_target_offset: Number.isFinite(plan.effectiveTargetOffset) ? plan.effectiveTargetOffset : null,
+                effective_stop_offset: Number.isFinite(plan.effectiveStopOffset) ? plan.effectiveStopOffset : null,
+                rows: plan.rows || 0,
+                base: Number.isFinite(plan.base) ? plan.base : null,
+                target: Number.isFinite(plan.target) ? plan.target : null,
+                stop: Number.isFinite(plan.stop) ? plan.stop : null,
+                cheap_contract_adjusted: !!plan.cheapContractAdjusted,
+                risk_budget: tradeRailState.riskBudget || '',
+            };
+        }
         function renderTradeBracketPlan() {
             const selected = getSelectedTradeContract();
             const templateInput = document.querySelector('[data-trade-bracket-template]');
             const helperInput = document.querySelector('[data-trade-helper-mode]');
             const targetInput = document.querySelector('[data-trade-target-offset]');
             const stopInput = document.querySelector('[data-trade-stop-offset]');
+            const nameInput = document.querySelector('[data-trade-template-name]');
             const riskInput = document.querySelector('[data-trade-risk-budget]');
             const refInput = document.querySelector('[data-trade-underlying-reference]');
             const chartRefInput = document.querySelector('[data-trade-chart-reference-enabled]');
@@ -26915,10 +27258,12 @@ def index():
             const riskSizeEl = document.querySelector('[data-trade-risk-size]');
             const note = document.querySelector('[data-trade-bracket-note]');
             const useRiskButton = document.querySelector('[data-trade-apply-risk-size]');
+            renderTradeBracketTemplateOptions();
             if (templateInput && templateInput.value !== tradeRailState.bracketTemplate) templateInput.value = tradeRailState.bracketTemplate;
             if (helperInput && helperInput.value !== tradeRailState.helperMode) helperInput.value = tradeRailState.helperMode;
             if (targetInput && String(targetInput.value) !== String(tradeRailState.bracketTargetOffset)) targetInput.value = tradeRailState.bracketTargetOffset;
             if (stopInput && String(stopInput.value) !== String(tradeRailState.bracketStopOffset)) stopInput.value = tradeRailState.bracketStopOffset;
+            if (nameInput && String(nameInput.value || '') !== String(tradeRailState.bracketTemplateName || '')) nameInput.value = tradeRailState.bracketTemplateName || '';
             if (riskInput && String(riskInput.value || '') !== String(tradeRailState.riskBudget || '')) riskInput.value = tradeRailState.riskBudget || '';
             if (refInput && String(refInput.value || '') !== String(tradeRailState.underlyingReference || '')) refInput.value = tradeRailState.underlyingReference || '';
             if (chartRefInput) chartRefInput.checked = !!tradeRailState.chartReferenceEnabled;
@@ -26938,6 +27283,12 @@ def index():
                 ? ' · U ' + fmtTradePrice(plan.targetUnderlying) + ' / ' + fmtTradePrice(plan.stopUnderlying)
                 : '';
             if (targetStopEl) targetStopEl.textContent = targetText + ' / ' + stopText + refText;
+            const warning = document.querySelector('[data-trade-bracket-warning]');
+            if (warning) {
+                warning.textContent = plan.cheapContractAdjusted
+                    ? 'Cheap-contract helper: stop/target display is scaled so the planned stop is not pinned at 0.01. Brackets remain planning-only.'
+                    : 'Planning only. Brackets do not change preview, live placement, or Schwab order JSON.';
+            }
             const risk = getTradeRiskSize(selected);
             if (riskSizeEl) {
                 riskSizeEl.textContent = risk
@@ -26952,14 +27303,14 @@ def index():
                     const qty = Math.max(1, Math.floor(Number(tradeRailState.quantity) || 1));
                     rowsEl.innerHTML = Array.from({ length: plan.rows }, (_, index) => {
                         const n = index + 1;
-                        const rowTarget = Number.isFinite(plan.target) ? plan.target + plan.targetOffset * index : null;
-                        const rowStop = Number.isFinite(plan.stop) ? Math.max(0.01, plan.stop - plan.stopOffset * index) : null;
+                        const rowTarget = Number.isFinite(plan.target) ? plan.target + plan.effectiveTargetOffset * index : null;
+                        const rowStop = Number.isFinite(plan.stop) ? Math.max(0.01, plan.stop - plan.effectiveStopOffset * index) : null;
                         const baseQty = Math.floor(qty / plan.rows);
                         const rowQty = baseQty + (index < (qty % plan.rows) ? 1 : 0);
                         return '<div class="trade-bracket-row">' +
                             '<span>On ' + n + '</span>' +
-                            '<span class="target">+' + fmtTradePrice(plan.targetOffset * n) + ' LIMIT ' + fmtTradePrice(rowTarget) + '</span>' +
-                            '<span class="stop">-' + fmtTradePrice(plan.stopOffset * n) + ' STOP ' + fmtTradePrice(rowStop) + '</span>' +
+                            '<span class="target">+' + fmtTradePrice(plan.effectiveTargetOffset * n) + ' LIMIT ' + fmtTradePrice(rowTarget) + '</span>' +
+                            '<span class="stop">-' + fmtTradePrice(plan.effectiveStopOffset * n) + ' STOP ' + fmtTradePrice(rowStop) + '</span>' +
                             '<span>DAY</span>' +
                             '<span class="trade-position-meta">Qty ' + _escapeHtml(String(rowQty)) + ' link</span>' +
                         '</div>';
@@ -27146,6 +27497,67 @@ def index():
                     btn.__tradeCancelBound = true;
                     btn.addEventListener('click', () => cancelTradeOrder(btn.dataset.tradeCancelOrder || ''));
                 });
+            });
+        }
+        function renderTradeJournal() {
+            const panel = document.querySelector('[data-trade-journal-panel]');
+            const list = document.querySelector('[data-trade-journal-list]');
+            const note = document.querySelector('[data-trade-journal-note]');
+            const toggle = document.querySelector('[data-trade-journal-toggle]');
+            if (panel) panel.classList.toggle('visible', !!tradeRailState.journalVisible);
+            if (toggle) {
+                toggle.classList.toggle('active', !!tradeRailState.journalVisible);
+                toggle.setAttribute('aria-pressed', tradeRailState.journalVisible ? 'true' : 'false');
+            }
+            if (!list) return;
+            if (tradeRailState.journalLoading) {
+                if (note) note.textContent = 'Loading';
+                list.innerHTML = '<div class="trade-empty">Loading local trade events...</div>';
+                return;
+            }
+            if (tradeRailState.journalError) {
+                if (note) note.textContent = 'Unavailable';
+                list.innerHTML = '<div class="trade-empty">' + _escapeHtml(tradeRailState.journalError) + '</div>';
+                return;
+            }
+            const events = Array.isArray(tradeRailState.journalEvents) ? tradeRailState.journalEvents : [];
+            if (note) note.textContent = events.length ? events.length + ' local events' : 'No events yet';
+            if (!events.length) {
+                list.innerHTML = '<div class="trade-empty">Previewed and placed rail orders will appear here.</div>';
+                return;
+            }
+            list.innerHTML = events.map(event => {
+                const main = [event.ticker, event.instruction, event.quantity ? 'x' + event.quantity : '', event.contract_symbol].filter(Boolean).join(' ');
+                const price = event.limit_price ? ' @ ' + event.limit_price : '';
+                const meta = [fmtTradeOrderTime(event.created_at), event.order_hash ? '#' + String(event.order_hash).slice(0, 8) : '', event.schwab_status ? 'Schwab ' + event.schwab_status : ''].filter(Boolean).join(' · ');
+                return '<div class="trade-journal-row">' +
+                    '<div><div class="trade-journal-main">' + _escapeHtml(main + price) + '</div><div class="trade-journal-meta">' + _escapeHtml(meta) + '</div></div>' +
+                    '<div class="trade-journal-type">' + _escapeHtml(String(event.event_type || '').replace(/_/g, ' ')) + '</div>' +
+                '</div>';
+            }).join('');
+        }
+        function requestTradeJournal(options = {}) {
+            if (!options.force && tradeRailState.journalEvents.length) {
+                renderTradeJournal();
+                return;
+            }
+            tradeRailState.journalLoading = true;
+            tradeRailState.journalError = '';
+            renderTradeJournal();
+            fetch('/trade/journal?limit=50')
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || 'Journal unavailable');
+                tradeRailState.journalEvents = Array.isArray(data.events) ? data.events : [];
+                tradeRailState.journalLoading = false;
+                tradeRailState.journalError = '';
+                renderTradeJournal();
+            })
+            .catch(err => {
+                tradeRailState.journalEvents = [];
+                tradeRailState.journalLoading = false;
+                tradeRailState.journalError = err.message || 'Journal unavailable';
+                renderTradeJournal();
             });
         }
         function requestTradeAccountDetails(options = {}) {
@@ -27361,6 +27773,7 @@ def index():
                 renderTradeAccounts();
                 renderTradePositions();
                 renderTradeOrders();
+                renderTradeJournal();
                 const list = rail.querySelector('[data-trade-chain-list]');
                 const meta = rail.querySelector('[data-trade-chain-meta]');
                 const warnings = rail.querySelector('[data-trade-chain-warnings]');
@@ -27488,6 +27901,7 @@ def index():
                     instruction: tradeRailState.action,
                     quantity: tradeRailState.quantity,
                     limit_price: tradeRailState.limitPrice,
+                    bracket_plan: getTradeBracketPlanSnapshot(selected),
                 }),
             })
             .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
@@ -27500,6 +27914,7 @@ def index():
                 tradeRailState.placement = null;
                 tradeRailState.placementError = '';
                 renderTradeTicket();
+                if (tradeRailState.journalVisible) requestTradeJournal({ force: true });
             })
             .catch(err => {
                 tradeRailState.previewLoading = false;
@@ -27534,6 +27949,7 @@ def index():
                     limit_price: tradeRailState.limitPrice,
                     preview_token: tradeRailState.previewToken,
                     order: tradeRailState.preview && tradeRailState.preview.order,
+                    bracket_plan: getTradeBracketPlanSnapshot(selected),
                     confirmed: true,
                 }),
             })
@@ -27546,6 +27962,7 @@ def index():
                 renderTradeTicket();
                 requestTradeAccountDetails({ force: true });
                 requestTradeOrders({ force: true });
+                if (tradeRailState.journalVisible) requestTradeJournal({ force: true });
             })
             .catch(err => {
                 tradeRailState.placementLoading = false;
@@ -27611,8 +28028,19 @@ def index():
                     requestTradeOrders({ force: true });
                 });
             }
+            const journalToggle = document.querySelector('[data-trade-journal-toggle]');
+            if (journalToggle && !journalToggle.__tradeJournalToggleWired) {
+                journalToggle.__tradeJournalToggleWired = true;
+                journalToggle.addEventListener('click', () => {
+                    tradeRailState.journalVisible = !tradeRailState.journalVisible;
+                    renderTradeJournal();
+                    if (tradeRailState.journalVisible) requestTradeJournal({ force: true });
+                });
+            }
             if (!root || root.__tradePickerWired) return;
             root.__tradePickerWired = true;
+            const journalRefresh = root.querySelector('[data-trade-journal-refresh]');
+            if (journalRefresh) journalRefresh.addEventListener('click', () => requestTradeJournal({ force: true }));
             const ordersRefresh = root.querySelector('[data-trade-orders-refresh]');
             if (ordersRefresh) {
                 ordersRefresh.addEventListener('click', () => {
@@ -27707,6 +28135,12 @@ def index():
                     applyTradeBracketTemplate(bracketTemplate.value || 'trg_1', true);
                 });
             }
+            const templateName = root.querySelector('[data-trade-template-name]');
+            if (templateName) {
+                templateName.addEventListener('input', () => {
+                    tradeRailState.bracketTemplateName = templateName.value || '';
+                });
+            }
             const helperMode = root.querySelector('[data-trade-helper-mode]');
             if (helperMode) {
                 helperMode.addEventListener('change', () => {
@@ -27757,6 +28191,12 @@ def index():
                     if (warning) warning.textContent = 'Default bracket template saved locally. Planning only; Schwab order JSON is unchanged.';
                 });
             }
+            const scaleCheap = root.querySelector('[data-trade-scale-cheap-template]');
+            if (scaleCheap) scaleCheap.addEventListener('click', scaleTradeBracketForCheapContract);
+            const saveTemplate = root.querySelector('[data-trade-save-template]');
+            if (saveTemplate) saveTemplate.addEventListener('click', saveTradeBracketTemplate);
+            const deleteTemplate = root.querySelector('[data-trade-delete-template]');
+            if (deleteTemplate) deleteTemplate.addEventListener('click', deleteTradeBracketTemplate);
             const applyRiskSize = root.querySelector('[data-trade-apply-risk-size]');
             if (applyRiskSize) {
                 applyRiskSize.addEventListener('click', () => {
@@ -32175,6 +32615,12 @@ def trade_cancel_order():
     return jsonify(result)
 
 
+@app.route('/trade/journal', methods=['GET'])
+def trade_journal():
+    """Local read-only order-entry rail journal."""
+    return jsonify({'events': _read_trade_events(request.args.get('limit', 50)), 'warnings': []})
+
+
 @app.route('/trade/preview_order', methods=['POST'])
 def trade_preview_order():
     """Preview-only single-leg option LIMIT orders. This endpoint never places orders."""
@@ -32257,6 +32703,21 @@ def trade_preview_order():
             order=order,
         ),
     )
+    _write_trade_event('previewed_order', {
+        'account_hash': account_hash,
+        'ticker': ticker,
+        'contract_symbol': contract_symbol,
+        'instruction': instruction,
+        'quantity': quantity,
+        'limit_price': f'{limit_price:.2f}',
+        'preview_token': preview_token,
+        'order_hash': preview_token,
+        'schwab_status': status_code,
+        'estimated_notional': result['estimated_notional'],
+        'contract': contract,
+        'order': order,
+        'bracket_plan': _redact_trade_payload(data.get('bracket_plan') or data.get('bracketPlan') or {}),
+    })
     return jsonify(result)
 
 
@@ -32378,6 +32839,21 @@ def trade_place_order():
     if not schwab_ok:
         result['warnings'].append(f"Schwab placement returned status {status_code or 'unknown'}.")
         return jsonify(result), 502
+    _write_trade_event('placed_order', {
+        'account_hash': account_hash,
+        'ticker': ticker,
+        'contract_symbol': contract_symbol,
+        'instruction': instruction,
+        'quantity': int(quantity),
+        'limit_price': f'{limit_price:.2f}',
+        'order_hash': preview_token,
+        'schwab_status': status_code,
+        'location': location,
+        'contract': contract,
+        'order': preview_order,
+        'schwab_response': response_body,
+        'bracket_plan': _redact_trade_payload(data.get('bracket_plan') or data.get('bracketPlan') or {}),
+    })
     return jsonify(result)
 
 @app.route('/update', methods=['POST'])

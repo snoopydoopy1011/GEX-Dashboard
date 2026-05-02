@@ -259,11 +259,100 @@ Tricky parts / implementation notes:
 - The change is visual only. It does not alter account lookup, position normalization, selected-contract matching, `SELL_TO_CLOSE` caps, order preview, order placement, or Schwab payloads.
 - The row layout wraps metric pills when the rail is narrow so long values do not overflow the dedicated fourth trading rail.
 
+### 2026-05-01 Bracket Template + Journal Starter Update
+
+Bracket template customization and the first local journal slice are complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Refined the planning-only Bracket Plan helper for cheap contracts so premium-mode stops do not silently pin at `0.01`; display offsets are scaled for low-premium planning while Schwab preview/place JSON remains unchanged.
+- Added a manual `Scale Cheap` action that derives tighter target/stop offsets from the selected option premium.
+- Added localStorage-only custom bracket templates with create/update/delete controls:
+  - custom template store: `gex.tradeBracketTemplates`
+  - default template store remains: `gex.tradeBracketDefault`
+- Added a dashboard `Journal` button/view inside the dedicated fourth trading rail.
+- Added a local SQLite `trade_events` table and index for deterministic rail trade events.
+- Auto-recorded successful preview and successful placement events with safe rail metadata, order hash, selected contract context, and a planning-only bracket snapshot when provided.
+- Added `GET /trade/journal` for read-only retrieval of recent local rail trade events.
+- Extended `tests/test_trade_preview.py` with local temporary-DB coverage for preview and placement journal writes.
+- Did not add screenshot or screen-recording capture.
+
+Tricky parts / implementation notes:
+
+- `sqlite_connect()` now resolves `DB_PATH` at call time instead of as a default argument. This lets tests swap in a temporary DB and avoids writing journal test rows to the real `options_data.db`.
+- The journal records only successful Schwab preview responses and successful live placement responses. Failed previews/placements are not persisted yet, so the first journal slice stays deterministic and avoids clutter.
+- Bracket snapshots are sent beside the preview/place requests as `bracket_plan`, but the backend ignores them for Schwab order construction. They are journal metadata only.
+- Static trading rail HTML and `buildTradeRailHtml()` were both updated for the Journal panel and bracket-template controls so `ensurePriceChartDom()` rebuilds preserve the UI.
+- Custom bracket templates are browser-local only. They are not in SQLite and are not synced across browsers/users.
+- Cheap-contract scaling is a display/planning helper. It adjusts helper output rows and risk-size math, not the ticket limit, preview payload, live payload, or Schwab child orders.
+
+Safety notes:
+
+- Bracket Plan remains planning-only and does not alter `/trade/preview_order`, `/trade/place_order`, `build_single_option_limit_order()`, live-trading gates, final confirmation behavior, or Schwab order JSON.
+- The Journal records deterministic order-entry events only. It does not trigger orders, automate chart clicks, or start media capture.
+
+Still left to do:
+
+- Polish the Journal view into a fuller in-dashboard workflow: filters, selected-event detail drawer, notes/tags, edit/delete for journal notes, and clearer entry/exit grouping.
+- Decide whether failed previews/place attempts should be journaled as rejected events, and if so add explicit visual separation from successful trade events.
+- Add journal capture for order cancels if useful, with the same explicit-confirmation and safe metadata rules.
+- Add realized/marked P/L enrichment from positions/orders when deterministic enough.
+- Add screenshot/screen-recording attachment only after explicit opt-in UI, clear storage controls, and no automatic capture.
+- Keep live Schwab bracket/OCO child orders, SPX-specific validation, multi-leg spreads, and alert/chart-click automated trading out of scope until explicitly approved.
+
 Verification completed:
 
 - `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
 - `git diff --check` passed.
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+
+Continuation prompt for next Codex session:
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard on branch codex/options-trading-rail-plan.
+
+Read AGENTS.md first, then read docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md and docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md. Before editing, run:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Continue only the dedicated fourth order-entry trading rail:
+- #trade-rail-header
+- #trade-rail
+- .trade-rail-shell
+- Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders / Journal panels
+
+Current state:
+- Trading rail has preview-only and guarded live single-leg DAY LIMIT option orders.
+- Bracket Plan is planning-only and must not alter Schwab preview/place payloads.
+- Custom bracket templates are localStorage-only under gex.tradeBracketTemplates; default template is gex.tradeBracketDefault.
+- Cheap-contract helper scaling exists and is display/planning-only.
+- Journal button/view exists inside the trading rail.
+- SQLite trade_events table stores deterministic successful previewed_order and placed_order events.
+- GET /trade/journal returns recent local journal events.
+- tests/test_trade_preview.py covers preview/place guards plus journal persistence through a temporary DB.
+
+Next sensible scope:
+1. Polish the Journal panel UI: add event detail display, filters, and compact rail-friendly rows.
+2. Add optional manual journal notes/tags stored locally in SQLite, without recording screenshots/video.
+3. Consider adding cancel_order journal events, preserving explicit confirmation and safe metadata.
+4. Add tests in tests/test_trade_preview.py or a new focused test file if journal behavior grows beyond order preview/place.
+
+Do not implement without explicit approval:
+- Live Schwab bracket/OCO child orders.
+- SPX-specific validation.
+- Multi-leg spreads.
+- Automated trading from chart clicks, alerts, or flow.
+- Automatic screenshots/screen recordings without explicit opt-in and storage controls.
+
+Safety constraints:
+- Do not make chart-click submit, preview, stage, or select an order automatically.
+- Do not bypass preview-required/live-trading/final-confirmation guards.
+- Do not change existing single-leg Schwab order JSON unless explicitly required and covered by tests.
+- Preserve ENABLE_LIVE_TRADING=1 gating and final confirmation behavior.
+- Preserve SELL_TO_CLOSE position caps.
+- Static HTML and buildTradeRailHtml() must stay in parity.
+```
 
 ---
 
