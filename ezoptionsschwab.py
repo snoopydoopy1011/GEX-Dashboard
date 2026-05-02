@@ -11023,9 +11023,19 @@ def index():
             line-height: 1.35;
         }
         .trade-active-panel {
+            order: 10;
             border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
             background: color-mix(in srgb, var(--accent) 4%, var(--bg-1));
         }
+        .trade-helper-panel { order: 20; }
+        .trade-position-panel { order: 30; }
+        .trade-selected-panel { order: 40; }
+        .trade-ticket-panel { order: 50; }
+        .trade-submit-panel { order: 60; }
+        .trade-picker-panel { order: 70; }
+        .trade-orders-panel { order: 80; }
+        .trade-bracket-panel { order: 90; }
+        .trade-journal-panel { order: 100; }
         .trade-active-panel.collapsed .trade-active-body {
             display: none;
         }
@@ -11604,6 +11614,22 @@ def index():
             padding: 6px 7px;
             border-radius: 6px;
         }
+        button.contract-helper-side {
+            width: 100%;
+            color: inherit;
+            font: inherit;
+            text-align: left;
+            cursor: pointer;
+        }
+        button.contract-helper-side:hover:not(:disabled),
+        button.contract-helper-side:focus-visible {
+            border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+            background: color-mix(in srgb, var(--accent) 7%, var(--bg-0));
+        }
+        button.contract-helper-side:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
+        }
         .trade-contract-helper .contract-helper-contract {
             font-size: 13px;
         }
@@ -11662,6 +11688,63 @@ def index():
         }
         .trade-contract-helper-compare .call { color: var(--call); }
         .trade-contract-helper-compare .put { color: var(--put); }
+        .trade-helper-panel .trade-contract-helper {
+            margin-bottom: 8px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }
+        .trade-quick-contracts {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 5px;
+            margin-top: 8px;
+        }
+        .trade-quick-contract-button {
+            min-width: 0;
+            min-height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 5px 7px;
+            font-size: 10px;
+            font-weight: 800;
+            cursor: pointer;
+        }
+        .trade-quick-contract-button span,
+        .trade-quick-contract-button strong {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-quick-contract-button strong {
+            color: var(--fg-0);
+            font-size: 11px;
+        }
+        .trade-quick-contract-button.call {
+            border-color: color-mix(in srgb, var(--call) 34%, var(--border));
+        }
+        .trade-quick-contract-button.put {
+            border-color: color-mix(in srgb, var(--put) 34%, var(--border));
+        }
+        .trade-quick-contract-button.call strong { color: var(--call); }
+        .trade-quick-contract-button.put strong { color: var(--put); }
+        .trade-quick-contract-button:hover:not(:disabled),
+        .trade-quick-contract-button:focus-visible {
+            background: color-mix(in srgb, var(--accent) 8%, var(--bg-0));
+            border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+        }
+        .trade-quick-contract-button:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
         .trade-meta-line,
         .trade-warning-list {
             margin-top: 7px;
@@ -17613,7 +17696,56 @@ def index():
                             <div class="trade-active-message" data-trade-fast-message>Auto-send starts off. Live sends still require a successful preview.</div>
                         </div>
                     </section>
-                    <section class="trade-panel">
+                    <section class="trade-panel trade-helper-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Contract Helper</div>
+                            <div class="trade-position-tools">
+                                <div class="trade-panel-note" data-met="contract_expiry">Near expiry</div>
+                                <button type="button" class="trade-helper-toggle" data-trade-helper-toggle title="Compact contract helper" aria-label="Compact contract helper" aria-expanded="true">⌃</button>
+                            </div>
+                        </div>
+                        <div class="trade-contract-helper">
+                            <div class="trade-contract-helper-compact-line">
+                                <span data-met="contract_primary_dte">0DTE</span>
+                                <span class="call" data-met="contract_call">—</span>
+                                <span>/</span>
+                                <span class="put" data-met="contract_put">—</span>
+                                <span>Size</span>
+                                <strong data-met="contract_size">—</strong>
+                            </div>
+                            <div class="contract-helper-grid">
+                                <button type="button" class="contract-helper-side call" data-trade-helper-candidate="CALL" disabled>
+                                    <div class="contract-helper-label">Call candidate</div>
+                                    <div class="contract-helper-contract" data-met="contract_call">—</div>
+                                    <div class="contract-helper-meta" data-met="contract_call_meta">—</div>
+                                </button>
+                                <button type="button" class="contract-helper-side put" data-trade-helper-candidate="PUT" disabled>
+                                    <div class="contract-helper-label">Put candidate</div>
+                                    <div class="contract-helper-contract" data-met="contract_put">—</div>
+                                    <div class="contract-helper-meta" data-met="contract_put_meta">—</div>
+                                </button>
+                            </div>
+                            <div class="trade-contract-helper-compare trade-helper-compare">
+                                <span>1DTE</span>
+                                <strong><span class="call" data-met="contract_1dte_call">—</span> / <span class="put" data-met="contract_1dte_put">—</span></strong>
+                            </div>
+                            <div class="contract-helper-size">
+                                <span data-met="contract_size_label">Size guide</span>
+                                <strong data-met="contract_size">—</strong>
+                            </div>
+                            <div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>
+                        </div>
+                        <div class="trade-quick-contracts" data-trade-quick-contracts>
+                            <button type="button" class="trade-quick-contract-button call" data-trade-quick-type="CALL" data-trade-quick-offset="0"><span>ATM Call</span><strong>—</strong></button>
+                            <button type="button" class="trade-quick-contract-button put" data-trade-quick-type="PUT" data-trade-quick-offset="0"><span>ATM Put</span><strong>—</strong></button>
+                            <button type="button" class="trade-quick-contract-button call" data-trade-quick-type="CALL" data-trade-quick-offset="1"><span>+1 OTM Call</span><strong>—</strong></button>
+                            <button type="button" class="trade-quick-contract-button put" data-trade-quick-type="PUT" data-trade-quick-offset="1"><span>+1 OTM Put</span><strong>—</strong></button>
+                            <button type="button" class="trade-quick-contract-button call" data-trade-quick-type="CALL" data-trade-quick-offset="2"><span>+2 OTM Call</span><strong>—</strong></button>
+                            <button type="button" class="trade-quick-contract-button put" data-trade-quick-type="PUT" data-trade-quick-offset="2"><span>+2 OTM Put</span><strong>—</strong></button>
+                        </div>
+                        <div class="trade-warning-list" data-trade-quick-contract-message></div>
+                    </section>
+                    <section class="trade-panel trade-position-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Position</div>
                             <div class="trade-position-tools">
@@ -17625,48 +17757,10 @@ def index():
                             <div class="trade-empty">Select an account to show relevant positions.</div>
                         </div>
                     </section>
-                    <section class="trade-panel">
+                    <section class="trade-panel trade-picker-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Contract Picker</div>
                             <div class="trade-panel-note" data-trade-chain-meta>Cached chain</div>
-                        </div>
-                        <div class="trade-contract-helper">
-                            <div class="trade-contract-helper-head">
-                                <div class="trade-contract-helper-title">Contract Helper <span data-met="contract_primary_dte">0DTE</span></div>
-                                <div class="trade-position-tools">
-                                    <div class="trade-contract-helper-expiry" data-met="contract_expiry">Near expiry</div>
-                                    <button type="button" class="trade-helper-toggle" data-trade-helper-toggle title="Compact contract helper" aria-label="Compact contract helper" aria-expanded="true">⌃</button>
-                                </div>
-                            </div>
-                            <div class="trade-contract-helper-compact-line">
-                                <span data-met="contract_primary_dte">0DTE</span>
-                                <span class="call" data-met="contract_call">—</span>
-                                <span>/</span>
-                                <span class="put" data-met="contract_put">—</span>
-                                <span>Size</span>
-                                <strong data-met="contract_size">—</strong>
-                            </div>
-                            <div class="contract-helper-grid">
-                                <div class="contract-helper-side call">
-                                    <div class="contract-helper-label">Call candidate</div>
-                                    <div class="contract-helper-contract" data-met="contract_call">—</div>
-                                    <div class="contract-helper-meta" data-met="contract_call_meta">—</div>
-                                </div>
-                                <div class="contract-helper-side put">
-                                    <div class="contract-helper-label">Put candidate</div>
-                                    <div class="contract-helper-contract" data-met="contract_put">—</div>
-                                    <div class="contract-helper-meta" data-met="contract_put_meta">—</div>
-                                </div>
-                            </div>
-                            <div class="trade-contract-helper-compare trade-helper-compare">
-                                <span>1DTE</span>
-                                <strong><span class="call" data-met="contract_1dte_call">—</span> / <span class="put" data-met="contract_1dte_put">—</span></strong>
-                            </div>
-                            <div class="contract-helper-size">
-                                <span data-met="contract_size_label">Size guide</span>
-                                <strong data-met="contract_size">—</strong>
-                            </div>
-                            <div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>
                         </div>
                         <div class="trade-segment" aria-label="Option type">
                             <button type="button" class="active call" data-trade-type="CALL">Calls</button>
@@ -17688,7 +17782,7 @@ def index():
                         </div>
                         <div class="trade-warning-list" data-trade-chain-warnings></div>
                     </section>
-                    <section class="trade-panel">
+                    <section class="trade-panel trade-selected-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Selected Contract</div>
                             <div class="trade-panel-note" data-trade-selected-note>No selection</div>
@@ -17708,7 +17802,7 @@ def index():
                         </div>
                         <div class="trade-warning-list" data-trade-selected-warnings></div>
                     </section>
-                    <section class="trade-panel">
+                    <section class="trade-panel trade-ticket-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Order Ticket</div>
                             <div class="trade-panel-note" data-trade-ticket-note>Preview only</div>
@@ -17743,7 +17837,7 @@ def index():
                         </div>
                         <div class="trade-warning-list" data-trade-ticket-warnings></div>
                     </section>
-                    <section class="trade-panel">
+                    <section class="trade-panel trade-bracket-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Bracket Plan</div>
                             <div class="trade-panel-note" data-trade-bracket-note>Planning only</div>
@@ -17795,12 +17889,12 @@ def index():
                         </div>
                         <div class="trade-plan-note" data-trade-bracket-warning>Planning only. Brackets do not change preview, live placement, or Schwab order JSON.</div>
                     </section>
-                    <section class="trade-panel">
+                    <section class="trade-panel trade-submit-panel">
                         <button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>
                         <button type="button" class="trade-place-button" data-trade-place disabled>Place Live Order</button>
                         <div class="trade-preview-response" data-trade-preview-response>Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.</div>
                     </section>
-                    <section class="trade-panel">
+                    <section class="trade-panel trade-orders-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Orders</div>
                             <div class="trade-order-tools">
@@ -28144,28 +28238,45 @@ def index():
             );
         }
 
+        function buildTradeHelperPanelHtml() {
+            return (
+                '<section class="trade-panel trade-helper-panel">' +
+                    '<div class="trade-panel-head"><div class="trade-panel-title">Contract Helper</div><div class="trade-position-tools"><div class="trade-panel-note" data-met="contract_expiry">Near expiry</div><button type="button" class="trade-helper-toggle" data-trade-helper-toggle title="Compact contract helper" aria-label="Compact contract helper" aria-expanded="true">⌃</button></div></div>' +
+                    '<div class="trade-contract-helper">' +
+                        '<div class="trade-contract-helper-compact-line"><span data-met="contract_primary_dte">0DTE</span><span class="call" data-met="contract_call">—</span><span>/</span><span class="put" data-met="contract_put">—</span><span>Size</span><strong data-met="contract_size">—</strong></div>' +
+                        '<div class="contract-helper-grid">' +
+                            '<button type="button" class="contract-helper-side call" data-trade-helper-candidate="CALL" disabled><div class="contract-helper-label">Call candidate</div><div class="contract-helper-contract" data-met="contract_call">—</div><div class="contract-helper-meta" data-met="contract_call_meta">—</div></button>' +
+                            '<button type="button" class="contract-helper-side put" data-trade-helper-candidate="PUT" disabled><div class="contract-helper-label">Put candidate</div><div class="contract-helper-contract" data-met="contract_put">—</div><div class="contract-helper-meta" data-met="contract_put_meta">—</div></button>' +
+                        '</div>' +
+                        '<div class="trade-contract-helper-compare trade-helper-compare"><span>1DTE</span><strong><span class="call" data-met="contract_1dte_call">—</span> / <span class="put" data-met="contract_1dte_put">—</span></strong></div>' +
+                        '<div class="contract-helper-size"><span data-met="contract_size_label">Size guide</span><strong data-met="contract_size">—</strong></div>' +
+                        '<div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>' +
+                    '</div>' +
+                    '<div class="trade-quick-contracts" data-trade-quick-contracts>' +
+                        '<button type="button" class="trade-quick-contract-button call" data-trade-quick-type="CALL" data-trade-quick-offset="0"><span>ATM Call</span><strong>—</strong></button>' +
+                        '<button type="button" class="trade-quick-contract-button put" data-trade-quick-type="PUT" data-trade-quick-offset="0"><span>ATM Put</span><strong>—</strong></button>' +
+                        '<button type="button" class="trade-quick-contract-button call" data-trade-quick-type="CALL" data-trade-quick-offset="1"><span>+1 OTM Call</span><strong>—</strong></button>' +
+                        '<button type="button" class="trade-quick-contract-button put" data-trade-quick-type="PUT" data-trade-quick-offset="1"><span>+1 OTM Put</span><strong>—</strong></button>' +
+                        '<button type="button" class="trade-quick-contract-button call" data-trade-quick-type="CALL" data-trade-quick-offset="2"><span>+2 OTM Call</span><strong>—</strong></button>' +
+                        '<button type="button" class="trade-quick-contract-button put" data-trade-quick-type="PUT" data-trade-quick-offset="2"><span>+2 OTM Put</span><strong>—</strong></button>' +
+                    '</div>' +
+                    '<div class="trade-warning-list" data-trade-quick-contract-message></div>' +
+                '</section>'
+            );
+        }
+
         function buildTradeRailHtml() {
             return (
                 '<div class="trade-rail-shell">' +
                     '<div class="trade-account-context" data-trade-account-context><span data-trade-account-status>Read only</span><span data-trade-account-warnings></span></div>' +
                     buildTradeActiveTraderPanelHtml() +
-                    '<section class="trade-panel">' +
+                    buildTradeHelperPanelHtml() +
+                    '<section class="trade-panel trade-position-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Position</div><div class="trade-position-tools"><div class="trade-panel-note" data-trade-position-note>No account</div><button type="button" class="trade-position-toggle" data-trade-position-toggle title="Collapse positions" aria-label="Collapse positions" aria-expanded="true">⌃</button></div></div>' +
                         '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
                     '</section>' +
-                    '<section class="trade-panel">' +
+                    '<section class="trade-panel trade-picker-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Contract Picker</div><div class="trade-panel-note" data-trade-chain-meta>Cached chain</div></div>' +
-                        '<div class="trade-contract-helper">' +
-                            '<div class="trade-contract-helper-head"><div class="trade-contract-helper-title">Contract Helper <span data-met="contract_primary_dte">0DTE</span></div><div class="trade-position-tools"><div class="trade-contract-helper-expiry" data-met="contract_expiry">Near expiry</div><button type="button" class="trade-helper-toggle" data-trade-helper-toggle title="Compact contract helper" aria-label="Compact contract helper" aria-expanded="true">⌃</button></div></div>' +
-                            '<div class="trade-contract-helper-compact-line"><span data-met="contract_primary_dte">0DTE</span><span class="call" data-met="contract_call">—</span><span>/</span><span class="put" data-met="contract_put">—</span><span>Size</span><strong data-met="contract_size">—</strong></div>' +
-                            '<div class="contract-helper-grid">' +
-                                '<div class="contract-helper-side call"><div class="contract-helper-label">Call candidate</div><div class="contract-helper-contract" data-met="contract_call">—</div><div class="contract-helper-meta" data-met="contract_call_meta">—</div></div>' +
-                                '<div class="contract-helper-side put"><div class="contract-helper-label">Put candidate</div><div class="contract-helper-contract" data-met="contract_put">—</div><div class="contract-helper-meta" data-met="contract_put_meta">—</div></div>' +
-                            '</div>' +
-                            '<div class="trade-contract-helper-compare trade-helper-compare"><span>1DTE</span><strong><span class="call" data-met="contract_1dte_call">—</span> / <span class="put" data-met="contract_1dte_put">—</span></strong></div>' +
-                            '<div class="contract-helper-size"><span data-met="contract_size_label">Size guide</span><strong data-met="contract_size">—</strong></div>' +
-                            '<div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>' +
-                        '</div>' +
                         '<div class="trade-segment" aria-label="Option type">' +
                             '<button type="button" class="active call" data-trade-type="CALL">Calls</button>' +
                             '<button type="button" class="put" data-trade-type="PUT">Puts</button>' +
@@ -28180,7 +28291,7 @@ def index():
                         '</div>' +
                         '<div class="trade-warning-list" data-trade-chain-warnings></div>' +
                     '</section>' +
-                    '<section class="trade-panel">' +
+                    '<section class="trade-panel trade-selected-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Selected Contract</div><div class="trade-panel-note" data-trade-selected-note>No selection</div></div>' +
                         '<div class="trade-selected-top"><div class="trade-selected-symbol" data-trade-selected-symbol>—</div><div class="trade-selected-pill" data-trade-selected-pill>—</div><div class="trade-selected-pill dte" data-trade-selected-dte>—</div></div>' +
                         '<div class="trade-selected-summary">' +
@@ -28193,7 +28304,7 @@ def index():
                         '</div>' +
                         '<div class="trade-warning-list" data-trade-selected-warnings></div>' +
                     '</section>' +
-                    '<section class="trade-panel">' +
+                    '<section class="trade-panel trade-ticket-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Order Ticket</div><div class="trade-panel-note" data-trade-ticket-note>Preview only</div></div>' +
                         '<div class="trade-action-grid" aria-label="Order action">' +
                             '<button type="button" class="trade-action-button buy active" data-trade-action="BUY_TO_OPEN">Buy Ask</button>' +
@@ -28213,7 +28324,7 @@ def index():
                         '</div>' +
                         '<div class="trade-warning-list" data-trade-ticket-warnings></div>' +
                     '</section>' +
-                    '<section class="trade-panel">' +
+                    '<section class="trade-panel trade-bracket-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Bracket Plan</div><div class="trade-panel-note" data-trade-bracket-note>Planning only</div></div>' +
                         '<div class="trade-plan-grid">' +
                             '<label class="trade-field"><div class="trade-field-label">Template</div><select data-trade-bracket-template><option value="single">Single</option><option value="oco">OCO</option><option value="trg_1" selected>TRG w/ bracket</option><option value="trg_2">TRG w/ 2 brackets</option><option value="trg_3">TRG w/ 3 brackets</option><option value="plus_1_minus_1">+1.00/-1.00</option><option value="plus_2_minus_2">+2.00/-2.00</option><option value="scalp">Scalp</option></select></label>' +
@@ -28232,12 +28343,12 @@ def index():
                         '<div class="trade-bracket-table"><div class="trade-bracket-head"><span>On</span><span>Target</span><span>Stop</span><span>TIF</span><span>Qty</span></div><div data-trade-bracket-rows><div class="trade-empty">Select a contract to plan exits.</div></div></div>' +
                         '<div class="trade-plan-note" data-trade-bracket-warning>Planning only. Brackets do not change preview, live placement, or Schwab order JSON.</div>' +
                     '</section>' +
-                    '<section class="trade-panel">' +
+                    '<section class="trade-panel trade-submit-panel">' +
                         '<button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>' +
                         '<button type="button" class="trade-place-button" data-trade-place disabled>Place Live Order</button>' +
                         '<div class="trade-preview-response" data-trade-preview-response>Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.</div>' +
                     '</section>' +
-                    '<section class="trade-panel">' +
+                    '<section class="trade-panel trade-orders-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Orders</div><div class="trade-order-tools"><button type="button" class="trade-order-toggle" data-trade-orders-toggle>Show</button><button type="button" class="trade-account-refresh" data-trade-orders-refresh title="Refresh orders" aria-label="Refresh orders">↻</button></div></div>' +
                         '<div class="trade-panel-note" data-trade-orders-note>No account</div>' +
                         '<div data-trade-orders-list><div class="trade-empty">Select an account to show open and recent orders.</div></div>' +
@@ -28305,8 +28416,9 @@ def index():
                 rail.setAttribute('aria-label', 'Options trading rail');
                 rail.innerHTML = buildTradeRailHtml();
                 grid.appendChild(rail);
-            } else if (!rail.querySelector('.trade-rail-shell') || !rail.querySelector('[data-trade-active-panel]')) {
+            } else if (!rail.querySelector('.trade-rail-shell') || !rail.querySelector('[data-trade-active-panel]') || !rail.querySelector('[data-trade-quick-contracts]')) {
                 rail.innerHTML = buildTradeRailHtml();
+                rail.__tradePickerWired = false;
             }
             if (!tradeRailState.__bracketDefaultRestored) {
                 tradeRailState.__bracketDefaultRestored = true;
@@ -28856,6 +28968,7 @@ def index():
             riskBudget: '',
             chartReferenceEnabled: false,
             underlyingReference: '',
+            quickContractMessage: '',
             journalVisible: false,
             journalEvents: [],
             journalLoaded: false,
@@ -29026,6 +29139,111 @@ def index():
             const upside = rows.filter(row => Number(row.strike) >= spot).sort((a, b) => Number(a.strike) - Number(b.strike));
             return upside[0] || nearest;
         }
+        function getTradePayloadContracts() {
+            const payload = tradeRailState.payload || {};
+            return Array.isArray(payload.contracts) ? payload.contracts : [];
+        }
+        function getTradeContractsForType(optionType, expiry = null) {
+            const payload = tradeRailState.payload || {};
+            const contracts = getTradePayloadContracts();
+            const selectedExpiry = expiry || tradeRailState.expiry || (payload.selected_expiries && payload.selected_expiries[0]) || '';
+            const type = optionType === 'PUT' ? 'PUT' : 'CALL';
+            const direction = type === 'PUT' ? -1 : 1;
+            return contracts.filter(row => {
+                if (row.option_type !== type) return false;
+                if (selectedExpiry && row.expiry !== selectedExpiry) return false;
+                return true;
+            }).sort((a, b) => {
+                const sa = Number(a.strike) || 0;
+                const sb = Number(b.strike) || 0;
+                if (sa !== sb) return direction * (sa - sb);
+                return String(a.contract_symbol || '').localeCompare(String(b.contract_symbol || ''));
+            });
+        }
+        function getTradeQuickContract(optionType, offset = 0) {
+            const payload = tradeRailState.payload || {};
+            const rows = getTradeContractsForType(optionType);
+            if (!rows.length) return null;
+            const anchor = getTradeContractAnchorRow(rows, Number(payload.underlying_price), optionType);
+            const anchorIndex = rows.findIndex(row => anchor && row.contract_symbol === anchor.contract_symbol);
+            if (anchorIndex < 0) return rows[0] || null;
+            const idx = anchorIndex + Math.max(0, Math.floor(Number(offset) || 0));
+            return rows[idx] || null;
+        }
+        function getTradeQuickContractLabel(contract) {
+            if (!contract) return '—';
+            const side = contract.option_type === 'PUT' ? 'P' : 'C';
+            return fmtTradePrice(contract.strike) + side;
+        }
+        function setTradeQuickContractMessage(message = '') {
+            tradeRailState.quickContractMessage = String(message || '');
+            const messageEl = document.querySelector('[data-trade-quick-contract-message]');
+            if (messageEl) messageEl.textContent = tradeRailState.quickContractMessage;
+        }
+        function renderTradeQuickContracts() {
+            const buttons = Array.from(document.querySelectorAll('[data-trade-quick-type][data-trade-quick-offset]'));
+            if (!buttons.length) return;
+            const payload = tradeRailState.payload || null;
+            buttons.forEach(btn => {
+                const type = btn.dataset.tradeQuickType === 'PUT' ? 'PUT' : 'CALL';
+                const offset = Number(btn.dataset.tradeQuickOffset) || 0;
+                const contract = payload ? getTradeQuickContract(type, offset) : null;
+                const label = btn.querySelector('strong');
+                if (label) label.textContent = getTradeQuickContractLabel(contract);
+                btn.dataset.tradeSymbol = contract && contract.contract_symbol ? contract.contract_symbol : '';
+                btn.disabled = !contract || !contract.contract_symbol;
+                btn.title = contract && contract.contract_symbol
+                    ? [
+                        contract.contract_symbol,
+                        contract.expiry || '',
+                        'B ' + fmtTradePrice(contract.bid) + ' / A ' + fmtTradePrice(contract.ask),
+                    ].filter(Boolean).join(' · ')
+                    : 'Load cached chain or widen the strike range to enable this quick contract.';
+            });
+            const messageEl = document.querySelector('[data-trade-quick-contract-message]');
+            if (messageEl) {
+                messageEl.textContent = tradeRailState.quickContractMessage || (payload ? 'Quick buttons select exact cached contracts only.' : 'Load cached chain to enable quick contract selection.');
+            }
+        }
+        function handleTradeQuickContractSelection(btn) {
+            const symbol = String((btn && btn.dataset.tradeSymbol) || '').trim();
+            const type = btn && btn.dataset.tradeQuickType === 'PUT' ? 'PUT' : 'CALL';
+            const offset = Number(btn && btn.dataset.tradeQuickOffset) || 0;
+            const label = offset === 0 ? 'ATM' : ('+' + offset + ' OTM');
+            if (!symbol) {
+                setTradeQuickContractMessage(label + ' ' + type.toLowerCase() + ' is not in the cached picker. Refresh the chain or widen the range.');
+                tradeRailState.fastTradeMessage = tradeRailState.quickContractMessage;
+                renderTradeActiveTrader();
+                return;
+            }
+            const ok = selectTradeContractSymbol(
+                symbol,
+                label + ' ' + (type === 'PUT' ? 'put' : 'call') + ' selected. Preview again.',
+                label + ' ' + (type === 'PUT' ? 'put' : 'call') + ' is not in the cached picker. Refresh the chain or widen the range.'
+            );
+            if (ok) setTradeQuickContractMessage(label + ' ' + (type === 'PUT' ? 'put' : 'call') + ' selected from cached chain.');
+        }
+        function handleTradeHelperCandidateSelection(btn) {
+            const symbol = String((btn && btn.dataset.tradeSymbol) || '').trim();
+            const type = btn && btn.dataset.tradeHelperCandidate === 'PUT' ? 'PUT' : 'CALL';
+            const label = String((btn && btn.dataset.tradeCandidateLabel) || (type === 'PUT' ? 'put candidate' : 'call candidate'));
+            if (!symbol) {
+                setTradeQuickContractMessage('No ' + (type === 'PUT' ? 'put' : 'call') + ' helper candidate is available.');
+                tradeRailState.fastTradeMessage = tradeRailState.quickContractMessage;
+                renderTradeActiveTrader();
+                return;
+            }
+            const missingMessage = 'Helper ' + (type === 'PUT' ? 'put' : 'call') + ' is not in the cached picker. Refresh the chain or widen the range.';
+            if (!getTradePayloadContracts().some(row => row.contract_symbol === symbol)) {
+                setTradeQuickContractMessage(missingMessage);
+                tradeRailState.fastTradeMessage = missingMessage;
+                renderTradeActiveTrader();
+                return;
+            }
+            const ok = selectTradeContractSymbol(symbol, 'Helper ' + label + ' selected. Preview again.', missingMessage);
+            if (ok) setTradeQuickContractMessage('Helper ' + label + ' selected from cached chain.');
+            else setTradeQuickContractMessage(missingMessage);
+        }
         function scrollTradeContractToTop(list, symbol) {
             if (!list || !symbol) return;
             const row = Array.from(list.querySelectorAll('[data-trade-symbol]')).find(btn => btn.dataset.tradeSymbol === symbol);
@@ -29034,14 +29252,14 @@ def index():
             const rowTop = Math.max(0, row.offsetTop - list.offsetTop);
             list.scrollTop = Math.min(rowTop, maxTop);
         }
-        function selectTradeContractSymbol(symbol, message = 'Contract changed. Preview again.') {
+        function selectTradeContractSymbol(symbol, message = 'Contract changed. Preview again.', missingMessage = 'Selected contract is not in the cached picker. Refresh the chain or widen the range.') {
             symbol = String(symbol || '').trim();
             if (!symbol) return false;
             const payload = tradeRailState.payload || {};
             const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
             const contract = contracts.find(row => row.contract_symbol === symbol);
             if (!contract) {
-                invalidateTradePreview('Position contract is not in the cached picker. Refresh the chain or widen the range.');
+                invalidateTradePreview(missingMessage);
                 return false;
             }
             tradeRailState.optionType = contract.option_type === 'PUT' ? 'PUT' : 'CALL';
@@ -30788,9 +31006,11 @@ def index():
                     if (list) list.innerHTML = '<div class="trade-empty">' + (tradeRailState.loading ? 'Loading cached contracts...' : 'Run a chain update to load cached contracts.') + '</div>';
                     if (meta) meta.textContent = tradeRailState.loading ? 'Loading' : 'Cached chain';
                     renderTradeSelected(null);
+                    renderTradeQuickContracts();
                     return;
                 }
                 renderTradeExpiryOptions(payload);
+                renderTradeQuickContracts();
                 const rows = getTradeContractsForView();
                 const spot = Number(payload.underlying_price);
                 const anchorRow = getTradeContractAnchorRow(rows, spot);
@@ -31439,6 +31659,12 @@ def index():
                     renderTradeHelperCompact();
                 });
             }
+            root.querySelectorAll('[data-trade-helper-candidate]').forEach(btn => {
+                btn.addEventListener('click', () => handleTradeHelperCandidateSelection(btn));
+            });
+            root.querySelectorAll('[data-trade-quick-type][data-trade-quick-offset]').forEach(btn => {
+                btn.addEventListener('click', () => handleTradeQuickContractSelection(btn));
+            });
             const activeToggle = root.querySelector('[data-trade-active-toggle]');
             if (activeToggle) {
                 activeToggle.addEventListener('click', () => {
@@ -34373,6 +34599,22 @@ def index():
                 if (!helperRow || helperRow.dte == null || !isFinite(helperRow.dte)) return '0DTE';
                 return Number(helperRow.dte) + 'DTE';
             };
+            const setCandidateControl = (side, row) => {
+                const selector = '[data-trade-helper-candidate="' + (side === 'PUT' ? 'PUT' : 'CALL') + '"]';
+                document.querySelectorAll(selector).forEach(btn => {
+                    const symbol = row && row.contract_symbol ? String(row.contract_symbol) : '';
+                    btn.dataset.tradeSymbol = symbol;
+                    btn.dataset.tradeCandidateLabel = row && row.label ? String(row.label) : '';
+                    btn.disabled = !symbol;
+                    btn.title = symbol
+                        ? [
+                            symbol,
+                            row && row.expiry ? row.expiry : '',
+                            row && row.mid != null && isFinite(row.mid) ? 'Mid $' + Number(row.mid).toFixed(2) : '',
+                        ].filter(Boolean).join(' · ')
+                        : 'No helper candidate available.';
+                });
+            };
             const setComparisonTone = helperRow => {
                 const available = !!(helperRow && helperRow.status === 'ready');
                 document.querySelectorAll('.trade-contract-helper').forEach(el => {
@@ -34397,6 +34639,8 @@ def index():
                 _setMet('contract_note', (helper && helper.note) || 'Scores nearby ATM to 2 OTM contracts.');
                 setSizeTone(null);
                 setComparisonTone(null);
+                setCandidateControl('CALL', null);
+                setCandidateControl('PUT', null);
                 return;
             }
             const call = helper.call || null;
@@ -34424,6 +34668,8 @@ def index():
             _setMet('contract_note', helper.note || 'Contract quality weighs spread, liquidity, gamma/$, premium, IV/RV, and gamma regime.');
             setSizeTone(size.risk || null);
             setComparisonTone(helper1dte);
+            setCandidateControl('CALL', call);
+            setCandidateControl('PUT', put);
         }
 
         function renderGammaProfile(stats) {
