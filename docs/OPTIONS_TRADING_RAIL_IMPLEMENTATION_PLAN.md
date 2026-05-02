@@ -306,6 +306,45 @@ Verification completed:
 - `git diff --check` passed.
 - `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
 
+### 2026-05-01 Order Rail Annotation Polish Update
+
+Trading rail annotation polish is complete on branch `codex/options-trading-rail-plan`.
+
+Accomplished:
+
+- Moved the Contract Helper out of the price chart toolbar and into the top of the trading rail Contract Picker card.
+- Added a compact/expanded Contract Helper toggle stored locally under `gex.tradeHelperCompact`; compact mode keeps the helper visible but reduces it to a small summary.
+- Removed duplicated selected-contract identity text from Selected Contract. The visible identity is now the call/put strike pill plus a DTE pill; the full Schwab/OCC symbol is retained as hover context, not as another visible line.
+- Added a Position panel collapse/expand toggle stored locally under `gex.tradePositionCollapsed`.
+- Added a `Use` pill on each relevant Position row. Clicking it selects that exact cached contract into Selected Contract and the Order Ticket, invalidates preview, and does not preview, stage, submit, or otherwise automate an order.
+- Kept Contract Helper, Position, and Selected Contract static HTML in parity with `buildTradeRailHtml()` where applicable.
+
+Tricky parts / implementation notes:
+
+- The Contract Helper now lives inside Contract Picker, but it still uses global `data-met="contract_*"` rendering via `renderContractHelper()`. Static HTML and `buildTradeRailHtml()` both need the same helper nodes or chart/ticker rebuilds can drop the moved helper.
+- Position row `Use` buttons must select only exact cached Schwab `contract_symbol` rows. If the held position is not currently in the cached picker payload, the UI should ask for a chain refresh or wider range instead of reconstructing symbols.
+- Selected Contract intentionally has one visible identity path only: the side-colored strike pill plus DTE pill. The full OCC/Schwab symbol remains available via hover title and internal state.
+- The annotation pass intentionally did not touch `build_single_option_limit_order()`, `/trade/preview_order`, `/trade/place_order`, or Schwab preview/place payload construction.
+
+Safety notes:
+
+- Position-row `Use` is selection-only. It does not bypass preview-required/live-trading/final-confirmation guards and does not change Schwab order JSON.
+- Selected Contract remains backed by the exact Schwab-returned cached `contract_symbol`; no option symbol reconstruction was introduced.
+- Use `http://127.0.0.1:5014/` for browser smoke checks in this branch. Avoid spending time probing or replacing an existing `5001` process unless the user explicitly asks.
+
+Still left to do:
+
+- Polish the Contract Picker option-chain rows into a cleaner/sleeker rail table.
+- Add IV and delta columns/fields to the Contract Picker rows while keeping bid/mid/ask and liquidity visible at narrow rail widths.
+- Keep option-chain row click behavior selection-only and preserve preview invalidation when the selected contract changes.
+- Re-check horizontal overflow after adding IV/delta because the rail is narrow and native scrollbars consume width.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+
 Continuation prompt for next Codex session:
 
 ```text
@@ -327,16 +366,20 @@ Current state:
 - Bracket Plan is planning-only and must not alter Schwab preview/place payloads.
 - Custom bracket templates are localStorage-only under gex.tradeBracketTemplates; default template is gex.tradeBracketDefault.
 - Cheap-contract helper scaling exists and is display/planning-only.
+- Contract Helper lives at the top of Contract Picker, has a compact/expanded localStorage toggle, and no longer appears in the price chart toolbar.
+- Selected Contract should show one visible identity path only: call/put strike pill plus DTE pill.
+- Position panel has a hide/show localStorage toggle, and each position row has a selection-only Use pill that can populate Selected Contract / Order Ticket from a cached exact contract.
 - Journal button/view exists inside the trading rail.
 - SQLite trade_events table stores deterministic successful previewed_order and placed_order events.
 - GET /trade/journal returns recent local journal events.
 - tests/test_trade_preview.py covers preview/place guards plus journal persistence through a temporary DB.
 
 Next sensible scope:
-1. Polish the Journal panel UI: add event detail display, filters, and compact rail-friendly rows.
-2. Add optional manual journal notes/tags stored locally in SQLite, without recording screenshots/video.
-3. Consider adding cancel_order journal events, preserving explicit confirmation and safe metadata.
-4. Add tests in tests/test_trade_preview.py or a new focused test file if journal behavior grows beyond order preview/place.
+1. Polish the Contract Picker option-chain rows into a cleaner/sleeker rail table and add IV + delta display alongside bid/mid/ask and liquidity. This is UI-only: keep row clicks selection-only, preserve exact cached Schwab contract symbols, and invalidate preview on selection changes.
+2. Polish the Journal panel UI: add event detail display, filters, and compact rail-friendly rows.
+3. Add optional manual journal notes/tags stored locally in SQLite, without recording screenshots/video.
+4. Consider adding cancel_order journal events, preserving explicit confirmation and safe metadata.
+5. Add tests in tests/test_trade_preview.py or a new focused test file if journal behavior grows beyond order preview/place.
 
 Do not implement without explicit approval:
 - Live Schwab bracket/OCO child orders.
@@ -1282,31 +1325,31 @@ python3 -m py_compile ezoptionsschwab.py
 Run app:
 
 ```bash
-PORT=5001 FLASK_DEBUG=0 FLASK_USE_RELOADER=0 python3 ezoptionsschwab.py
+PORT=5014 FLASK_DEBUG=0 FLASK_USE_RELOADER=0 python3 ezoptionsschwab.py
 ```
 
 Health:
 
 ```bash
-curl -s http://127.0.0.1:5001/token_health
+curl -s http://127.0.0.1:5014/token_health
 ```
 
 Existing expiration path:
 
 ```bash
-curl -s http://127.0.0.1:5001/expirations/SPY
+curl -s http://127.0.0.1:5014/expirations/SPY
 ```
 
 Representative `/update_price` smoke payload:
 
 ```bash
-python3 -c "import json, urllib.request; payload={'ticker':'SPY','timeframe':'1','lookback_days':2,'levels_types':[]}; req=urllib.request.Request('http://127.0.0.1:5001/update_price',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'}); d=json.load(urllib.request.urlopen(req,timeout=60)); print(sorted(d.keys()))"
+python3 -c "import json, urllib.request; payload={'ticker':'SPY','timeframe':'1','lookback_days':2,'levels_types':[]}; req=urllib.request.Request('http://127.0.0.1:5014/update_price',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'}); d=json.load(urllib.request.urlopen(req,timeout=60)); print(sorted(d.keys()))"
 ```
 
 For future `/trade_chain`:
 
 ```bash
-python3 -c "import json, urllib.request; payload={'ticker':'SPY','expiry':['YYYY-MM-DD'],'strike_range':0.02}; req=urllib.request.Request('http://127.0.0.1:5001/trade_chain',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'}); d=json.load(urllib.request.urlopen(req,timeout=60)); print(d.keys()); print(len(d.get('contracts',[])))"
+python3 -c "import json, urllib.request; payload={'ticker':'SPY','expiry':['YYYY-MM-DD'],'strike_range':0.02}; req=urllib.request.Request('http://127.0.0.1:5014/trade_chain',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'}); d=json.load(urllib.request.urlopen(req,timeout=60)); print(d.keys()); print(len(d.get('contracts',[])))"
 ```
 
 Use the in-app browser or Playwright/browser-use to visually verify:

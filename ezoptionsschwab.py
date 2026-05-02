@@ -10767,8 +10767,8 @@ def index():
         .trade-chain-head,
         .trade-contract-row {
             display: grid;
-            grid-template-columns: minmax(56px, 0.62fr) minmax(0, 1.35fr) minmax(0, 1fr);
-            gap: 6px;
+            grid-template-columns: minmax(58px, 0.55fr) minmax(0, 1fr);
+            gap: 3px 7px;
             align-items: center;
         }
         .trade-chain-head {
@@ -10793,6 +10793,9 @@ def index():
         .trade-chain-head span:not(:first-child) {
             text-align: right;
         }
+        .trade-chain-head span:nth-child(3) {
+            display: none;
+        }
         .trade-chain-list {
             max-height: 230px;
             overflow-y: auto;
@@ -10805,7 +10808,7 @@ def index():
             color: var(--fg-1);
             font-size: 11px;
             cursor: pointer;
-            padding: 6px;
+            padding: 6px 7px;
             text-align: left;
         }
         .trade-contract-row:hover,
@@ -10816,20 +10819,174 @@ def index():
         .trade-contract-row.put .trade-contract-strike { color: var(--put); }
         .trade-contract-strike {
             font-weight: 800;
+            grid-row: 1 / span 2;
+            align-self: center;
         }
         .trade-contract-quote,
         .trade-contract-liquidity {
             display: flex;
             min-width: 0;
-            justify-content: flex-end;
             gap: 6px;
             color: var(--fg-2);
+        }
+        .trade-contract-quote {
+            justify-content: space-between;
+        }
+        .trade-contract-liquidity {
+            justify-content: flex-start;
+            font-size: 10px;
+            line-height: 1.2;
         }
         .trade-contract-quote strong,
         .trade-contract-liquidity strong {
             color: var(--fg-1);
             font-weight: 700;
         }
+        .trade-contract-helper {
+            margin-bottom: 8px;
+            padding: 7px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            min-width: 0;
+        }
+        .trade-contract-helper.compact {
+            padding: 6px 7px;
+        }
+        .trade-contract-helper:not(.has-compare) .trade-helper-compare {
+            display: none;
+        }
+        .trade-contract-helper-head,
+        .trade-contract-helper-compare {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            min-width: 0;
+        }
+        .trade-contract-helper-head {
+            margin-bottom: 6px;
+        }
+        .trade-contract-helper-title {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            min-width: 0;
+            color: var(--fg-0);
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .trade-contract-helper-title span {
+            color: var(--fg-2);
+            font-size: 9px;
+            font-weight: 800;
+        }
+        .trade-helper-toggle,
+        .trade-position-toggle,
+        .trade-position-select {
+            min-height: 22px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            font-size: 10px;
+            font-weight: 800;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .trade-helper-toggle,
+        .trade-position-toggle {
+            min-width: 24px;
+            padding: 0 6px;
+        }
+        .trade-position-select {
+            padding: 0 8px;
+            color: var(--accent);
+            border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+            background: color-mix(in srgb, var(--accent) 8%, var(--bg-0));
+        }
+        .trade-position-tools {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .trade-contract-helper-expiry,
+        .trade-contract-helper-compare {
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.25;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-contract-helper .contract-helper-grid {
+            gap: 6px;
+        }
+        .trade-contract-helper .contract-helper-side {
+            padding: 6px 7px;
+            border-radius: 6px;
+        }
+        .trade-contract-helper .contract-helper-contract {
+            font-size: 13px;
+        }
+        .trade-contract-helper .contract-helper-meta {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .trade-contract-helper .contract-helper-size {
+            margin-top: 7px;
+            padding-top: 7px;
+        }
+        .trade-contract-helper-compact-line {
+            display: none;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 800;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-contract-helper-compact-line .call { color: var(--call); }
+        .trade-contract-helper-compact-line .put { color: var(--put); }
+        .trade-contract-helper-compact-line strong {
+            color: var(--fg-0);
+            font-weight: 800;
+        }
+        .trade-contract-helper.compact .contract-helper-grid,
+        .trade-contract-helper.compact .contract-helper-note,
+        .trade-contract-helper.compact .trade-contract-helper-compare,
+        .trade-contract-helper.compact .contract-helper-size,
+        .trade-contract-helper.compact .contract-helper-meta,
+        .trade-contract-helper.compact .contract-helper-label {
+            display: none;
+        }
+        .trade-contract-helper.compact .trade-contract-helper-head {
+            margin-bottom: 5px;
+        }
+        .trade-contract-helper.compact .trade-contract-helper-compact-line {
+            display: flex;
+        }
+        .trade-contract-helper-compare {
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--border);
+        }
+        .trade-contract-helper-compare strong {
+            color: var(--fg-0);
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-contract-helper-compare .call { color: var(--call); }
+        .trade-contract-helper-compare .put { color: var(--put); }
         .trade-meta-line,
         .trade-warning-list {
             margin-top: 7px;
@@ -11028,6 +11185,9 @@ def index():
             justify-content: flex-end;
             gap: 4px;
         }
+        .trade-position-collapsed [data-trade-position-list] {
+            display: none;
+        }
         .trade-position-metric {
             display: inline-flex;
             align-items: center;
@@ -11077,17 +11237,54 @@ def index():
             opacity: 0.5;
         }
         .trade-selected-symbol {
+            display: none;
             color: var(--fg-0);
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-            font-size: 12px;
+            font-size: 11px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .trade-selected-top {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+        .trade-selected-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 22px;
+            padding: 0 8px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            color: var(--fg-1);
+            background: var(--bg-0);
+            font-size: 10px;
+            font-weight: 800;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-selected-pill.call {
+            color: var(--call);
+            border-color: color-mix(in srgb, var(--call) 42%, var(--border));
+            background: color-mix(in srgb, var(--call) 9%, var(--bg-0));
+        }
+        .trade-selected-pill.put {
+            color: var(--put);
+            border-color: color-mix(in srgb, var(--put) 42%, var(--border));
+            background: color-mix(in srgb, var(--put) 9%, var(--bg-0));
+        }
+        .trade-selected-pill.dte {
+            color: var(--fg-0);
+            border-color: color-mix(in srgb, var(--info) 38%, var(--border));
+            background: color-mix(in srgb, var(--info) 8%, var(--bg-0));
+        }
         .trade-selected-summary {
             display: grid;
-            grid-template-columns: 1fr;
-            gap: 3px;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 5px;
             margin-top: 6px;
         }
         .trade-selected-summary .trade-field-value {
@@ -11102,9 +11299,25 @@ def index():
         }
         .trade-selected-summary .trade-field {
             display: grid;
-            grid-template-columns: minmax(82px, auto) minmax(0, 1fr);
+            grid-template-columns: minmax(0, 1fr);
             align-items: baseline;
-            gap: 8px;
+            gap: 2px;
+            min-width: 0;
+            padding: 5px 7px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+        }
+        .trade-selected-summary .trade-field-label {
+            font-size: 9px;
+            line-height: 1.15;
+        }
+        .trade-selected-summary .trade-field-value {
+            justify-content: flex-start;
+            color: var(--fg-0);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .trade-ticket-grid {
             display: grid;
@@ -15925,7 +16138,10 @@ def index():
                     <section class="trade-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Position</div>
-                            <div class="trade-panel-note" data-trade-position-note>No account</div>
+                            <div class="trade-position-tools">
+                                <div class="trade-panel-note" data-trade-position-note>No account</div>
+                                <button type="button" class="trade-position-toggle" data-trade-position-toggle title="Collapse positions" aria-label="Collapse positions" aria-expanded="true">⌃</button>
+                            </div>
                         </div>
                         <div data-trade-position-list>
                             <div class="trade-empty">Select an account to show relevant positions.</div>
@@ -15935,6 +16151,44 @@ def index():
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Contract Picker</div>
                             <div class="trade-panel-note" data-trade-chain-meta>Cached chain</div>
+                        </div>
+                        <div class="trade-contract-helper">
+                            <div class="trade-contract-helper-head">
+                                <div class="trade-contract-helper-title">Contract Helper <span data-met="contract_primary_dte">0DTE</span></div>
+                                <div class="trade-position-tools">
+                                    <div class="trade-contract-helper-expiry" data-met="contract_expiry">Near expiry</div>
+                                    <button type="button" class="trade-helper-toggle" data-trade-helper-toggle title="Compact contract helper" aria-label="Compact contract helper" aria-expanded="true">⌃</button>
+                                </div>
+                            </div>
+                            <div class="trade-contract-helper-compact-line">
+                                <span data-met="contract_primary_dte">0DTE</span>
+                                <span class="call" data-met="contract_call">—</span>
+                                <span>/</span>
+                                <span class="put" data-met="contract_put">—</span>
+                                <span>Size</span>
+                                <strong data-met="contract_size">—</strong>
+                            </div>
+                            <div class="contract-helper-grid">
+                                <div class="contract-helper-side call">
+                                    <div class="contract-helper-label">Call candidate</div>
+                                    <div class="contract-helper-contract" data-met="contract_call">—</div>
+                                    <div class="contract-helper-meta" data-met="contract_call_meta">—</div>
+                                </div>
+                                <div class="contract-helper-side put">
+                                    <div class="contract-helper-label">Put candidate</div>
+                                    <div class="contract-helper-contract" data-met="contract_put">—</div>
+                                    <div class="contract-helper-meta" data-met="contract_put_meta">—</div>
+                                </div>
+                            </div>
+                            <div class="trade-contract-helper-compare trade-helper-compare">
+                                <span>1DTE</span>
+                                <strong><span class="call" data-met="contract_1dte_call">—</span> / <span class="put" data-met="contract_1dte_put">—</span></strong>
+                            </div>
+                            <div class="contract-helper-size">
+                                <span data-met="contract_size_label">Size guide</span>
+                                <strong data-met="contract_size">—</strong>
+                            </div>
+                            <div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>
                         </div>
                         <div class="trade-segment" aria-label="Option type">
                             <button type="button" class="active call" data-trade-type="CALL">Calls</button>
@@ -15961,7 +16215,11 @@ def index():
                             <div class="trade-panel-title">Selected Contract</div>
                             <div class="trade-panel-note" data-trade-selected-note>No selection</div>
                         </div>
-                        <div class="trade-selected-symbol" data-trade-selected-symbol>—</div>
+                        <div class="trade-selected-top">
+                            <div class="trade-selected-symbol" data-trade-selected-symbol>—</div>
+                            <div class="trade-selected-pill" data-trade-selected-pill>—</div>
+                            <div class="trade-selected-pill dte" data-trade-selected-dte>—</div>
+                        </div>
                         <div class="trade-selected-summary">
                             <div class="trade-field"><div class="trade-field-label">Bid / Mid / Ask</div><div class="trade-field-value" data-trade-selected-bma>—</div></div>
                             <div class="trade-field"><div class="trade-field-label">Last / Mark</div><div class="trade-field-value" data-trade-selected-last>—</div></div>
@@ -25006,65 +25264,6 @@ def index():
             tpoToggle.setAttribute('aria-pressed', 'false');
             addToGroup(profilesGroup, tpoToggle);
             syncTVProfileToolbarButtons();
-            const helperGroup = document.createElement('div');
-            helperGroup.className = 'tv-toolbar-group tv-toolbar-helper';
-            helperGroup.dataset.group = 'contract-helper';
-            helperGroup.innerHTML =
-                '<button type="button" class="tv-helper-trigger" title="Contract helper details" aria-label="Open contract helper details" aria-expanded="false" aria-controls="tv-helper-popover">' +
-                    '<span class="tv-helper-label">Helper</span>' +
-                    '<span class="tv-helper-expiry" data-met="contract_primary_dte">0DTE</span>' +
-                    '<span class="tv-helper-contract call" data-met="contract_call">—</span>' +
-                    '<span class="tv-helper-moneyness" data-met="contract_call_rank"></span>' +
-                    '<span class="tv-helper-sep">/</span>' +
-                    '<span class="tv-helper-contract put" data-met="contract_put">—</span>' +
-                    '<span class="tv-helper-moneyness" data-met="contract_put_rank"></span>' +
-                    '<span class="tv-helper-sep size">Size</span>' +
-                    '<span class="tv-helper-size" data-met="contract_size">—</span>' +
-                    '<span class="tv-helper-sep tv-helper-compare">|</span>' +
-                    '<span class="tv-helper-expiry tv-helper-compare">1DTE</span>' +
-                    '<span class="tv-helper-contract call tv-helper-compare" data-met="contract_1dte_call">—</span>' +
-                    '<span class="tv-helper-moneyness tv-helper-compare" data-met="contract_1dte_call_rank"></span>' +
-                    '<span class="tv-helper-sep tv-helper-compare">/</span>' +
-                    '<span class="tv-helper-contract put tv-helper-compare" data-met="contract_1dte_put">—</span>' +
-                    '<span class="tv-helper-moneyness tv-helper-compare" data-met="contract_1dte_put_rank"></span>' +
-                '</button>' +
-                '<div class="tv-helper-popover" id="tv-helper-popover" role="tooltip">' +
-                    '<div class="rail-card-header-row">' +
-                        '<div class="rail-card-header">Contract Helper</div>' +
-                        '<div class="rail-card-note" data-met="contract_expiry">Near expiry</div>' +
-                    '</div>' +
-                    '<div class="contract-helper-grid">' +
-                        '<div class="contract-helper-side call">' +
-                            '<div class="contract-helper-label">Call candidate</div>' +
-                            '<div class="contract-helper-contract" data-met="contract_call">—</div>' +
-                            '<div class="contract-helper-meta" data-met="contract_call_meta">—</div>' +
-                        '</div>' +
-                        '<div class="contract-helper-side put">' +
-                            '<div class="contract-helper-label">Put candidate</div>' +
-                            '<div class="contract-helper-contract" data-met="contract_put">—</div>' +
-                            '<div class="contract-helper-meta" data-met="contract_put_meta">—</div>' +
-                        '</div>' +
-                    '</div>' +
-                    '<div class="contract-helper-size">' +
-                        '<span data-met="contract_size_label">Size guide</span>' +
-                        '<strong data-met="contract_size">—</strong>' +
-                    '</div>' +
-                    '<div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>' +
-                '</div>';
-            addLeft(helperGroup);
-            const helperTrigger = helperGroup.querySelector('.tv-helper-trigger');
-            const helperPopover = helperGroup.querySelector('.tv-helper-popover');
-            if (helperTrigger && helperPopover) {
-                helperTrigger.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (helperGroup.classList.contains('open')) {
-                        closeTVHelperPopover();
-                    } else {
-                        openTVHelperPopover(helperGroup, helperTrigger, helperPopover);
-                    }
-                });
-            }
             renderContractHelper(getScopedStats());
             bindTVToolbarMenuDismiss();
 
@@ -26272,11 +26471,22 @@ def index():
                 '<div class="trade-rail-shell">' +
                     '<div class="trade-account-context" data-trade-account-context><span data-trade-account-status>Read only</span><span data-trade-account-warnings></span></div>' +
                     '<section class="trade-panel">' +
-                        '<div class="trade-panel-head"><div class="trade-panel-title">Position</div><div class="trade-panel-note" data-trade-position-note>No account</div></div>' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Position</div><div class="trade-position-tools"><div class="trade-panel-note" data-trade-position-note>No account</div><button type="button" class="trade-position-toggle" data-trade-position-toggle title="Collapse positions" aria-label="Collapse positions" aria-expanded="true">⌃</button></div></div>' +
                         '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
                     '</section>' +
                     '<section class="trade-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Contract Picker</div><div class="trade-panel-note" data-trade-chain-meta>Cached chain</div></div>' +
+                        '<div class="trade-contract-helper">' +
+                            '<div class="trade-contract-helper-head"><div class="trade-contract-helper-title">Contract Helper <span data-met="contract_primary_dte">0DTE</span></div><div class="trade-position-tools"><div class="trade-contract-helper-expiry" data-met="contract_expiry">Near expiry</div><button type="button" class="trade-helper-toggle" data-trade-helper-toggle title="Compact contract helper" aria-label="Compact contract helper" aria-expanded="true">⌃</button></div></div>' +
+                            '<div class="trade-contract-helper-compact-line"><span data-met="contract_primary_dte">0DTE</span><span class="call" data-met="contract_call">—</span><span>/</span><span class="put" data-met="contract_put">—</span><span>Size</span><strong data-met="contract_size">—</strong></div>' +
+                            '<div class="contract-helper-grid">' +
+                                '<div class="contract-helper-side call"><div class="contract-helper-label">Call candidate</div><div class="contract-helper-contract" data-met="contract_call">—</div><div class="contract-helper-meta" data-met="contract_call_meta">—</div></div>' +
+                                '<div class="contract-helper-side put"><div class="contract-helper-label">Put candidate</div><div class="contract-helper-contract" data-met="contract_put">—</div><div class="contract-helper-meta" data-met="contract_put_meta">—</div></div>' +
+                            '</div>' +
+                            '<div class="trade-contract-helper-compare trade-helper-compare"><span>1DTE</span><strong><span class="call" data-met="contract_1dte_call">—</span> / <span class="put" data-met="contract_1dte_put">—</span></strong></div>' +
+                            '<div class="contract-helper-size"><span data-met="contract_size_label">Size guide</span><strong data-met="contract_size">—</strong></div>' +
+                            '<div class="contract-helper-note" data-met="contract_note">Scores nearby ATM to 2 OTM contracts.</div>' +
+                        '</div>' +
                         '<div class="trade-segment" aria-label="Option type">' +
                             '<button type="button" class="active call" data-trade-type="CALL">Calls</button>' +
                             '<button type="button" class="put" data-trade-type="PUT">Puts</button>' +
@@ -26293,7 +26503,7 @@ def index():
                     '</section>' +
                     '<section class="trade-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Selected Contract</div><div class="trade-panel-note" data-trade-selected-note>No selection</div></div>' +
-                        '<div class="trade-selected-symbol" data-trade-selected-symbol>—</div>' +
+                        '<div class="trade-selected-top"><div class="trade-selected-symbol" data-trade-selected-symbol>—</div><div class="trade-selected-pill" data-trade-selected-pill>—</div><div class="trade-selected-pill dte" data-trade-selected-dte>—</div></div>' +
                         '<div class="trade-selected-summary">' +
                             '<div class="trade-field"><div class="trade-field-label">Bid / Mid / Ask</div><div class="trade-field-value" data-trade-selected-bma>—</div></div>' +
                             '<div class="trade-field"><div class="trade-field-label">Last / Mark</div><div class="trade-field-value" data-trade-selected-last>—</div></div>' +
@@ -26399,6 +26609,7 @@ def index():
                 restoreTradeBracketDefault();
             }
             wireTradeRailPickerControls(rail);
+            try { renderContractHelper(getScopedStats()); } catch (e) {}
             renderTradeRail();
             applyTradeRailCollapse(isTradeRailCollapsed());
             return rail;
@@ -26882,6 +27093,8 @@ def index():
         const TRADE_RAIL_WIDTH_KEY = 'gex.tradeRailWidthPx';
         const TRADE_BRACKET_DEFAULT_KEY = 'gex.tradeBracketDefault';
         const TRADE_BRACKET_CUSTOM_KEY = 'gex.tradeBracketTemplates';
+        const TRADE_POSITION_COLLAPSE_KEY = 'gex.tradePositionCollapsed';
+        const TRADE_HELPER_COMPACT_KEY = 'gex.tradeHelperCompact';
         const TRADE_RAIL_DEFAULT_WIDTH = 400;
         const TRADE_BUILTIN_BRACKET_TEMPLATES = {
             single: { label: 'Single', rows: 0, targetOffset: 1, stopOffset: 1 },
@@ -26939,7 +27152,18 @@ def index():
             journalEvents: [],
             journalLoading: false,
             journalError: '',
+            positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
+            helperCompact: getTradeStoredBool(TRADE_HELPER_COMPACT_KEY, false),
         };
+
+        function getTradeStoredBool(key, fallback = false) {
+            try {
+                const saved = localStorage.getItem(key);
+                if (saved === '1') return true;
+                if (saved === '0') return false;
+            } catch (e) {}
+            return !!fallback;
+        }
 
         function fmtTradePrice(value) {
             const n = Number(value);
@@ -26952,6 +27176,10 @@ def index():
         function fmtTradePct(value) {
             const n = Number(value);
             return Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—';
+        }
+        function fmtTradeDte(value) {
+            const n = Number(value);
+            return Number.isFinite(n) ? Math.max(0, Math.round(n)) + 'DTE' : 'DTE —';
         }
         function fmtTradeMoney(value) {
             const n = Number(value);
@@ -27041,6 +27269,28 @@ def index():
             const payload = tradeRailState.payload || {};
             const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
             return contracts.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || null;
+        }
+        function selectTradeContractSymbol(symbol, message = 'Contract changed. Preview again.') {
+            symbol = String(symbol || '').trim();
+            if (!symbol) return false;
+            const payload = tradeRailState.payload || {};
+            const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
+            const contract = contracts.find(row => row.contract_symbol === symbol);
+            if (!contract) {
+                invalidateTradePreview('Position contract is not in the cached picker. Refresh the chain or widen the range.');
+                return false;
+            }
+            tradeRailState.optionType = contract.option_type === 'PUT' ? 'PUT' : 'CALL';
+            tradeRailState.expiry = contract.expiry || tradeRailState.expiry;
+            tradeRailState.selectedSymbol = contract.contract_symbol;
+            tradeRailState.limitPrice = '';
+            tradeRailState.accountDetails = null;
+            tradeRailState.accountRequestKey = '';
+            tradeRailState.orders = [];
+            tradeRailState.ordersRequestKey = '';
+            invalidateTradePreview(message);
+            renderTradeRail();
+            return true;
         }
         function invalidateTradePreview(message = '') {
             tradeRailState.preview = null;
@@ -27377,6 +27627,17 @@ def index():
             const balances = (details && details.balances) || {};
             return balances.optionBuyingPower ?? balances.buyingPower ?? balances.availableFunds ?? balances.cashBalance ?? null;
         }
+        function renderTradeHelperCompact() {
+            document.querySelectorAll('.trade-contract-helper').forEach(helper => {
+                helper.classList.toggle('compact', !!tradeRailState.helperCompact);
+            });
+            document.querySelectorAll('[data-trade-helper-toggle]').forEach(toggle => {
+                toggle.textContent = tradeRailState.helperCompact ? '⌄' : '⌃';
+                toggle.title = tradeRailState.helperCompact ? 'Expand contract helper' : 'Compact contract helper';
+                toggle.setAttribute('aria-label', tradeRailState.helperCompact ? 'Expand contract helper' : 'Compact contract helper');
+                toggle.setAttribute('aria-expanded', tradeRailState.helperCompact ? 'false' : 'true');
+            });
+        }
         function renderTradeAccounts() {
             const select = document.querySelector('[data-trade-account-select]');
             const status = document.querySelector('[data-trade-account-status]');
@@ -27402,7 +27663,20 @@ def index():
         function renderTradePositions() {
             const list = document.querySelector('[data-trade-position-list]');
             const note = document.querySelector('[data-trade-position-note]');
+            const toggle = document.querySelector('[data-trade-position-toggle]');
             if (!list) return;
+            const panel = list.closest('.trade-panel');
+            if (panel) panel.classList.toggle('trade-position-collapsed', !!tradeRailState.positionsCollapsed);
+            if (toggle) {
+                toggle.textContent = tradeRailState.positionsCollapsed ? '⌄' : '⌃';
+                toggle.title = tradeRailState.positionsCollapsed ? 'Expand positions' : 'Collapse positions';
+                toggle.setAttribute('aria-label', tradeRailState.positionsCollapsed ? 'Expand positions' : 'Collapse positions');
+                toggle.setAttribute('aria-expanded', tradeRailState.positionsCollapsed ? 'false' : 'true');
+            }
+            if (tradeRailState.positionsCollapsed) {
+                if (note) note.textContent = 'Hidden';
+                return;
+            }
             if (!tradeRailState.accountHash) {
                 if (note) note.textContent = 'No account';
                 list.innerHTML = '<div class="trade-empty">Select an account to show relevant positions.</div>';
@@ -27432,6 +27706,9 @@ def index():
                 const matchLabel = pos.selected_contract_match ? ' · Selected' : '';
                 const sideClass = display.sideClass ? ' ' + display.sideClass : '';
                 const symbolTitle = display.symbol ? ' title="' + _escapeHtml(display.symbol) + '"' : '';
+                const selectButton = display.symbol
+                    ? '<button type="button" class="trade-position-select" data-trade-position-symbol="' + _escapeHtml(display.symbol) + '">Use</button>'
+                    : '';
                 return '<div class="trade-position-row' + matchClass + '"' + symbolTitle + '>' +
                     '<div class="trade-position-main">' +
                         '<div class="trade-position-id">' +
@@ -27442,10 +27719,20 @@ def index():
                             '<div class="trade-position-metric"><span>Qty</span><strong>' + _escapeHtml(qtyText) + '</strong></div>' +
                             '<div class="trade-position-metric"><span>Mkt</span><strong>' + _escapeHtml(mv) + '</strong></div>' +
                             '<div class="trade-position-metric pnl' + dayClass + '"><span>Day</span><strong>' + _escapeHtml(day) + '</strong></div>' +
+                            selectButton +
                         '</div>' +
                     '</div>' +
                 '</div>';
             }).join('');
+            list.querySelectorAll('[data-trade-position-symbol]').forEach(btn => {
+                if (btn.__tradePositionSelectBound) return;
+                btn.__tradePositionSelectBound = true;
+                btn.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    selectTradeContractSymbol(btn.dataset.tradePositionSymbol || '', 'Position contract selected. Preview again.');
+                });
+            });
         }
         function renderTradeOrders() {
             preserveTradeRailScroll(() => {
@@ -27735,9 +28022,16 @@ def index():
         }
         function renderTradeSelected(contract) {
             const warningEl = document.querySelector('[data-trade-selected-warnings]');
+            const pillEl = document.querySelector('[data-trade-selected-pill]');
+            const dteEl = document.querySelector('[data-trade-selected-dte]');
+            const topEl = document.querySelector('.trade-selected-top');
             if (!contract) {
                 setTradeField('selected-symbol', '—');
                 setTradeField('selected-note', 'No selection');
+                setTradeField('selected-pill', '—');
+                setTradeField('selected-dte', '—');
+                if (pillEl) pillEl.classList.remove('call', 'put');
+                if (topEl) topEl.title = '';
                 setTradeField('selected-bma', '—');
                 setTradeField('selected-last', '—');
                 setTradeField('selected-spread', '—');
@@ -27748,8 +28042,17 @@ def index():
                 renderTradeTicket();
                 return;
             }
+            const selectedSide = contract.option_type === 'PUT' ? 'P' : 'C';
             setTradeField('selected-symbol', contract.contract_symbol || '—');
-            setTradeField('selected-note', (contract.expiry || '—') + ' ' + (contract.option_type || '') + ' ' + fmtTradePrice(contract.strike));
+            setTradeField('selected-note', 'Selected');
+            setTradeField('selected-pill', fmtTradePrice(contract.strike) + selectedSide);
+            setTradeField('selected-dte', fmtTradeDte(contract.dte));
+            if (pillEl) {
+                pillEl.classList.toggle('call', contract.option_type !== 'PUT');
+                pillEl.classList.toggle('put', contract.option_type === 'PUT');
+            }
+            if (dteEl) dteEl.title = contract.expiry || '';
+            if (topEl) topEl.title = contract.contract_symbol || '';
             setTradeField('selected-bma', fmtTradePrice(contract.bid) + ' / ' + fmtTradePrice(contract.mid) + ' / ' + fmtTradePrice(contract.ask));
             setTradeField('selected-last', fmtTradePrice(contract.last) + ' / ' + fmtTradePrice(contract.mark));
             setTradeField('selected-spread', fmtTradePrice(contract.spread) + (contract.spread_pct == null ? '' : ' (' + Number(contract.spread_pct).toFixed(1) + '%)'));
@@ -27770,6 +28073,7 @@ def index():
             const rail = document.getElementById('trade-rail');
             if (!rail) return;
             preserveTradeRailScroll(() => {
+                renderTradeHelperCompact();
                 renderTradeAccounts();
                 renderTradePositions();
                 renderTradeOrders();
@@ -27833,14 +28137,7 @@ def index():
                     if (btn.__tradeSymbolBound) return;
                     btn.__tradeSymbolBound = true;
                     btn.addEventListener('click', () => {
-                        tradeRailState.selectedSymbol = btn.dataset.tradeSymbol || '';
-                        tradeRailState.limitPrice = '';
-                        tradeRailState.accountDetails = null;
-                        tradeRailState.accountRequestKey = '';
-                        tradeRailState.orders = [];
-                        tradeRailState.ordersRequestKey = '';
-                        invalidateTradePreview('Contract changed. Preview again.');
-                        renderTradeRail();
+                        selectTradeContractSymbol(btn.dataset.tradeSymbol || '', 'Contract changed. Preview again.');
                     });
                 });
             });
@@ -28041,6 +28338,22 @@ def index():
             root.__tradePickerWired = true;
             const journalRefresh = root.querySelector('[data-trade-journal-refresh]');
             if (journalRefresh) journalRefresh.addEventListener('click', () => requestTradeJournal({ force: true }));
+            const positionToggle = root.querySelector('[data-trade-position-toggle]');
+            if (positionToggle) {
+                positionToggle.addEventListener('click', () => {
+                    tradeRailState.positionsCollapsed = !tradeRailState.positionsCollapsed;
+                    try { localStorage.setItem(TRADE_POSITION_COLLAPSE_KEY, tradeRailState.positionsCollapsed ? '1' : '0'); } catch (e) {}
+                    renderTradePositions();
+                });
+            }
+            const helperToggle = root.querySelector('[data-trade-helper-toggle]');
+            if (helperToggle) {
+                helperToggle.addEventListener('click', () => {
+                    tradeRailState.helperCompact = !tradeRailState.helperCompact;
+                    try { localStorage.setItem(TRADE_HELPER_COMPACT_KEY, tradeRailState.helperCompact ? '1' : '0'); } catch (e) {}
+                    renderTradeHelperCompact();
+                });
+            }
             const ordersRefresh = root.querySelector('[data-trade-orders-refresh]');
             if (ordersRefresh) {
                 ordersRefresh.addEventListener('click', () => {
@@ -30931,7 +31244,7 @@ def index():
             };
             const setComparisonTone = helperRow => {
                 const available = !!(helperRow && helperRow.status === 'ready');
-                document.querySelectorAll('.tv-toolbar-helper').forEach(el => {
+                document.querySelectorAll('.trade-contract-helper').forEach(el => {
                     el.classList.toggle('has-compare', available);
                 });
             };
