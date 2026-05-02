@@ -10759,6 +10759,7 @@ def index():
         .trade-chain-table {
             display: flex;
             flex-direction: column;
+            min-width: 0;
             border: 1px solid var(--border);
             border-radius: 6px;
             overflow: hidden;
@@ -10767,9 +10768,10 @@ def index():
         .trade-chain-head,
         .trade-contract-row {
             display: grid;
-            grid-template-columns: minmax(58px, 0.55fr) minmax(0, 1fr);
-            gap: 3px 7px;
+            grid-template-columns: minmax(48px, 0.9fr) repeat(3, minmax(30px, 0.48fr)) minmax(34px, 0.52fr) minmax(28px, 0.42fr) repeat(2, minmax(36px, 0.56fr));
+            gap: 4px;
             align-items: center;
+            min-width: 0;
         }
         .trade-chain-head {
             min-height: 24px;
@@ -10779,8 +10781,7 @@ def index():
             text-transform: uppercase;
             letter-spacing: 0.04em;
         }
-        .trade-chain-head span,
-        .trade-contract-row span {
+        .trade-chain-head span {
             min-width: 0;
             overflow: hidden;
             white-space: nowrap;
@@ -10788,13 +10789,16 @@ def index():
             font-variant-numeric: tabular-nums;
         }
         .trade-chain-head span {
-            padding: 5px 6px;
+            padding: 5px 0;
         }
         .trade-chain-head span:not(:first-child) {
             text-align: right;
         }
-        .trade-chain-head span:nth-child(3) {
-            display: none;
+        .trade-chain-head span:first-child {
+            padding-left: 7px;
+        }
+        .trade-chain-head span:last-child {
+            padding-right: 7px;
         }
         .trade-chain-list {
             max-height: 230px;
@@ -10808,39 +10812,49 @@ def index():
             color: var(--fg-1);
             font-size: 11px;
             cursor: pointer;
-            padding: 6px 7px;
+            padding: 7px;
             text-align: left;
+            font-variant-numeric: tabular-nums;
         }
         .trade-contract-row:hover,
         .trade-contract-row.active {
             background: color-mix(in srgb, var(--accent) 10%, transparent);
         }
+        .trade-contract-row.active {
+            box-shadow: inset 2px 0 0 var(--accent);
+        }
+        .trade-contract-id,
+        .trade-contract-cell {
+            min-width: 0;
+            overflow: hidden;
+        }
+        .trade-contract-id {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
         .trade-contract-row.call .trade-contract-strike { color: var(--call); }
         .trade-contract-row.put .trade-contract-strike { color: var(--put); }
         .trade-contract-strike {
             font-weight: 800;
-            grid-row: 1 / span 2;
-            align-self: center;
-        }
-        .trade-contract-quote,
-        .trade-contract-liquidity {
-            display: flex;
             min-width: 0;
-            gap: 6px;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+        .trade-contract-dte {
             color: var(--fg-2);
+            font-size: 9px;
+            line-height: 1.1;
+            text-transform: uppercase;
         }
-        .trade-contract-quote {
-            justify-content: space-between;
-        }
-        .trade-contract-liquidity {
-            justify-content: flex-start;
+        .trade-contract-cell {
+            color: var(--fg-1);
             font-size: 10px;
             line-height: 1.2;
-        }
-        .trade-contract-quote strong,
-        .trade-contract-liquidity strong {
-            color: var(--fg-1);
-            font-weight: 700;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            text-align: right;
         }
         .trade-contract-helper {
             margin-bottom: 8px;
@@ -16203,7 +16217,7 @@ def index():
                             </label>
                         </div>
                         <div class="trade-chain-table">
-                            <div class="trade-chain-head"><span>Contract</span><span>Quote</span><span>Liquidity</span></div>
+                            <div class="trade-chain-head"><span>Contract</span><span title="Bid">B</span><span title="Mid">M</span><span title="Ask">A</span><span>IV</span><span>Δ</span><span>Vol</span><span>OI</span></div>
                             <div class="trade-chain-list" data-trade-chain-list>
                                 <div class="trade-empty">Run a chain update to load cached contracts.</div>
                             </div>
@@ -26496,7 +26510,7 @@ def index():
                             '<label>Range<input id="trade-strike-range" data-trade-strike-range type="number" min="0.5" max="20" step="0.5" value="2"></label>' +
                         '</div>' +
                         '<div class="trade-chain-table">' +
-                            '<div class="trade-chain-head"><span>Contract</span><span>Quote</span><span>Liquidity</span></div>' +
+                            '<div class="trade-chain-head"><span>Contract</span><span title="Bid">B</span><span title="Mid">M</span><span title="Ask">A</span><span>IV</span><span>Δ</span><span>Vol</span><span>OI</span></div>' +
                             '<div class="trade-chain-list" data-trade-chain-list><div class="trade-empty">Run a chain update to load cached contracts.</div></div>' +
                         '</div>' +
                         '<div class="trade-warning-list" data-trade-chain-warnings></div>' +
@@ -27173,9 +27187,23 @@ def index():
             const n = Number(value);
             return Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
         }
+        function fmtTradeCompactInt(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '—';
+            const abs = Math.abs(n);
+            if (abs >= 1000000) return (n / 1000000).toFixed(abs >= 10000000 ? 0 : 1).replace(/\.0$/, '') + 'M';
+            if (abs >= 1000) return (n / 1000).toFixed(abs >= 100000 ? 0 : 1).replace(/\.0$/, '') + 'K';
+            return Math.round(n).toLocaleString();
+        }
         function fmtTradePct(value) {
             const n = Number(value);
             return Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—';
+        }
+        function fmtTradeDelta(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '—';
+            const sign = n > 0 ? '+' : '';
+            return sign + n.toFixed(2).replace(/^(-?)0\./, '$1.');
         }
         function fmtTradeDte(value) {
             const n = Number(value);
@@ -28057,7 +28085,7 @@ def index():
             setTradeField('selected-last', fmtTradePrice(contract.last) + ' / ' + fmtTradePrice(contract.mark));
             setTradeField('selected-spread', fmtTradePrice(contract.spread) + (contract.spread_pct == null ? '' : ' (' + Number(contract.spread_pct).toFixed(1) + '%)'));
             setTradeField('selected-activity', fmtTradeInt(contract.volume) + ' / ' + fmtTradeInt(contract.open_interest));
-            setTradeField('selected-greeks', fmtTradePct(contract.iv) + ' / ' + fmtTradePrice(contract.delta));
+            setTradeField('selected-greeks', fmtTradePct(contract.iv) + ' / ' + fmtTradeDelta(contract.delta));
             setTradeField('selected-time', fmtTradeTimestamp(contract.quote_time) + ' / ' + fmtTradeTimestamp(contract.trade_time));
             const warnings = [];
             if ((contract.warnings || []).includes('stale_quote')) warnings.push('Stale quote');
@@ -28122,10 +28150,26 @@ def index():
                         const typeCls = row.option_type === 'PUT' ? 'put' : 'call';
                         const side = row.option_type === 'PUT' ? 'P' : 'C';
                         const mid = row.mid == null ? row.mark : row.mid;
-                        return '<button type="button" class="trade-contract-row ' + typeCls + (row.contract_symbol === tradeRailState.selectedSymbol ? ' active' : '') + '" data-trade-symbol="' + _escapeHtml(row.contract_symbol) + '">' +
-                            '<span class="trade-contract-strike">' + _escapeHtml(fmtTradePrice(row.strike) + side) + '</span>' +
-                            '<span class="trade-contract-quote"><span>B <strong>' + _escapeHtml(fmtTradePrice(row.bid)) + '</strong></span><span>M <strong>' + _escapeHtml(fmtTradePrice(mid)) + '</strong></span><span>A <strong>' + _escapeHtml(fmtTradePrice(row.ask)) + '</strong></span></span>' +
-                            '<span class="trade-contract-liquidity"><span>Vol <strong>' + _escapeHtml(fmtTradeInt(row.volume)) + '</strong></span><span>OI <strong>' + _escapeHtml(fmtTradeInt(row.open_interest)) + '</strong></span></span>' +
+                        const title = [
+                            row.contract_symbol || '',
+                            row.expiry || '',
+                            fmtTradeDte(row.dte),
+                            'B ' + fmtTradePrice(row.bid) + ' / M ' + fmtTradePrice(mid) + ' / A ' + fmtTradePrice(row.ask),
+                            'IV ' + fmtTradePct(row.iv) + ' / Δ ' + fmtTradeDelta(row.delta),
+                            'Vol ' + fmtTradeInt(row.volume) + ' / OI ' + fmtTradeInt(row.open_interest),
+                        ].filter(Boolean).join(' · ');
+                        return '<button type="button" class="trade-contract-row ' + typeCls + (row.contract_symbol === tradeRailState.selectedSymbol ? ' active' : '') + '" data-trade-symbol="' + _escapeHtml(row.contract_symbol) + '" title="' + _escapeHtml(title) + '">' +
+                            '<span class="trade-contract-id">' +
+                                '<span class="trade-contract-strike">' + _escapeHtml(fmtTradePrice(row.strike) + side) + '</span>' +
+                                '<span class="trade-contract-dte">' + _escapeHtml(fmtTradeDte(row.dte)) + '</span>' +
+                            '</span>' +
+                            '<span class="trade-contract-cell">' + _escapeHtml(fmtTradePrice(row.bid)) + '</span>' +
+                            '<span class="trade-contract-cell">' + _escapeHtml(fmtTradePrice(mid)) + '</span>' +
+                            '<span class="trade-contract-cell">' + _escapeHtml(fmtTradePrice(row.ask)) + '</span>' +
+                            '<span class="trade-contract-cell">' + _escapeHtml(fmtTradePct(row.iv)) + '</span>' +
+                            '<span class="trade-contract-cell">' + _escapeHtml(fmtTradeDelta(row.delta)) + '</span>' +
+                            '<span class="trade-contract-cell">' + _escapeHtml(fmtTradeCompactInt(row.volume)) + '</span>' +
+                            '<span class="trade-contract-cell">' + _escapeHtml(fmtTradeCompactInt(row.open_interest)) + '</span>' +
                         '</button>';
                     }).join('');
                 }

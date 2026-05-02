@@ -1,6 +1,6 @@
 # GEX Dashboard - Options Trading Rail UI Polish Plan
 
-**Status:** Draft plan, ready for implementation  
+**Status:** Stage 3 contract picker column polish complete
 **Created:** 2026-05-01  
 **Branch at draft time:** `codex/options-trading-rail-plan`  
 **Primary file:** `ezoptionsschwab.py`  
@@ -909,3 +909,71 @@ Important anchors: buildTradeRailHtml, renderTradeAccounts, renderTradePositions
 Any static HTML change under #trade-rail must also be mirrored in buildTradeRailHtml(), or chart DOM rebuilds can drop it.
 ```
 
+---
+
+## 14. 2026-05-02 Contract Picker Column Polish Update
+
+Accomplished:
+
+- Reworked the dedicated fourth trading rail Contract Picker rows into a tighter rail table.
+- Replaced the broad `Market / Greeks / Liquidity` header with explicit columns: `Contract`, `B`, `M`, `A`, `IV`, `Δ`, `Vol`, and `OI`.
+- Removed repeated `B`, `M`, `A`, `IV`, `Δ`, `Vol`, and `OI` labels from every contract row so the rows scan cleaner and fit better in the narrow rail.
+- Kept the contract identity visible as strike-side plus DTE, with call/put color styling still using existing tokens.
+- Added compact row formatting for large `Vol` and `OI` values while keeping full values in the row hover title.
+- Preserved exact cached Schwab/OCC `contract_symbol` values in `data-trade-symbol` and in the selected-contract flow.
+- Preserved row-click behavior as selection-only. Clicking a row still invalidates preview with `Contract changed. Preview again.`
+- Mirrored the header markup in both static `#trade-rail` HTML and `buildTradeRailHtml()` so chart DOM rebuilds keep the picker intact.
+
+Tricky parts:
+
+- The rail is narrow, so showing eight table columns required compact integer formatting for row-level volume/open-interest values.
+- The table is built from `<button>` rows, not a native `<table>`, because each contract row is selectable. CSS grid is used to preserve table-like column alignment while keeping the existing click/active behavior.
+- The visible row can be compact, but the exact Schwab symbol and full values still need to be accessible for verification. The row title now carries the exact symbol plus full market/Greek/liquidity context.
+- Static/rebuild parity matters here: the header exists in the initial Flask-rendered rail and in the JS rebuild path.
+
+Still left to do:
+
+- Re-check extreme rail resize widths after more live data shapes, especially very high IV, million-plus volume, and wider OI values.
+- Consider whether selected-row active state should also highlight the `Contract` cell more strongly without adding visual noise.
+- Continue broader order rail polish only if requested: account compacting, selected-contract density, order ticket density, and orders/journal polish.
+- Deferred/non-goals remain unchanged: no Schwab bracket/OCO child orders, no SPX-specific validation, no multi-leg spreads, no chart/alert/flow automated trading, and no analytical formula changes.
+
+### Prompt For Next Session
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard on branch codex/options-trading-rail-plan.
+
+Read AGENTS.md first, then read docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md and docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md.
+
+Before editing, run:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Continue only the dedicated fourth order-entry trading rail:
+- #trade-rail-header
+- #trade-rail
+- .trade-rail-shell
+- Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders / Journal panels
+
+Current latest state:
+- Trading rail has preview-only and guarded live single-leg DAY LIMIT option orders.
+- Contract Helper lives at the top of Contract Picker, with compact/expanded localStorage state.
+- Selected Contract shows one visible identity path: call/put strike pill plus DTE pill.
+- Position panel has hide/show state and row-level Use pills that select exact cached contracts only.
+- Bracket Plan is planning-only and must not alter Schwab preview/place payloads.
+- Contract Picker rows now use explicit columns: Contract, B, M, A, IV, Δ, Vol, OI. Row clicks are selection-only and exact cached Schwab/OCC contract symbols remain in data-trade-symbol and hover title.
+- Use http://127.0.0.1:5014/ for browser smoke tests. Do not take automatic screenshots or screen recordings unless the user explicitly asks.
+
+Potential next scope:
+- Re-check the Contract Picker table at very narrow rail widths and with larger live volume/OI values.
+- Continue visual polish of Selected Contract, Order Ticket, Orders, or Journal panels if requested.
+- Keep preview invalidation on selection changes and preserve exact Schwab order payload behavior.
+
+Do not implement without explicit approval:
+- Live Schwab bracket/OCO child orders.
+- SPX-specific validation.
+- Multi-leg spreads.
+- Automated trading from chart clicks, alerts, or flow.
+- Automatic screenshots/screen recordings.
+```
