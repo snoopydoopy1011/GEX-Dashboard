@@ -1,9 +1,11 @@
-﻿from flask import Flask, render_template_string, jsonify, request, Response, stream_with_context
+﻿from flask import Flask, render_template_string, jsonify, request, Response, stream_with_context, send_file
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
 from bisect import bisect_left
 from datetime import datetime, timedelta
+import base64
+import binascii
 import math
 import time
 import collections
@@ -45,6 +47,8 @@ app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'options_data.db')
+TRADE_JOURNAL_MEDIA_DIR = os.path.join(BASE_DIR, 'Screenshots', 'trade_journal')
+TRADE_JOURNAL_MEDIA_MAX_BYTES = 8 * 1024 * 1024
 MAX_RETAINED_SESSION_DATES = 2
 _retention_lock = threading.Lock()
 
@@ -177,6 +181,24 @@ def init_db():
                     event_json TEXT NOT NULL
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trade_event_media (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    source TEXT,
+                    mime_type TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    relative_path TEXT,
+                    bytes INTEGER,
+                    width INTEGER,
+                    height INTEGER,
+                    metadata_json TEXT,
+                    FOREIGN KEY(event_id) REFERENCES trade_events(id) ON DELETE CASCADE
+                )
+            ''')
             for column_sql in (
                 'ALTER TABLE trade_events ADD COLUMN journal_status TEXT',
                 'ALTER TABLE trade_events ADD COLUMN journal_tags TEXT',
@@ -193,6 +215,10 @@ def init_db():
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_trade_events_created_at
                 ON trade_events (created_at DESC, id DESC)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_trade_event_media_event_id
+                ON trade_event_media (event_id, created_at DESC, id DESC)
             ''')
             conn.commit()
 
@@ -5097,6 +5123,208 @@ def _write_trade_event(event_type, payload):
             return cursor.lastrowid
 
 
+def _trade_media_storage_path():
+    return os.path.abspath(TRADE_JOURNAL_MEDIA_DIR)
+
+
+def _ensure_trade_media_dir():
+    path = _trade_media_storage_path()
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _is_safe_trade_media_path(path):
+    if not path:
+        return False
+    try:
+        storage_root = os.path.realpath(_trade_media_storage_path())
+        candidate = os.path.realpath(path)
+        return os.path.commonpath([storage_root, candidate]) == storage_root
+    except Exception:
+        return False
+
+
+def _trade_media_from_row(row):
+    metadata = {}
+    try:
+        metadata = json.loads(row[12] or '{}')
+    except Exception:
+        metadata = {}
+    file_path = row[7] or ''
+    return {
+        'id': row[0],
+        'event_id': row[1],
+        'created_at': row[2],
+        'media_type': row[3],
+        'source': row[4] or '',
+        'mime_type': row[5],
+        'file_name': row[6],
+        'file_path': file_path,
+        'relative_path': row[8] or '',
+        'bytes': row[9],
+        'width': row[10],
+        'height': row[11],
+        'metadata': metadata,
+        'url': f'/trade/journal/media/{row[0]}',
+        'exists': bool(file_path and os.path.exists(file_path)),
+    }
+
+
+def _trade_media_select_sql(where_clause=''):
+    return '''
+        SELECT id, event_id, created_at, media_type, source, mime_type,
+               file_name, file_path, relative_path, bytes, width, height,
+               metadata_json
+        FROM trade_event_media
+        {where_clause}
+        ORDER BY created_at DESC, id DESC
+    '''.format(where_clause=where_clause)
+
+
+def _read_trade_media(media_id):
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(_trade_media_select_sql('WHERE id = ?') + ' LIMIT 1', (media_id,))
+            row = cursor.fetchone()
+    return _trade_media_from_row(row) if row else None
+
+
+def _read_trade_media_for_event_ids(event_ids):
+    ids = []
+    for event_id in event_ids or []:
+        try:
+            value = int(event_id)
+        except Exception:
+            continue
+        if value > 0 and value not in ids:
+            ids.append(value)
+    if not ids:
+        return {}
+    placeholders = ','.join('?' for _ in ids)
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                _trade_media_select_sql(f'WHERE event_id IN ({placeholders})'),
+                tuple(ids),
+            )
+            rows = cursor.fetchall()
+    grouped = {event_id: [] for event_id in ids}
+    for row in rows:
+        media = _trade_media_from_row(row)
+        grouped.setdefault(media['event_id'], []).append(media)
+    return grouped
+
+
+def _attach_trade_media(events):
+    event_list = [event for event in (events or []) if isinstance(event, dict)]
+    media_by_event = _read_trade_media_for_event_ids([event.get('id') for event in event_list])
+    for event in event_list:
+        event['media'] = media_by_event.get(event.get('id'), [])
+    return event_list
+
+
+def _record_trade_event_media(event_id, image_bytes, width=0, height=0, source='sidebar_live_placement', metadata=None):
+    if not isinstance(image_bytes, (bytes, bytearray)):
+        raise ValueError('Screenshot payload is invalid.')
+    if len(image_bytes) > TRADE_JOURNAL_MEDIA_MAX_BYTES:
+        raise ValueError('Screenshot payload is too large.')
+    storage_path = _ensure_trade_media_dir()
+    created_at = datetime.now(pytz.UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    stamp = datetime.now(pytz.UTC).strftime('%Y%m%dT%H%M%SZ')
+    base_name = f'trade_event_{int(event_id)}_{stamp}.png'
+    file_path = os.path.join(storage_path, base_name)
+    if os.path.exists(file_path):
+        file_path = os.path.join(storage_path, f'trade_event_{int(event_id)}_{stamp}_{int(time.time() * 1000)}.png')
+        base_name = os.path.basename(file_path)
+    if not _is_safe_trade_media_path(file_path):
+        raise ValueError('Screenshot storage path is invalid.')
+    with open(file_path, 'xb') as handle:
+        handle.write(image_bytes)
+    relative_path = os.path.relpath(file_path, BASE_DIR)
+    safe_metadata = _redact_trade_payload(copy.deepcopy(metadata if isinstance(metadata, dict) else {}))
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute('''
+                INSERT INTO trade_event_media (
+                    event_id, created_at, media_type, source, mime_type,
+                    file_name, file_path, relative_path, bytes, width, height,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                int(event_id),
+                created_at,
+                'screenshot',
+                str(source or 'sidebar_live_placement')[:80],
+                'image/png',
+                base_name,
+                file_path,
+                relative_path,
+                len(image_bytes),
+                int(width or 0),
+                int(height or 0),
+                json.dumps(safe_metadata, sort_keys=True, default=str),
+            ))
+            conn.commit()
+            media_id = cursor.lastrowid
+    return _read_trade_media(media_id)
+
+
+def _delete_trade_media(media_id):
+    media = _read_trade_media(media_id)
+    if not media:
+        return None
+    file_path = media.get('file_path') or ''
+    if file_path and _is_safe_trade_media_path(file_path):
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except OSError:
+            pass
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute('DELETE FROM trade_event_media WHERE id = ?', (int(media_id),))
+            conn.commit()
+    return media
+
+
+def _cleanup_trade_media_storage():
+    storage_path = _trade_media_storage_path()
+    missing_records = []
+    known_paths = set()
+    with closing(sqlite_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute('SELECT id, file_path FROM trade_event_media')
+            rows = cursor.fetchall()
+            for media_id, file_path in rows:
+                if file_path and _is_safe_trade_media_path(file_path) and os.path.exists(file_path):
+                    known_paths.add(os.path.realpath(file_path))
+                else:
+                    missing_records.append(media_id)
+            if missing_records:
+                placeholders = ','.join('?' for _ in missing_records)
+                cursor.execute(f'DELETE FROM trade_event_media WHERE id IN ({placeholders})', tuple(missing_records))
+            conn.commit()
+    orphan_files = 0
+    if os.path.isdir(storage_path):
+        for name in os.listdir(storage_path):
+            if not (name.startswith('trade_event_') and name.lower().endswith('.png')):
+                continue
+            candidate = os.path.join(storage_path, name)
+            if not _is_safe_trade_media_path(candidate) or os.path.realpath(candidate) in known_paths:
+                continue
+            try:
+                os.remove(candidate)
+                orphan_files += 1
+            except OSError:
+                pass
+    return {
+        'storage_path': storage_path,
+        'missing_records_removed': len(missing_records),
+        'orphan_files_removed': orphan_files,
+    }
+
+
 def _create_manual_trade_journal_event(payload):
     payload = payload if isinstance(payload, dict) else {}
     fields = _normalize_trade_journal_fields(payload, existing_status='review')
@@ -5167,7 +5395,7 @@ def _read_trade_events(limit=50):
         with closing(conn.cursor()) as cursor:
             cursor.execute(_trade_event_select_sql('') + ' LIMIT ?', (limit,))
             rows = cursor.fetchall()
-    return [_trade_event_from_row(row) for row in rows]
+    return _attach_trade_media([_trade_event_from_row(row) for row in rows])
 
 
 def _read_trade_event(event_id):
@@ -5175,7 +5403,8 @@ def _read_trade_event(event_id):
         with closing(conn.cursor()) as cursor:
             cursor.execute(_trade_event_select_sql('WHERE id = ?') + ' LIMIT 1', (event_id,))
             row = cursor.fetchone()
-    return _trade_event_from_row(row) if row else None
+    events = _attach_trade_media([_trade_event_from_row(row)]) if row else []
+    return events[0] if events else None
 
 
 def _update_trade_journal_event(event_id, payload):
@@ -11885,6 +12114,97 @@ def index():
             white-space: pre-wrap;
             overflow-wrap: anywhere;
         }
+        .journal-media-section {
+            margin-top: 9px;
+            border-top: 1px solid var(--border);
+            padding-top: 9px;
+            min-width: 0;
+        }
+        .journal-media-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            align-items: baseline;
+            margin-bottom: 7px;
+        }
+        .journal-media-path {
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+        .journal-media-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .journal-media-card {
+            display: grid;
+            grid-template-columns: minmax(96px, 0.4fr) minmax(0, 1fr);
+            gap: 9px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-1);
+            padding: 8px;
+            min-width: 0;
+        }
+        .journal-media-thumb {
+            display: block;
+            min-width: 0;
+            aspect-ratio: 16 / 10;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+            background: var(--bg-0);
+        }
+        .journal-media-thumb img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+        }
+        .journal-media-body {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .journal-media-title {
+            color: var(--fg-0);
+            font-size: 12px;
+            font-weight: 800;
+            line-height: 1.25;
+        }
+        .journal-media-meta {
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.35;
+        }
+        .journal-media-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 3px;
+        }
+        .journal-media-actions a,
+        .journal-media-actions button {
+            min-height: 26px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 0 8px;
+            font-size: 10px;
+            font-weight: 800;
+            line-height: 24px;
+            text-transform: uppercase;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        .journal-media-actions button {
+            border-color: color-mix(in srgb, var(--warn) 42%, var(--border));
+            color: var(--fg-0);
+        }
         .trade-journal-modal {
             border: 1px solid var(--border);
             background: var(--bg-1);
@@ -12012,6 +12332,9 @@ def index():
                 grid-template-columns: minmax(0, 1fr);
             }
             .trade-journal-row {
+                grid-template-columns: minmax(0, 1fr);
+            }
+            .journal-media-card {
                 grid-template-columns: minmax(0, 1fr);
             }
             .trade-journal-side {
@@ -17245,6 +17568,7 @@ def index():
                     <div class="journal-workspace-actions">
                         <button type="button" data-trade-journal-workspace-refresh>Refresh</button>
                         <button type="button" data-trade-journal-workspace-new>New Entry</button>
+                        <button type="button" data-trade-journal-media-cleanup title="Remove missing attachment records and orphaned local trade screenshot files">Cleanup Media</button>
                     </div>
                 </div>
                 <div class="journal-workspace-tools">
@@ -27322,6 +27646,7 @@ def index():
                         '<div class="journal-workspace-actions">' +
                             '<button type="button" data-trade-journal-workspace-refresh>Refresh</button>' +
                             '<button type="button" data-trade-journal-workspace-new>New Entry</button>' +
+                            '<button type="button" data-trade-journal-media-cleanup title="Remove missing attachment records and orphaned local trade screenshot files">Cleanup Media</button>' +
                         '</div>' +
                     '</div>' +
                     '<div class="journal-workspace-tools">' +
@@ -28151,6 +28476,7 @@ def index():
             underlyingReference: '',
             journalVisible: false,
             journalEvents: [],
+            journalLoaded: false,
             journalLoading: false,
             journalError: '',
             journalEditorId: '',
@@ -28163,6 +28489,7 @@ def index():
             journalWorkspaceTypeFilter: '',
             journalWorkspaceSearch: '',
             journalWorkspaceSelectedId: '',
+            journalMediaStoragePath: '',
             journalSaving: false,
             journalSaveError: '',
             positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
@@ -28956,6 +29283,7 @@ def index():
                 event.journal_outcome,
                 details.order_id,
                 details.source,
+                ...getTradeJournalMedia(event).flatMap(item => [item.file_name, item.relative_path, item.source]),
             ].filter(value => value != null && value !== '').join(' ').toLowerCase();
         }
         function getFilteredTradeJournalEvents() {
@@ -29065,6 +29393,109 @@ def index():
             if (explicit) return explicit;
             if (options.allowPosition) return getTradeJournalPositionPnl(event);
             return null;
+        }
+        function fmtTradeJournalBytes(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n) || n <= 0) return 'size unknown';
+            if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '') + ' MB';
+            if (n >= 1024) return Math.round(n / 1024).toLocaleString() + ' KB';
+            return Math.round(n).toLocaleString() + ' B';
+        }
+        function getTradeJournalMedia(event) {
+            return Array.isArray(event && event.media) ? event.media : [];
+        }
+        function renderTradeJournalMedia(event) {
+            const media = getTradeJournalMedia(event);
+            const storagePath = tradeRailState.journalMediaStoragePath || (event && event.media_storage_path) || '';
+            const storage = storagePath
+                ? '<div class="journal-media-path" title="' + _escapeHtml(storagePath) + '">Local: ' + _escapeHtml(storagePath) + '</div>'
+                : '<div class="journal-media-path">Local screenshots are stored under Screenshots/trade_journal.</div>';
+            const body = media.length
+                ? '<div class="journal-media-list">' + media.map(item => {
+                    const url = item.url || ('/trade/journal/media/' + item.id);
+                    const title = item.media_type === 'screenshot' ? 'Dashboard screenshot' : 'Attachment';
+                    const meta = [
+                        fmtTradeOrderTime(item.created_at),
+                        item.width && item.height ? item.width + 'x' + item.height : '',
+                        fmtTradeJournalBytes(item.bytes),
+                        item.source ? String(item.source).replace(/_/g, ' ') : '',
+                    ].filter(Boolean).join(' · ');
+                    const path = item.file_path || item.relative_path || '';
+                    return '<div class="journal-media-card">' +
+                        '<a class="journal-media-thumb" href="' + _escapeHtml(url) + '" target="_blank" rel="noopener" title="Open screenshot"><img src="' + _escapeHtml(url) + '" alt="' + _escapeHtml(title) + '"></a>' +
+                        '<div class="journal-media-body">' +
+                            '<div class="journal-media-title">' + _escapeHtml(title) + '</div>' +
+                            '<div class="journal-media-meta">' + _escapeHtml(meta) + '</div>' +
+                            (path ? '<div class="journal-media-path" title="' + _escapeHtml(path) + '">' + _escapeHtml(path) + '</div>' : '') +
+                            '<div class="journal-media-actions"><a href="' + _escapeHtml(url) + '" target="_blank" rel="noopener">Open</a><button type="button" data-trade-journal-media-delete="' + _escapeHtml(item.id) + '">Delete</button></div>' +
+                        '</div>' +
+                    '</div>';
+                }).join('') + '</div>'
+                : '<div class="journal-empty">No screenshot attachment for this event.</div>';
+            return '<div class="journal-media-section"><div class="journal-media-head"><span class="journal-section-title">Screenshots</span>' + storage + '</div>' + body + '</div>';
+        }
+        function upsertTradeJournalEvent(updated) {
+            if (!updated || updated.id == null) return;
+            const id = String(updated.id);
+            const events = Array.isArray(tradeRailState.journalEvents) ? tradeRailState.journalEvents.slice() : [];
+            const index = events.findIndex(event => String(event.id) === id);
+            if (index >= 0) events[index] = updated;
+            else events.unshift(updated);
+            tradeRailState.journalEvents = events;
+            tradeRailState.journalSelectedId = id;
+            tradeRailState.journalWorkspaceSelectedId = id;
+        }
+        function wireTradeJournalMediaActions(root) {
+            if (!root) return;
+            root.querySelectorAll('[data-trade-journal-media-delete]').forEach(btn => {
+                if (btn.__tradeMediaDeleteBound) return;
+                btn.__tradeMediaDeleteBound = true;
+                btn.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    deleteTradeJournalMedia(btn.dataset.tradeJournalMediaDelete || '');
+                });
+            });
+        }
+        function deleteTradeJournalMedia(mediaId) {
+            mediaId = String(mediaId || '').trim();
+            if (!mediaId) return;
+            if (!window.confirm('Delete this local screenshot attachment?')) return;
+            fetch('/trade/journal/media/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ media_id: mediaId }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || 'Screenshot delete failed');
+                if (data.media_storage_path) tradeRailState.journalMediaStoragePath = data.media_storage_path;
+                if (data.event) upsertTradeJournalEvent(data.event);
+                else requestTradeJournal({ force: true });
+                renderTradeJournal();
+                renderTradeJournalWorkspace();
+            })
+            .catch(err => {
+                window.alert(err.message || 'Screenshot delete failed');
+            });
+        }
+        function cleanupTradeJournalMedia() {
+            if (!window.confirm('Clean up missing screenshot records and orphaned local trade screenshot files?')) return;
+            fetch('/trade/journal/media/cleanup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ confirmed: true }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                if (!ok || data.error) throw new Error(data.error || 'Media cleanup failed');
+                if (data.storage_path) tradeRailState.journalMediaStoragePath = data.storage_path;
+                requestTradeJournal({ force: true });
+                window.alert('Media cleanup complete. Missing records: ' + (data.missing_records_removed || 0) + '. Orphan files: ' + (data.orphan_files_removed || 0) + '.');
+            })
+            .catch(err => {
+                window.alert(err.message || 'Media cleanup failed');
+            });
         }
         function buildTradeJournalLifecycle(events) {
             const groups = new Map();
@@ -29232,9 +29663,11 @@ def index():
                 '</div>' +
                 '<div class="journal-detail-grid">' + fields.map(([label, value]) => (
                     '<div class="journal-detail-field"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(value) + '</strong></div>'
-                )).join('') + '</div>';
+                )).join('') + '</div>' +
+                renderTradeJournalMedia(event);
             const edit = target.querySelector('[data-trade-journal-workspace-edit]');
             if (edit) edit.addEventListener('click', () => openTradeJournalEditor(edit.dataset.tradeJournalWorkspaceEdit || ''));
+            wireTradeJournalMediaActions(target);
         }
         function renderTradeJournalWorkspace() {
             const workspace = document.querySelector('[data-trade-journal-workspace]');
@@ -29343,9 +29776,11 @@ def index():
                 '</div>' +
                 '<div class="trade-journal-detail-grid">' + fields.map(([label, value]) => (
                     '<div class="trade-journal-detail-field"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(value) + '</strong></div>'
-                )).join('') + '</div>';
+                )).join('') + '</div>' +
+                renderTradeJournalMedia(event);
             const edit = detail.querySelector('[data-trade-journal-detail-edit]');
             if (edit) edit.addEventListener('click', () => openTradeJournalEditor(edit.dataset.tradeJournalDetailEdit || ''));
+            wireTradeJournalMediaActions(detail);
         }
         function getTradeJournalEvent(eventId) {
             const id = String(eventId || '');
@@ -29372,7 +29807,7 @@ def index():
             }
             tradeRailState.journalVisible = true;
             renderTradeJournal();
-            if (options.force || !tradeRailState.journalEvents.length) requestTradeJournal({ force: !!options.force, scroll: true });
+            if (options.force || !tradeRailState.journalLoaded) requestTradeJournal({ force: !!options.force, scroll: true });
             setTimeout(scrollTradeJournalIntoView, 0);
         }
         function ensureTradeJournalEditorSurface() {
@@ -29505,7 +29940,7 @@ def index():
             });
         }
         function requestTradeJournal(options = {}) {
-            if (!options.force && tradeRailState.journalEvents.length) {
+            if (!options.force && tradeRailState.journalLoaded && tradeRailState.journalEvents.length) {
                 renderTradeJournal();
                 renderTradeJournalWorkspace();
                 if (options.scroll) setTimeout(scrollTradeJournalIntoView, 0);
@@ -29521,6 +29956,8 @@ def index():
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Journal unavailable');
                 tradeRailState.journalEvents = Array.isArray(data.events) ? data.events : [];
+                tradeRailState.journalMediaStoragePath = data.media_storage_path || tradeRailState.journalMediaStoragePath || '';
+                tradeRailState.journalLoaded = true;
                 tradeRailState.journalLoading = false;
                 tradeRailState.journalError = '';
                 renderTradeJournal();
@@ -29530,6 +29967,7 @@ def index():
             })
             .catch(err => {
                 tradeRailState.journalEvents = [];
+                tradeRailState.journalLoaded = false;
                 tradeRailState.journalLoading = false;
                 tradeRailState.journalError = err.message || 'Journal unavailable';
                 renderTradeJournal();
@@ -29918,6 +30356,190 @@ def index():
                 renderTradeTicket();
             });
         }
+        function getTradeCaptureColor(name, fallback) {
+            try {
+                const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+                return value || fallback;
+            } catch (e) {
+                return fallback;
+            }
+        }
+        function drawTradeCaptureText(ctx, text, x, y, maxWidth) {
+            const safeText = String(text || '');
+            if (!safeText) return;
+            if (!maxWidth || ctx.measureText(safeText).width <= maxWidth) {
+                ctx.fillText(safeText, x, y);
+                return;
+            }
+            let clipped = safeText;
+            while (clipped.length > 3 && ctx.measureText(clipped + '...').width > maxWidth) {
+                clipped = clipped.slice(0, -1);
+            }
+            ctx.fillText(clipped + '...', x, y);
+        }
+        function buildTradeScreenshotContext(result, selected) {
+            const line = [
+                result && result.ticker,
+                result && result.instruction,
+                result && result.quantity ? 'x' + result.quantity : '',
+                selected && selected.contract_symbol ? selected.contract_symbol : result && result.contract_symbol,
+                result && result.limit_price ? '@ ' + result.limit_price : '',
+            ].filter(Boolean).join(' ');
+            return {
+                title: line || 'Live sidebar placement',
+                subline: [
+                    result && result.schwab_status ? 'Schwab ' + result.schwab_status : '',
+                    result && result.location ? 'Location saved' : '',
+                    new Date().toLocaleString(),
+                ].filter(Boolean).join(' | '),
+            };
+        }
+        function captureTradeChartScreenshotDataUrl(result, selected) {
+            return new Promise((resolve, reject) => {
+                const container = document.getElementById('price-chart');
+                if (!container) {
+                    reject(new Error('Price chart is not available for screenshot capture.'));
+                    return;
+                }
+                const bounds = container.getBoundingClientRect();
+                if (!bounds.width || !bounds.height) {
+                    reject(new Error('Price chart has no visible size.'));
+                    return;
+                }
+                const layers = Array.from(container.querySelectorAll('canvas')).filter(canvas => {
+                    const rect = canvas.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                });
+                if (!layers.length) {
+                    reject(new Error('Price chart canvas layers are not ready.'));
+                    return;
+                }
+                const captureContext = buildTradeScreenshotContext(result, selected);
+                const cssWidth = Math.max(560, Math.min(1600, Math.round(bounds.width)));
+                const scale = cssWidth / Math.max(1, bounds.width);
+                const chartHeight = Math.max(320, Math.round(bounds.height * scale));
+                const headerHeight = 58;
+                const footerHeight = 28;
+                const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.round(cssWidth * dpr);
+                canvas.height = Math.round((headerHeight + chartHeight + footerHeight) * dpr);
+                canvas.style.width = cssWidth + 'px';
+                canvas.style.height = (headerHeight + chartHeight + footerHeight) + 'px';
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    reject(new Error('Screenshot canvas could not be created.'));
+                    return;
+                }
+                const bodyStyle = getComputedStyle(document.body);
+                const bg = getTradeCaptureColor('--bg-0', bodyStyle.backgroundColor || 'Canvas');
+                const panel = getTradeCaptureColor('--bg-1', bg);
+                const fg = getTradeCaptureColor('--fg-0', bodyStyle.color || 'CanvasText');
+                const muted = getTradeCaptureColor('--fg-2', fg);
+                const border = getTradeCaptureColor('--border', muted);
+                ctx.scale(dpr, dpr);
+                ctx.fillStyle = bg;
+                ctx.fillRect(0, 0, cssWidth, headerHeight + chartHeight + footerHeight);
+                ctx.fillStyle = panel;
+                ctx.fillRect(0, 0, cssWidth, headerHeight);
+                ctx.strokeStyle = border;
+                ctx.beginPath();
+                ctx.moveTo(0, headerHeight - 0.5);
+                ctx.lineTo(cssWidth, headerHeight - 0.5);
+                ctx.stroke();
+                ctx.fillStyle = fg;
+                ctx.font = '700 16px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+                drawTradeCaptureText(ctx, captureContext.title, 14, 24, cssWidth - 28);
+                ctx.fillStyle = muted;
+                ctx.font = '11px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+                drawTradeCaptureText(ctx, captureContext.subline, 14, 43, cssWidth - 28);
+                ctx.save();
+                ctx.translate(0, headerHeight);
+                ctx.scale(scale, scale);
+                ctx.fillStyle = bg;
+                ctx.fillRect(0, 0, bounds.width, bounds.height);
+                let drawn = 0;
+                try {
+                    layers.forEach(layer => {
+                        const rect = layer.getBoundingClientRect();
+                        ctx.drawImage(
+                            layer,
+                            0,
+                            0,
+                            layer.width,
+                            layer.height,
+                            rect.left - bounds.left,
+                            rect.top - bounds.top,
+                            rect.width,
+                            rect.height,
+                        );
+                        drawn += 1;
+                    });
+                } catch (e) {
+                    ctx.restore();
+                    reject(e);
+                    return;
+                }
+                ctx.restore();
+                if (!drawn) {
+                    reject(new Error('No chart layers were captured.'));
+                    return;
+                }
+                ctx.fillStyle = panel;
+                ctx.fillRect(0, headerHeight + chartHeight, cssWidth, footerHeight);
+                ctx.strokeStyle = border;
+                ctx.beginPath();
+                ctx.moveTo(0, headerHeight + chartHeight + 0.5);
+                ctx.lineTo(cssWidth, headerHeight + chartHeight + 0.5);
+                ctx.stroke();
+                ctx.fillStyle = muted;
+                ctx.font = '10px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+                drawTradeCaptureText(ctx, 'Captured locally after successful live sidebar placement', 14, headerHeight + chartHeight + 18, cssWidth - 28);
+                try {
+                    const dataUrl = canvas.toDataURL('image/png');
+                    resolve({ dataUrl, width: canvas.width, height: canvas.height });
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        }
+        function uploadTradePlacementScreenshot(result, selected) {
+            if (!result || !result.placed || !result.journal_event_id) return;
+            setTimeout(() => {
+                captureTradeChartScreenshotDataUrl(result, selected)
+                    .then(capture => fetch('/trade/journal/attach_screenshot', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            event_id: result.journal_event_id,
+                            image_data: capture.dataUrl,
+                            width: capture.width,
+                            height: capture.height,
+                            source: 'sidebar_live_placement',
+                            metadata: {
+                                ticker: result.ticker || '',
+                                contract_symbol: result.contract_symbol || '',
+                                instruction: result.instruction || '',
+                                quantity: result.quantity || '',
+                                limit_price: result.limit_price || '',
+                                order_hash: result.order_hash || '',
+                                schwab_status: result.schwab_status || '',
+                            },
+                        }),
+                    }))
+                    .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+                    .then(({ ok, data }) => {
+                        if (!ok || data.error) throw new Error(data.error || 'Screenshot upload failed');
+                        if (data.media_storage_path) tradeRailState.journalMediaStoragePath = data.media_storage_path;
+                        if (data.event) upsertTradeJournalEvent(data.event);
+                        renderTradeJournal();
+                        renderTradeJournalWorkspace();
+                    })
+                    .catch(err => {
+                        console.warn('Trade screenshot attachment failed:', err);
+                    });
+            }, 0);
+        }
         function placeTradeOrder() {
             const selected = getSelectedTradeContract();
             if (!selected || !tradeRailState.accountHash || !tradeRailState.previewToken) {
@@ -29957,6 +30579,7 @@ def index():
                 requestTradeAccountDetails({ force: true });
                 requestTradeOrders({ force: true });
                 if (tradeRailState.journalVisible) requestTradeJournal({ force: true });
+                uploadTradePlacementScreenshot(data, selected);
             })
             .catch(err => {
                 tradeRailState.placementLoading = false;
@@ -30005,6 +30628,8 @@ def index():
             if (refresh) refresh.addEventListener('click', () => requestTradeJournal({ force: true, scrollWorkspace: true }));
             const newEntry = workspace.querySelector('[data-trade-journal-workspace-new]');
             if (newEntry) newEntry.addEventListener('click', () => openNewTradeJournalEntry());
+            const cleanupMedia = workspace.querySelector('[data-trade-journal-media-cleanup]');
+            if (cleanupMedia) cleanupMedia.addEventListener('click', () => cleanupTradeJournalMedia());
             const status = workspace.querySelector('[data-trade-journal-workspace-status]');
             if (status) status.addEventListener('change', () => {
                 tradeRailState.journalWorkspaceStatusFilter = status.value || '';
@@ -34721,7 +35346,11 @@ def trade_cancel_order():
 @app.route('/trade/journal', methods=['GET'])
 def trade_journal():
     """Local order-entry rail journal."""
-    return jsonify({'events': _read_trade_events(request.args.get('limit', 50)), 'warnings': []})
+    return jsonify({
+        'events': _read_trade_events(request.args.get('limit', 50)),
+        'media_storage_path': _trade_media_storage_path(),
+        'warnings': [],
+    })
 
 
 @app.route('/trade/journal/create', methods=['POST'])
@@ -34746,6 +35375,121 @@ def trade_journal_update():
     if not event:
         return _trade_api_error('Journal event not found.', 404)
     return jsonify({'event': event, 'warnings': []})
+
+
+def _parse_trade_screenshot_data(image_data):
+    if not isinstance(image_data, str) or not image_data.strip():
+        raise ValueError('Missing screenshot image data.')
+    text = image_data.strip()
+    if text.startswith('data:'):
+        header, sep, payload = text.partition(',')
+        if not sep:
+            raise ValueError('Screenshot data URL is invalid.')
+        if not header.lower().startswith('data:image/png;base64'):
+            raise ValueError('Only PNG screenshot attachments are supported.')
+        text = payload
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError('Screenshot image data is not valid base64.') from e
+    if not raw:
+        raise ValueError('Screenshot image data is empty.')
+    if len(raw) > TRADE_JOURNAL_MEDIA_MAX_BYTES:
+        raise ValueError('Screenshot image data is too large.')
+    if not raw.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise ValueError('Screenshot image data is not a PNG.')
+    return raw
+
+
+def _parse_media_dimension(value):
+    try:
+        parsed = int(float(value))
+    except Exception:
+        return 0
+    return max(0, min(parsed, 6000))
+
+
+@app.route('/trade/journal/attach_screenshot', methods=['POST'])
+def trade_journal_attach_screenshot():
+    """Attach a local dashboard screenshot to a successful live placement journal event."""
+    data = request.get_json(silent=True) or {}
+    try:
+        event_id = int(data.get('event_id') or data.get('eventId') or 0)
+    except Exception:
+        event_id = 0
+    if event_id <= 0:
+        return _trade_api_error('Missing journal event id.', 400)
+    event = _read_trade_event(event_id)
+    if not event:
+        return _trade_api_error('Journal event not found.', 404)
+    if event.get('event_type') != 'placed_order':
+        return _trade_api_error('Screenshots can only be attached to successful live placement events.', 400)
+    try:
+        image_bytes = _parse_trade_screenshot_data(data.get('image_data') or data.get('imageData') or '')
+        media = _record_trade_event_media(
+            event_id,
+            image_bytes,
+            width=_parse_media_dimension(data.get('width')),
+            height=_parse_media_dimension(data.get('height')),
+            source=data.get('source') or 'sidebar_live_placement',
+            metadata=data.get('metadata') if isinstance(data.get('metadata'), dict) else {},
+        )
+    except ValueError as e:
+        return _trade_api_error(str(e), 400)
+    except Exception as e:
+        return _trade_api_error('Screenshot attachment failed.', 500, e)
+    return jsonify({
+        'media': media,
+        'event': _read_trade_event(event_id),
+        'media_storage_path': _trade_media_storage_path(),
+        'warnings': [],
+    })
+
+
+@app.route('/trade/journal/media/<int:media_id>', methods=['GET'])
+def trade_journal_media(media_id):
+    """Serve a local journal screenshot attachment."""
+    media = _read_trade_media(media_id)
+    if not media:
+        return _trade_api_error('Screenshot attachment not found.', 404)
+    file_path = media.get('file_path') or ''
+    if not _is_safe_trade_media_path(file_path) or not os.path.exists(file_path):
+        return _trade_api_error('Screenshot file is missing.', 404)
+    return send_file(
+        file_path,
+        mimetype=media.get('mime_type') or 'image/png',
+        as_attachment=False,
+        download_name=media.get('file_name') or f'trade_screenshot_{media_id}.png',
+    )
+
+
+@app.route('/trade/journal/media/delete', methods=['POST'])
+def trade_journal_media_delete():
+    """Delete a local journal screenshot attachment."""
+    data = request.get_json(silent=True) or {}
+    try:
+        media_id = int(data.get('media_id') or data.get('mediaId') or 0)
+    except Exception:
+        media_id = 0
+    if media_id <= 0:
+        return _trade_api_error('Missing screenshot attachment id.', 400)
+    media = _delete_trade_media(media_id)
+    if not media:
+        return _trade_api_error('Screenshot attachment not found.', 404)
+    return jsonify({
+        'deleted': True,
+        'media_id': media_id,
+        'event': _read_trade_event(media.get('event_id')),
+        'media_storage_path': _trade_media_storage_path(),
+        'warnings': [],
+    })
+
+
+@app.route('/trade/journal/media/cleanup', methods=['POST'])
+def trade_journal_media_cleanup():
+    """Remove missing media records and orphaned local screenshot files created by this app."""
+    result = _cleanup_trade_media_storage()
+    return jsonify({**result, 'warnings': []})
 
 
 @app.route('/trade/preview_order', methods=['POST'])
@@ -34966,7 +35710,7 @@ def trade_place_order():
     if not schwab_ok:
         result['warnings'].append(f"Schwab placement returned status {status_code or 'unknown'}.")
         return jsonify(result), 502
-    _write_trade_event('placed_order', {
+    journal_event_id = _write_trade_event('placed_order', {
         'account_hash': account_hash,
         'ticker': ticker,
         'contract_symbol': contract_symbol,
@@ -34981,6 +35725,8 @@ def trade_place_order():
         'schwab_response': response_body,
         'bracket_plan': _redact_trade_payload(data.get('bracket_plan') or data.get('bracketPlan') or {}),
     })
+    result['journal_event_id'] = journal_event_id
+    result['media_storage_path'] = _trade_media_storage_path()
     return jsonify(result)
 
 @app.route('/update', methods=['POST'])

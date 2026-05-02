@@ -176,16 +176,25 @@ def seed_chain():
     }
 
 
+PNG_DATA_URL = (
+    'data:image/png;base64,'
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
+)
+
+
 class TradePreviewEndpointTest(unittest.TestCase):
     def setUp(self):
         seed_chain()
         ezoptionsschwab._trade_preview_records.clear()
         self.original_client = ezoptionsschwab.client
         self.original_db_path = ezoptionsschwab.DB_PATH
+        self.original_media_dir = ezoptionsschwab.TRADE_JOURNAL_MEDIA_DIR
         tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
         self.temp_db_path = tmp.name
         tmp.close()
+        self.temp_media_dir = tempfile.TemporaryDirectory()
         ezoptionsschwab.DB_PATH = self.temp_db_path
+        ezoptionsschwab.TRADE_JOURNAL_MEDIA_DIR = self.temp_media_dir.name
         ezoptionsschwab.init_db()
         ezoptionsschwab.client = MockPreviewClient()
         self.app = ezoptionsschwab.app.test_client()
@@ -193,10 +202,12 @@ class TradePreviewEndpointTest(unittest.TestCase):
     def tearDown(self):
         ezoptionsschwab.client = self.original_client
         ezoptionsschwab.DB_PATH = self.original_db_path
+        ezoptionsschwab.TRADE_JOURNAL_MEDIA_DIR = self.original_media_dir
         try:
             os.unlink(self.temp_db_path)
         except OSError:
             pass
+        self.temp_media_dir.cleanup()
         ezoptionsschwab._options_cache.clear()
         ezoptionsschwab._trade_preview_records.clear()
 
@@ -340,10 +351,13 @@ class TradePlaceOrderEndpointTest(unittest.TestCase):
         ezoptionsschwab._trade_preview_records.clear()
         self.original_client = ezoptionsschwab.client
         self.original_db_path = ezoptionsschwab.DB_PATH
+        self.original_media_dir = ezoptionsschwab.TRADE_JOURNAL_MEDIA_DIR
         tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
         self.temp_db_path = tmp.name
         tmp.close()
+        self.temp_media_dir = tempfile.TemporaryDirectory()
         ezoptionsschwab.DB_PATH = self.temp_db_path
+        ezoptionsschwab.TRADE_JOURNAL_MEDIA_DIR = self.temp_media_dir.name
         ezoptionsschwab.init_db()
         ezoptionsschwab.client = MockPreviewClient()
         self.app = ezoptionsschwab.app.test_client()
@@ -351,10 +365,12 @@ class TradePlaceOrderEndpointTest(unittest.TestCase):
     def tearDown(self):
         ezoptionsschwab.client = self.original_client
         ezoptionsschwab.DB_PATH = self.original_db_path
+        ezoptionsschwab.TRADE_JOURNAL_MEDIA_DIR = self.original_media_dir
         try:
             os.unlink(self.temp_db_path)
         except OSError:
             pass
+        self.temp_media_dir.cleanup()
         ezoptionsschwab._options_cache.clear()
         ezoptionsschwab._trade_preview_records.clear()
 
@@ -469,6 +485,57 @@ class TradePlaceOrderEndpointTest(unittest.TestCase):
         events = self.app.get('/trade/journal').get_json()['events']
         self.assertEqual(events[0]['event_type'], 'placed_order')
         self.assertEqual(events[0]['location'], 'https://api.schwabapi.com/trader/v1/accounts/HASH123/orders/987654321')
+        self.assertEqual(data['journal_event_id'], events[0]['id'])
+        self.assertEqual(data['media_storage_path'], self.temp_media_dir.name)
+
+    def test_screenshot_attachment_is_local_and_linked_to_successful_placement(self):
+        preview = self.post_preview().get_json()
+        with patch.dict(os.environ, {'ENABLE_LIVE_TRADING': '1'}):
+            placed = self.post_place(self.place_payload_from_preview(preview)).get_json()
+        response = self.app.post('/trade/journal/attach_screenshot', json={
+            'event_id': placed['journal_event_id'],
+            'image_data': PNG_DATA_URL,
+            'width': 1,
+            'height': 1,
+            'source': 'sidebar_live_placement',
+            'metadata': {'ticker': 'SPY', 'accountNumber': '123456789'},
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        media = data['media']
+        self.assertEqual(media['event_id'], placed['journal_event_id'])
+        self.assertEqual(media['mime_type'], 'image/png')
+        self.assertEqual(media['source'], 'sidebar_live_placement')
+        self.assertTrue(media['file_path'].startswith(self.temp_media_dir.name))
+        self.assertTrue(os.path.exists(media['file_path']))
+        self.assertEqual(data['event']['media'][0]['id'], media['id'])
+        self.assertNotIn('123456789', response.get_data(as_text=True))
+
+        image_response = self.app.get(media['url'])
+        self.assertEqual(image_response.status_code, 200)
+        self.assertEqual(image_response.mimetype, 'image/png')
+        image_response.close()
+
+        journal = self.app.get('/trade/journal').get_json()
+        self.assertEqual(journal['media_storage_path'], self.temp_media_dir.name)
+        self.assertEqual(journal['events'][0]['media'][0]['id'], media['id'])
+
+        delete_response = self.app.post('/trade/journal/media/delete', json={'media_id': media['id']})
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertFalse(os.path.exists(media['file_path']))
+        self.assertEqual(delete_response.get_json()['event']['media'], [])
+
+    def test_screenshot_attachment_rejects_non_placement_events(self):
+        self.post_preview()
+        preview_event = self.app.get('/trade/journal').get_json()['events'][0]
+        response = self.app.post('/trade/journal/attach_screenshot', json={
+            'event_id': preview_event['id'],
+            'image_data': PNG_DATA_URL,
+            'width': 1,
+            'height': 1,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('successful live placement', response.get_json()['error'])
 
     def test_successful_placement_consumes_preview_token(self):
         preview = self.post_preview().get_json()

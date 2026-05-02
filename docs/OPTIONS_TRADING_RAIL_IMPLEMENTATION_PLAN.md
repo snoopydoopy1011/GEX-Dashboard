@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Full journal workspace built; automatic sidebar-trade screenshots next; live bracket support later
+**Status:** Local screenshot attachments built; active-trader ladder / low-click live entry design next; live bracket support later
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -1580,8 +1580,8 @@ Stage 7:
   - [x] Add local-only manual journal notes.
   - [x] Add successful cancel-order journal events.
   - [x] Add full journal workspace/page and stats below the Live Alerts / Flow Pulse lane or another dedicated review surface.
-  - [ ] Add automatic dashboard screenshot attachments for trades entered from the sidebar, stored locally and attached to the matching journal event.
-  - [ ] Add optional screenshot/media management controls for journal entries. Do not add automatic screen recording without a separate explicit request.
+  - [x] Add automatic dashboard screenshot attachments for trades entered from the sidebar, stored locally and attached to the matching journal event.
+  - [x] Add optional screenshot/media management controls for journal entries. Do not add automatic screen recording without a separate explicit request.
 
 ---
 
@@ -1594,7 +1594,7 @@ Stage 7:
 - No bracket/OCO orders in the first live stage.
 - Bracket/OCO template work should start as planning-only UI until Schwab preview/place behavior is validated.
 - Future journaling should be an in-dashboard order journal for orders placed or used from this rail, not an export-only workflow.
-- Screenshot capture is now a planned journal capability for trades entered from the sidebar: after a successful sidebar trade placement, capture the dashboard/chart state and attach it to the local journal event. Keep it local, make storage visible/manageable, and do not add automatic screen recording without a separate explicit request.
+- Screenshot capture is implemented only after successful sidebar live placement. Keep captures local, make storage visible/manageable, and do not add automatic screen recording without a separate explicit request.
 - No changes to GEX/DEX/Vanna/Charm/Flow formulas.
 - No migration to a JS framework.
 - No splitting `ezoptionsschwab.py` into modules.
@@ -1826,4 +1826,139 @@ python3 -m unittest tests.test_session_levels tests.test_trade_preview
 Also syntax-check rendered inline JS if frontend code changes:
 python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script>(.*?)</script>', html, flags=re.S); pathlib.Path('/private/tmp/gex-dashboard-inline.js').write_text('\n'.join(scripts), encoding='utf-8')"
 node --check /private/tmp/gex-dashboard-inline.js
+```
+
+---
+
+## 19. 2026-05-02 Automatic Screenshot Attachments Update
+
+Accomplished:
+
+- Added a local `trade_event_media` SQLite table linked to `trade_events`.
+- Added local screenshot storage under `Screenshots/trade_journal`.
+- Added `POST /trade/journal/attach_screenshot`, `GET /trade/journal/media/<id>`, `POST /trade/journal/media/delete`, and `POST /trade/journal/media/cleanup`.
+- Changed successful `/trade/place_order` responses to return `journal_event_id` and `media_storage_path` while leaving Schwab live order placement payloads unchanged.
+- Added browser-side best-effort chart screenshot capture after successful live sidebar placement only.
+- Kept screenshot capture async after Schwab success; screenshot failure logs to the console and does not make the order look failed.
+- Added screenshot thumbnails, open links, local path display, delete controls, and cleanup controls to the rail Journal detail and full `#trade-journal-workspace` detail.
+- Extended `tests/test_trade_preview.py` to cover placement event ids, local attachment creation, PNG serving, deletion, redaction, and rejection for non-placement events.
+
+Tricky parts / implementation notes:
+
+- Live placement must stay low-latency and real. The code calls Schwab first, records the local `placed_order`, returns success to the UI, and only then starts screenshot capture/upload.
+- Screenshots are accepted only for `placed_order` events. Previews, manual notes, alerts, flow, and chart clicks do not auto-capture.
+- Media paths are constrained under the configured local media directory before serving or deleting files.
+- The attachment payload is PNG-only and size-limited, with metadata redacted through the existing trade payload redaction helper.
+- Canvas capture only reads local chart canvas layers and draws a small local header/footer. It does not use server-side browser automation or screen recording.
+- Static/rebuild parity still matters: the full workspace markup in static HTML and `buildTradeJournalWorkspaceHtml()` both include the media cleanup control.
+- Rendered inline JavaScript was checked with `node --check` because Python syntax checks do not validate the large inline script.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- Rendered inline JavaScript passed `node --check`.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+
+Still left to do:
+
+- Browser-smoke the screenshot path with a real running chart after an actual or mocked successful live placement, including thumbnail rendering and delete/cleanup controls.
+- Add an optional collapsible active-trader option ladder inspired by Thinkorswim Active Trader:
+  - selected option contract header;
+  - buy ask / sell bid / flatten controls;
+  - quantity presets and template selector;
+  - bid/ask/price ladder rows;
+  - open-position and working-order context;
+  - collapsible placement so it does not crowd the existing rich order-entry rail.
+- Design a low-click scalping mode for 0-1 DTE SPY options:
+  - preserve the detailed order-entry section for review and setup;
+  - add an explicit opt-in `auto send`/one-click mode similar to TOS;
+  - one click should be able to send the prepared single order or approved future template quickly;
+  - avoid extra modals in the fast path once the user has deliberately enabled the mode;
+  - make the UI unmistakably distinguish preview-only, live one-click send, cancel order, and local-only journal actions.
+- Decide the safety model for one-click live send before implementation:
+  - keep `ENABLE_LIVE_TRADING=1`;
+  - do not silently enable auto-send by default;
+  - require clear armed state, selected account/contract/quantity/template, and current quote validity;
+  - decide whether a recent preview is still required or whether an explicitly armed low-click mode can build/place directly for approved single-leg templates;
+  - do not let Bracket Plan alter Schwab payloads unless live bracket/OCO support is explicitly approved later.
+- Improve deterministic closed-trade P/L only when the order/position lifecycle proves entry, exit, quantities, and prices reliably.
+- Keep deferred/non-goals unchanged until explicitly approved: live Schwab bracket/OCO child orders, SPX-specific validation, multi-leg spreads, automated trading from chart clicks/alerts/flow, automatic screen recordings, and analytical formula changes.
+
+### Prompt For Next Session
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard on branch codex/options-trading-rail-plan.
+
+Read AGENTS.md first, then read:
+- docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md
+- docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md
+
+Before editing, run:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Continue only the dedicated fourth order-entry trading rail and related Journal surfaces:
+- #trade-rail-header
+- #trade-rail
+- .trade-rail-shell
+- #trade-journal-workspace
+- Journal panel/workspace
+- Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders panels
+
+Current state:
+- Trading rail has both preview support and guarded live single-leg DAY LIMIT option order placement. Live placement must continue to work and must not be treated as preview-only.
+- Bracket Plan is planning-only and must not alter Schwab preview/place payloads.
+- Journal persistence exists in local SQLite `trade_events`.
+- Successful previews, successful live placements, and successful confirmed cancels auto-record local journal events.
+- `/trade/journal` returns recent events with linked `media` attachments.
+- `/trade/journal/update` saves annotations.
+- `/trade/journal/create` creates local-only manual notes.
+- Screenshot attachments exist in local SQLite `trade_event_media` plus files under `Screenshots/trade_journal`.
+- On successful live sidebar placement only, the browser best-effort captures chart canvas layers and attaches a PNG screenshot to the matching placed-order journal event.
+- Screenshot failure must not make the live order appear failed.
+- Journal rail/workspace details show screenshot thumbnails, local paths, open links, delete controls, and cleanup controls.
+- Static HTML and JS rebuild helpers must stay in parity:
+  - trade rail markup in static HTML and `buildTradeRailHtml()`;
+  - journal workspace markup in static HTML and `buildTradeJournalWorkspaceHtml()`;
+  - rebuild path through `ensurePriceChartDom()`, `ensureTradeRailDom()`, and `ensureTradeJournalWorkspace()`.
+
+Main next undertaking:
+Explore and design the next fast-trading UX for 0-1 DTE SPY option scalping:
+1. A collapsible Thinkorswim-style Active Trader option ladder inside or adjacent to the dedicated order-entry rail.
+2. A deliberately armed low-click / one-click live send workflow similar to TOS `auto send`.
+
+Active Trader ladder notes:
+- Use the user screenshot as product inspiration, not as a pixel-perfect clone.
+- Candidate pieces: selected contract header, Buy Ask, Sell Bid, Flatten, quantity presets, template selector, auto-send checkbox, position summary, order status, bid/ask/price ladder, working orders, and collapsible placement.
+- Keep the existing rich order-entry section available; the ladder should be a fast surface for scalping, not a replacement for all detail.
+
+One-click / auto-send notes:
+- The user wants the ability to get in and out very quickly: click Buy Ask / Sell Bid and send the prepared order when explicitly armed.
+- Avoid adding extra required modals or slow review screens in the fast path once the user has intentionally enabled the mode.
+- Preserve live order safety gates and make state unmistakable: Preview only vs Live place order vs Cancel order vs Local-only journal action.
+- Do not silently enable auto-send by default.
+- Decide the safety model before implementation:
+  - keep `ENABLE_LIVE_TRADING=1`;
+  - require selected account, exact cached Schwab contract, quantity, limit/action/template, and valid quote context;
+  - decide whether recent preview remains mandatory or whether an explicitly armed one-click mode can build/place directly for approved single-leg DAY LIMIT orders;
+  - continue preserving `SELL_TO_CLOSE` position caps;
+  - do not make Bracket Plan alter Schwab payloads unless live bracket/OCO is explicitly approved later.
+
+Do not implement without explicit approval:
+- Live Schwab bracket/OCO child orders.
+- SPX-specific validation.
+- Multi-leg spreads.
+- Automated trading from chart clicks, alerts, or flow.
+- Automatic screen recordings.
+
+Run after changes:
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+
+If frontend JS changes, also syntax-check rendered inline JS:
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
 ```
