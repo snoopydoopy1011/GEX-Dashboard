@@ -1,6 +1,6 @@
 # GEX Dashboard - Options Trading Rail UI Polish Plan
 
-**Status:** Rail Journal framework built; full journal workspace/statistics and desktop-app feasibility deferred
+**Status:** Full journal workspace built; automatic sidebar-trade screenshots next
 **Created:** 2026-05-01  
 **Branch at draft time:** `codex/options-trading-rail-plan`  
 **Primary file:** `ezoptionsschwab.py`  
@@ -1183,3 +1183,39 @@ python3 -m py_compile ezoptionsschwab.py
 git diff --check
 python3 -m unittest tests.test_session_levels tests.test_trade_preview
 ```
+
+---
+
+## 17. 2026-05-02 Full Journal Workspace Update
+
+Accomplished:
+
+- Added a full-width `#trade-journal-workspace` below the existing Live Alerts / Flow Pulse lane.
+- Added journal workspace filters/search, event table, selected-entry detail, lifecycle grouping, daily/weekly event counts, status/event-type summaries, ticker/contract summaries, setup/tag summaries, and conservative deterministic P/L display.
+- Added a rail Journal `Review` button that refreshes journal data and scrolls to the workspace.
+- Added rebuild-path support through `buildTradeJournalWorkspaceHtml()` and `ensureTradeJournalWorkspace()`.
+- Explored desktop-app wrapping. A PySide6/PyQt6 + `QWebEngineView` wrapper appears feasible, but PySide6/PyQt6 and packagers are not installed here; a lightweight launcher or managed Flask subprocess is likely the lower-risk path.
+
+Tricky parts:
+
+- The workspace is outside `#trade-rail`, but the journal editor still lives inside the rail markup. Workspace edit/new actions ensure the rail/editor surface exists and expands the rail if needed.
+- `ensurePriceChartDom()` can run before `tradeRailState` is initialized, so workspace rebuild logic must avoid touching state too early.
+- Static HTML and rebuild helpers both need parity for the rail and workspace surfaces.
+- P/L enrichment intentionally avoids guessing realized P/L. It only uses explicit event P/L or exact current-position day P/L when account/contract match.
+- Rendered inline JavaScript was checked with `node --check` because the workspace added substantial frontend logic.
+
+Still left to do:
+
+- Add automatic dashboard screenshot attachments for trades entered from the sidebar:
+  - capture after successful live sidebar placement;
+  - attach the screenshot to the matching local journal event;
+  - keep media local and add clear storage/delete controls;
+  - do not add automatic screen recording without a separate request.
+- Use `/Users/scottmunger/Desktop/Trading/Options_Trading_Journal` only for product/data-shape ideas such as fields, review flows, setup/tag/outcome concepts, stats, and lifecycle views. Do not port its Vue/Vite + Node/Express + MongoDB/Parse/Docker architecture.
+- Improve deterministic closed-trade P/L only when order/position lifecycle data is reliable.
+- Add a media/attachments area to the full journal detail panel once screenshots exist.
+- Re-check the workspace visually with real journal data across narrow and wide widths.
+
+### Prompt For Next Session
+
+Use `docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md` section `18. 2026-05-02 Full Journal Workspace Update` for the current handoff prompt.

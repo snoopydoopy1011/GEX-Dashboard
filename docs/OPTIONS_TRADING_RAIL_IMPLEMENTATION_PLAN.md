@@ -1,6 +1,6 @@
 # GEX Dashboard — Options Trading Rail Implementation Plan
 
-**Status:** Rail Journal framework built; full journal workspace/statistics and desktop-app feasibility deferred; live bracket support later
+**Status:** Full journal workspace built; automatic sidebar-trade screenshots next; live bracket support later
 **Created:** 2026-05-01  
 **Primary goal:** Add a separate, independently hideable/resizable trading right rail for selecting and trading 0-1 DTE options contracts from the dashboard.  
 **Initial scope:** SPY first; SPX after preview/order validation proves Schwab accepts the returned contract symbols.  
@@ -1579,8 +1579,9 @@ Stage 7:
   - [x] Add rail-level journal filters/search and selected-event detail.
   - [x] Add local-only manual journal notes.
   - [x] Add successful cancel-order journal events.
-  - [ ] Add full journal workspace/page and stats below the Live Alerts / Flow Pulse lane or another dedicated review surface.
-  - [ ] Add screenshot/screen-recording attachments with explicit opt-in and storage controls.
+  - [x] Add full journal workspace/page and stats below the Live Alerts / Flow Pulse lane or another dedicated review surface.
+  - [ ] Add automatic dashboard screenshot attachments for trades entered from the sidebar, stored locally and attached to the matching journal event.
+  - [ ] Add optional screenshot/media management controls for journal entries. Do not add automatic screen recording without a separate explicit request.
 
 ---
 
@@ -1593,7 +1594,7 @@ Stage 7:
 - No bracket/OCO orders in the first live stage.
 - Bracket/OCO template work should start as planning-only UI until Schwab preview/place behavior is validated.
 - Future journaling should be an in-dashboard order journal for orders placed or used from this rail, not an export-only workflow.
-- Future screenshot/screen-recording capture for journal entries should require explicit user opt-in and clear storage controls before any recording starts.
+- Screenshot capture is now a planned journal capability for trades entered from the sidebar: after a successful sidebar trade placement, capture the dashboard/chart state and attach it to the local journal event. Keep it local, make storage visible/manageable, and do not add automatic screen recording without a separate explicit request.
 - No changes to GEX/DEX/Vanna/Charm/Flow formulas.
 - No migration to a JS framework.
 - No splitting `ezoptionsschwab.py` into modules.
@@ -1686,4 +1687,143 @@ Useful anchors:
 - data-trade-chart-reference-enabled
 
 Start by inspecting the current rail code and confirming static HTML/buildTradeRailHtml parity before editing.
+```
+
+---
+
+## 18. 2026-05-02 Full Journal Workspace Update
+
+Accomplished:
+
+- Added a full-width `#trade-journal-workspace` below the existing Live Alerts / Flow Pulse lane, so the journal behaves like a review page after scrolling down instead of crowding the fourth order-entry rail.
+- Added workspace filters and search for status, event type, ticker, contract, setup, tags, notes, thesis, and outcome.
+- Added a journal event table with selected-entry detail and an edit action that reuses the existing local journal editor.
+- Added lifecycle grouping across related previewed, placed, canceled, closed/reviewed, and manual-note events using the event `order_hash` when available, with a conservative fallback key for manual entries.
+- Added daily and weekly event counts plus status, event-type, ticker, contract, setup, and tag summaries.
+- Added deterministic P/L display only when safe:
+  - explicit P/L values already present on event payloads are summarized;
+  - exact current-position day P/L is shown only when the selected account and exact contract match;
+  - otherwise the UI shows `Not inferred`.
+- Added a `Review` button in the rail Journal panel that refreshes journal data and scrolls to the full workspace.
+- Added `buildTradeJournalWorkspaceHtml()` and `ensureTradeJournalWorkspace()` so the chart DOM rebuild path recreates the full workspace just like the trade rail.
+- Explored lightweight desktop wrapping:
+  - PySide6/PyQt6 `QWebEngineView` is feasible as a wrapper around the local Flask dashboard;
+  - a managed Flask subprocess is safer than deeply threading the current single-file app into a Qt process;
+  - Schwab OAuth should keep using the registered localhost callback URL and existing schwabdev token DB behavior;
+  - `options_data.db` and future journal media should move to a clear app-support path if packaged;
+  - macOS packaging with Qt WebEngine is materially heavier than a simple launcher;
+  - PySide6/PyQt6 and common packagers were not installed in the current environment, so no launcher was implemented.
+
+Tricky parts:
+
+- `ensurePriceChartDom()` can run before `tradeRailState` exists, so `ensureTradeJournalWorkspace()` has to create/position DOM safely and only wire/render stateful controls once the trade-rail state object is available.
+- The workspace is outside `#trade-rail`, while the editor dialog still lives inside the rail markup. Opening or editing from the workspace therefore ensures the trade rail/editor surface exists, and expands the rail if needed.
+- Static server-rendered HTML and JS rebuild markup both now include the workspace shape. The rail Journal panel also changed in both static HTML and `buildTradeRailHtml()`.
+- The P/L enrichment deliberately avoids guessing realized P/L from incomplete order lifecycle data. Current-position day P/L is only shown for an exact contract/account match.
+- Python triple-quoted HTML can turn JavaScript regex escapes into real newlines; the tag splitter uses an escaped `\\n` in the rendered regex and the inline script was checked with `node --check`.
+- No Schwab preview/place payloads, bracket planning behavior, chart-click helper behavior, analytics formulas, account redaction, or live-trading guards were changed.
+
+Verification completed:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed. The existing `render_template_string` invalid escape `SyntaxWarning` remains unchanged.
+- Rendered inline JavaScript passed `node --check`.
+- `git diff --check` passed.
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview` passed.
+
+Still left to do:
+
+- Add automatic dashboard screenshot capture for trades entered from the sidebar:
+  - after a successful live sidebar placement, capture the dashboard/chart state and attach the image to the matching local journal event;
+  - keep captures local;
+  - add clear media storage path/cleanup controls;
+  - do not add automatic screen recording unless separately requested.
+- Decide the screenshot implementation path:
+  - browser-side capture of the chart/workspace surface if a dependable canvas/DOM capture path is available;
+  - server-assisted capture only if it can be done without adding fragile background browser automation;
+  - local media table/files linked to `trade_events`.
+- Use `/Users/scottmunger/Desktop/Trading/Options_Trading_Journal` only as a product/data reference:
+  - inspect what fields, review flows, stats, tags, setup/outcome concepts, and trade lifecycle views are useful;
+  - do not port its Vue/Vite + Node/Express + MongoDB/Parse/Docker architecture into this single-file Flask dashboard.
+- Improve deterministic closed-trade P/L only when the order/position lifecycle can prove entry, exit, quantities, and prices reliably.
+- Add a clearer media/attachment area to the full journal detail panel once screenshots exist.
+- Consider a lightweight desktop launcher later, likely a local Flask subprocess plus Qt WebEngine wrapper or simpler launcher, rather than a full packaged app first.
+- Re-check the journal workspace visually in the in-app browser at narrow and wide widths with real journal data.
+- Keep deferred/non-goals unchanged: no live Schwab bracket/OCO child orders, no SPX-specific validation, no multi-leg spreads, no automated trading from chart clicks/alerts/flow, and no analytical formula changes.
+
+### Prompt For Next Session
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard on branch codex/options-trading-rail-plan.
+
+Read AGENTS.md first, then read:
+- docs/OPTIONS_TRADING_RAIL_IMPLEMENTATION_PLAN.md
+- docs/OPTIONS_TRADING_RAIL_UI_POLISH_PLAN.md
+
+Before editing, run:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Continue only the dedicated fourth order-entry trading rail and related Journal surfaces:
+- #trade-rail-header
+- #trade-rail
+- .trade-rail-shell
+- #trade-journal-workspace
+- Journal panel/workspace
+- Position / Contract Picker / Selected Contract / Order Ticket / Bracket Plan / Preview / Orders panels
+
+Current latest state:
+- Trading rail has preview-only and guarded live single-leg DAY LIMIT option orders.
+- Bracket Plan is planning-only and must not alter Schwab preview/place payloads.
+- Contract Picker behaves like a strike ladder: calls sort low-to-high and puts sort high-to-low. On side/expiry/range changes, the side-specific ATM anchor is selected and auto-scrolled to the top of the chain list.
+- Journal persistence exists in local SQLite `trade_events`.
+- Successful previews, successful live placements, and successful confirmed cancels auto-record local journal events.
+- `/trade/journal` returns recent events.
+- `/trade/journal/update` saves annotations.
+- `/trade/journal/create` creates local-only manual notes.
+- Rail Journal button opens the trade rail if collapsed, refreshes journal data, and scrolls the Journal panel into view.
+- Rail Journal panel has filters/search, selected-entry detail, manual New entry, edit modal controls, and a Review button that scrolls to the full workspace.
+- Full `#trade-journal-workspace` exists below the Live Alerts / Flow Pulse lane with filters/search, event table, selected-entry detail, lifecycle grouping, daily/weekly counts, status/event-type summaries, ticker/contract summaries, setup/tag summaries, and conservative deterministic P/L display.
+- Static HTML and JS rebuild helpers must stay in parity:
+  - trade rail markup in static HTML and `buildTradeRailHtml()`;
+  - journal workspace markup in static HTML and `buildTradeJournalWorkspaceHtml()`;
+  - rebuild path through `ensurePriceChartDom()`, `ensureTradeRailDom()`, and `ensureTradeJournalWorkspace()`.
+
+Main next undertaking:
+Add automatic dashboard screenshot attachments for trades entered from the sidebar.
+
+Screenshot direction:
+- On successful live sidebar placement only, attach a dashboard/chart screenshot to the matching local journal event.
+- Keep screenshots local.
+- Add clear local storage path and cleanup/delete controls.
+- Link media to `trade_events` using a local table or safe file metadata.
+- Do not add automatic screen recording unless explicitly requested later.
+- Do not make screenshots alter Schwab preview/place payloads or live-trading safety gates.
+- Do not take screenshots for chart clicks, alerts, flow, previews, or manual notes unless the user explicitly asks.
+
+Reference journal:
+- Review `/Users/scottmunger/Desktop/Trading/Options_Trading_Journal` only for product ideas and data-shape inspiration: fields, stats, setup/tag/outcome concepts, lifecycle review, calendar summaries, and trade review ergonomics.
+- Do not port its Vue/Vite + Node/Express + MongoDB/Parse/Docker architecture.
+- Keep this dashboard single-file Flask + vanilla JS + local SQLite.
+
+Desktop-wrapper context:
+- PySide6/PyQt6 + QWebEngineView wrapper appears feasible but not implemented.
+- Prefer a lightweight launcher or managed Flask subprocess over a deep rewrite.
+- Preserve Schwab OAuth/token callback behavior and be careful with SQLite/media file paths if packaged later.
+
+Do not implement without explicit approval:
+- Live Schwab bracket/OCO child orders.
+- SPX-specific validation.
+- Multi-leg spreads.
+- Automated trading from chart clicks, alerts, or flow.
+- Automatic screen recordings.
+
+Run after changes:
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+
+Also syntax-check rendered inline JS if frontend code changes:
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script>(.*?)</script>', html, flags=re.S); pathlib.Path('/private/tmp/gex-dashboard-inline.js').write_text('\n'.join(scripts), encoding='utf-8')"
+node --check /private/tmp/gex-dashboard-inline.js
 ```

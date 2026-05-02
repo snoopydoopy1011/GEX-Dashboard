@@ -10190,7 +10190,7 @@ def index():
             position: relative;
             display: grid;
             grid-template-columns: minmax(0, 1fr) var(--gex-col-w) var(--rail-col-w) var(--trade-rail-w);
-            grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto auto;
+            grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto auto auto;
             column-gap: 2px;
             row-gap: 4px;
             width: 100%;
@@ -10338,9 +10338,10 @@ def index():
         }
         /* Row 3: flow event lane spans all columns. */
         .chart-grid > .flow-event-lane { grid-column: 1 / -1; grid-row: 3; }
+        .chart-grid > .journal-workspace { grid-column: 1 / -1; grid-row: 4; }
         /* Remaining rows span all columns. */
-        .chart-grid > #secondary-tabs { grid-column: 1 / -1; grid-row: 4; }
-        .chart-grid > .charts-grid    { grid-column: 1 / -1; grid-row: 5; }
+        .chart-grid > #secondary-tabs { grid-column: 1 / -1; grid-row: 5; }
+        .chart-grid > .charts-grid    { grid-column: 1 / -1; grid-row: 6; }
         .chart-grid > .gex-resize-handle {
             grid-column: 2;
             grid-row: 1 / span 2;
@@ -11589,6 +11590,23 @@ def index():
             text-transform: uppercase;
             cursor: pointer;
         }
+        .trade-journal-panel-actions {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+        .trade-journal-workspace-link {
+            min-height: 28px;
+            border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+            background: color-mix(in srgb, var(--accent) 10%, var(--bg-0));
+            color: var(--fg-0);
+            border-radius: 6px;
+            padding: 0 8px;
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
         .trade-bracket-table {
             border: 1px solid var(--border);
             border-radius: 6px;
@@ -12004,6 +12022,332 @@ def index():
             .trade-journal-editor-grid {
                 grid-template-columns: minmax(0, 1fr);
             }
+        }
+
+        .journal-workspace {
+            width: 100%;
+            min-width: 0;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .journal-workspace,
+        .journal-workspace * {
+            box-sizing: border-box;
+        }
+        .journal-workspace-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 14px;
+            align-items: flex-start;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 12px;
+        }
+        .journal-workspace-kicker {
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .journal-workspace-title {
+            margin-top: 3px;
+            color: var(--fg-0);
+            font-size: 20px;
+            line-height: 1.15;
+            font-weight: 800;
+        }
+        .journal-workspace-meta {
+            margin-top: 4px;
+            color: var(--fg-2);
+            font-size: 12px;
+            line-height: 1.35;
+        }
+        .journal-workspace-actions,
+        .journal-workspace-tools {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px;
+            align-items: center;
+        }
+        .journal-workspace-actions button,
+        .journal-workspace-tools button,
+        .journal-workspace-tools select,
+        .journal-workspace-tools input {
+            min-height: 32px;
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 0 10px;
+            font-size: 11px;
+            font-family: inherit;
+        }
+        .journal-workspace-actions button,
+        .journal-workspace-tools button {
+            cursor: pointer;
+            color: var(--fg-0);
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+        .journal-workspace-actions [data-trade-journal-workspace-new],
+        .journal-workspace-tools [data-trade-journal-workspace-clear] {
+            border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+            background: color-mix(in srgb, var(--accent) 10%, var(--bg-0));
+        }
+        .journal-workspace-tools select {
+            width: min(190px, 100%);
+        }
+        .journal-workspace-tools input {
+            flex: 1 1 280px;
+        }
+        .journal-workspace-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.8fr);
+            gap: 12px;
+            align-items: start;
+        }
+        .journal-workspace-main,
+        .journal-workspace-side {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .journal-stat-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .journal-stat {
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-0);
+            padding: 10px;
+        }
+        .journal-stat span,
+        .journal-section-title {
+            display: block;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+        .journal-stat strong {
+            display: block;
+            margin-top: 5px;
+            color: var(--fg-0);
+            font-size: 20px;
+            line-height: 1.1;
+            font-weight: 800;
+        }
+        .journal-stat em {
+            display: block;
+            margin-top: 4px;
+            color: var(--fg-2);
+            font-size: 11px;
+            line-height: 1.3;
+            font-style: normal;
+        }
+        .journal-panel {
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-0);
+            padding: 10px;
+        }
+        .journal-lifecycle-list,
+        .journal-summary-list,
+        .journal-count-list {
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+            margin-top: 8px;
+        }
+        .journal-lifecycle-row,
+        .journal-summary-row,
+        .journal-count-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: center;
+            color: var(--fg-1);
+            font-size: 12px;
+            line-height: 1.3;
+        }
+        .journal-lifecycle-row {
+            border-top: 1px solid var(--border);
+            padding-top: 7px;
+        }
+        .journal-lifecycle-row:first-child {
+            border-top: none;
+            padding-top: 0;
+        }
+        .journal-lifecycle-title,
+        .journal-detail-title {
+            min-width: 0;
+            color: var(--fg-0);
+            font-weight: 800;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .journal-lifecycle-meta,
+        .journal-summary-sub,
+        .journal-detail-meta {
+            color: var(--fg-2);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .journal-lifecycle-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            justify-content: flex-end;
+        }
+        .journal-badge {
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-1);
+            color: var(--fg-1);
+            padding: 2px 7px;
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .journal-badge.call {
+            border-color: color-mix(in srgb, var(--call) 42%, var(--border));
+            color: var(--call);
+        }
+        .journal-badge.put {
+            border-color: color-mix(in srgb, var(--put) 42%, var(--border));
+            color: var(--put);
+        }
+        .journal-table-wrap {
+            min-width: 0;
+            overflow: hidden;
+        }
+        .journal-table-head,
+        .journal-table-row {
+            display: grid;
+            grid-template-columns: minmax(118px, 0.75fr) minmax(120px, 0.85fr) minmax(72px, 0.4fr) minmax(170px, 1.2fr) minmax(78px, 0.45fr) minmax(150px, 1fr) minmax(80px, 0.5fr);
+            gap: 8px;
+            align-items: center;
+        }
+        .journal-table-head {
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            padding: 0 8px 7px;
+            border-bottom: 1px solid var(--border);
+        }
+        .journal-table-body {
+            display: flex;
+            flex-direction: column;
+            max-height: 520px;
+            overflow: auto;
+        }
+        .journal-table-row {
+            width: 100%;
+            border: none;
+            border-bottom: 1px solid var(--border);
+            background: transparent;
+            color: var(--fg-1);
+            padding: 8px;
+            text-align: left;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        .journal-table-row:hover,
+        .journal-table-row.active {
+            background: color-mix(in srgb, var(--accent) 8%, transparent);
+        }
+        .journal-table-cell {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 12px;
+            line-height: 1.3;
+        }
+        .journal-table-cell.strong {
+            color: var(--fg-0);
+            font-weight: 800;
+        }
+        .journal-workspace-detail {
+            min-width: 0;
+        }
+        .journal-detail-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            align-items: flex-start;
+            margin-bottom: 9px;
+        }
+        .journal-detail-edit {
+            min-height: 28px;
+            border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+            border-radius: 6px;
+            background: color-mix(in srgb, var(--accent) 10%, var(--bg-0));
+            color: var(--fg-0);
+            padding: 0 10px;
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+        .journal-detail-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 7px;
+        }
+        .journal-detail-field {
+            min-width: 0;
+            border-top: 1px solid var(--border);
+            padding-top: 7px;
+        }
+        .journal-detail-field span {
+            display: block;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .journal-detail-field strong {
+            display: block;
+            margin-top: 4px;
+            color: var(--fg-0);
+            font-size: 12px;
+            line-height: 1.4;
+            font-weight: 600;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+        .journal-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+        .journal-empty {
+            border: 1px dashed var(--border);
+            border-radius: 8px;
+            background: var(--bg-0);
+            color: var(--fg-2);
+            padding: 14px;
+            font-size: 12px;
+            line-height: 1.45;
+            text-align: center;
         }
 
         .rail-flow-shell {
@@ -15369,7 +15713,7 @@ def index():
                 --workspace-top-reclaim: 28px;
                 --workspace-flow-reclaim: 64px;
                 grid-template-columns: minmax(0, 1fr) var(--rail-col-w) var(--trade-rail-w);
-                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px auto auto;
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto minmax(34px, auto) 420px auto auto;
             }
             .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
             .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
@@ -15379,15 +15723,16 @@ def index():
             .chart-grid > .trade-rail            { grid-column: 3; grid-row: 2; }
             .chart-grid > .trade-rail-resize-handle { grid-column: 3; grid-row: 1 / span 2; }
             .chart-grid > .flow-event-lane       { grid-column: 1 / -1; grid-row: 3; }
-            .chart-grid > .gex-col-header        { grid-column: 1; grid-row: 4; }
-            .chart-grid > .gex-column            { grid-column: 1; grid-row: 5; height: 420px; }
+            .chart-grid > .journal-workspace     { grid-column: 1 / -1; grid-row: 4; }
+            .chart-grid > .gex-col-header        { grid-column: 1; grid-row: 5; }
+            .chart-grid > .gex-column            { grid-column: 1; grid-row: 6; height: 420px; }
             .chart-grid > .gex-resize-handle     { display: none; }
             .chart-grid > #secondary-tabs,
             .chart-grid > .charts-grid {
                 grid-column: 1 / -1;
             }
-            .chart-grid > #secondary-tabs { grid-row: 6; }
-            .chart-grid > .charts-grid    { grid-row: 7; }
+            .chart-grid > #secondary-tabs { grid-row: 7; }
+            .chart-grid > .charts-grid    { grid-row: 8; }
         }
 
         /* Collapse right rail below the main chart on narrow widths */
@@ -15396,19 +15741,20 @@ def index():
                 --workspace-top-reclaim: 0px;
                 --workspace-flow-reclaim: 0px;
                 grid-template-columns: 1fr;
-                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto minmax(34px, auto) 420px minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto minmax(34px, auto) 420px minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
             }
             .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
             .chart-grid > .flow-event-lane { grid-column: 1; grid-row: 3; }
-            .chart-grid > .gex-col-header { grid-column: 1; grid-row: 4; }
-            .chart-grid > .gex-column { grid-column: 1; grid-row: 5; }
-            .chart-grid > .right-rail-tabs { grid-column: 1; grid-row: 6; }
-            .chart-grid > .right-rail-panels { grid-column: 1; grid-row: 7; }
-            .chart-grid > .trade-rail-header { grid-column: 1; grid-row: 8; }
-            .chart-grid > .trade-rail { grid-column: 1; grid-row: 9; }
-            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 10; }
-            .chart-grid > .charts-grid { grid-column: 1; grid-row: 11; }
+            .chart-grid > .journal-workspace { grid-column: 1; grid-row: 4; }
+            .chart-grid > .gex-col-header { grid-column: 1; grid-row: 5; }
+            .chart-grid > .gex-column { grid-column: 1; grid-row: 6; }
+            .chart-grid > .right-rail-tabs { grid-column: 1; grid-row: 7; }
+            .chart-grid > .right-rail-panels { grid-column: 1; grid-row: 8; }
+            .chart-grid > .trade-rail-header { grid-column: 1; grid-row: 9; }
+            .chart-grid > .trade-rail { grid-column: 1; grid-row: 10; }
+            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 11; }
+            .chart-grid > .charts-grid { grid-column: 1; grid-row: 12; }
             .chart-grid > .gex-resize-handle,
             .chart-grid > .right-rail-resize-handle,
             .chart-grid > .trade-rail-resize-handle { display: none; }
@@ -15422,6 +15768,20 @@ def index():
             .flow-event-lane {
                 grid-template-columns: minmax(0, 1fr);
             }
+            .journal-workspace-grid,
+            .journal-summary-grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
+            .journal-stat-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .journal-table-wrap {
+                overflow-x: auto;
+            }
+            .journal-table-head,
+            .journal-table-row {
+                min-width: 900px;
+            }
             #flow-event-strip-pulse .rail-pulse-item,
             #flow-event-strip-pulse .rail-pulse-empty {
                 flex-basis: clamp(160px, 20vw, 220px);
@@ -15434,6 +15794,29 @@ def index():
                 min-width: 100%;
                 max-width: none;
                 flex-basis: 100%;
+            }
+        }
+        @media screen and (max-width: 760px) {
+            .journal-workspace {
+                padding: 10px;
+            }
+            .journal-workspace-head {
+                flex-direction: column;
+            }
+            .journal-workspace-actions,
+            .journal-workspace-tools {
+                width: 100%;
+            }
+            .journal-workspace-actions button,
+            .journal-workspace-tools button,
+            .journal-workspace-tools select,
+            .journal-workspace-tools input {
+                flex: 1 1 100%;
+                width: 100%;
+            }
+            .journal-stat-grid,
+            .journal-detail-grid {
+                grid-template-columns: minmax(0, 1fr);
             }
         }
 
@@ -16754,7 +17137,10 @@ def index():
                     <section class="trade-panel trade-journal-panel" data-trade-journal-panel>
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Journal</div>
-                            <button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button>
+                            <div class="trade-journal-panel-actions">
+                                <button type="button" class="trade-journal-workspace-link" data-trade-journal-workspace-open>Review</button>
+                                <button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button>
+                            </div>
                         </div>
                         <div class="trade-panel-note" data-trade-journal-note>Local rail events</div>
                         <div class="trade-journal-tools">
@@ -16849,6 +17235,60 @@ def index():
                     </div>
                 </div>
             </div>
+            <section class="journal-workspace" id="trade-journal-workspace" data-trade-journal-workspace>
+                <div class="journal-workspace-head">
+                    <div>
+                        <div class="journal-workspace-kicker">Trading Journal</div>
+                        <div class="journal-workspace-title">Review Workspace</div>
+                        <div class="journal-workspace-meta" data-trade-journal-workspace-note>No local journal events loaded.</div>
+                    </div>
+                    <div class="journal-workspace-actions">
+                        <button type="button" data-trade-journal-workspace-refresh>Refresh</button>
+                        <button type="button" data-trade-journal-workspace-new>New Entry</button>
+                    </div>
+                </div>
+                <div class="journal-workspace-tools">
+                    <select data-trade-journal-workspace-status aria-label="Journal workspace status filter">
+                        <option value="">All status</option>
+                        <option value="planned">Planned</option>
+                        <option value="open">Open</option>
+                        <option value="closed">Closed</option>
+                        <option value="review">Review</option>
+                    </select>
+                    <select data-trade-journal-workspace-type aria-label="Journal workspace event filter">
+                        <option value="">All events</option>
+                        <option value="previewed_order">Previewed</option>
+                        <option value="placed_order">Placed</option>
+                        <option value="cancelled_order">Canceled</option>
+                        <option value="manual_note">Manual</option>
+                    </select>
+                    <input data-trade-journal-workspace-search type="search" maxlength="120" placeholder="Search ticker, contract, setup, tags, notes">
+                    <button type="button" data-trade-journal-workspace-clear>Clear</button>
+                </div>
+                <div class="journal-workspace-grid">
+                    <div class="journal-workspace-main">
+                        <div class="journal-stat-grid" data-trade-journal-workspace-stats></div>
+                        <div class="journal-panel" data-trade-journal-workspace-lifecycle>
+                            <span class="journal-section-title">Lifecycle</span>
+                            <div class="journal-empty">Previewed, placed, canceled, closed, reviewed, and manual entries will group here.</div>
+                        </div>
+                        <div class="journal-panel journal-table-wrap">
+                            <div class="journal-table-head">
+                                <div>Time</div><div>Event</div><div>Ticker</div><div>Contract</div><div>Status</div><div>Setup / Tags</div><div>P/L</div>
+                            </div>
+                            <div class="journal-table-body" data-trade-journal-workspace-table>
+                                <div class="journal-empty">No journal events yet.</div>
+                            </div>
+                        </div>
+                    </div>
+                    <aside class="journal-workspace-side">
+                        <div class="journal-panel journal-workspace-detail" data-trade-journal-workspace-detail>
+                            <div class="journal-empty">Select an event to review details.</div>
+                        </div>
+                        <div class="journal-summary-grid" data-trade-journal-workspace-summaries></div>
+                    </aside>
+                </div>
+            </section>
         </div>
     </div>
 
@@ -26870,6 +27310,65 @@ def index():
             return lane;
         }
 
+        function buildTradeJournalWorkspaceHtml() {
+            return (
+                '<section class="journal-workspace" id="trade-journal-workspace" data-trade-journal-workspace>' +
+                    '<div class="journal-workspace-head">' +
+                        '<div>' +
+                            '<div class="journal-workspace-kicker">Trading Journal</div>' +
+                            '<div class="journal-workspace-title">Review Workspace</div>' +
+                            '<div class="journal-workspace-meta" data-trade-journal-workspace-note>No local journal events loaded.</div>' +
+                        '</div>' +
+                        '<div class="journal-workspace-actions">' +
+                            '<button type="button" data-trade-journal-workspace-refresh>Refresh</button>' +
+                            '<button type="button" data-trade-journal-workspace-new>New Entry</button>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="journal-workspace-tools">' +
+                        '<select data-trade-journal-workspace-status aria-label="Journal workspace status filter"><option value="">All status</option><option value="planned">Planned</option><option value="open">Open</option><option value="closed">Closed</option><option value="review">Review</option></select>' +
+                        '<select data-trade-journal-workspace-type aria-label="Journal workspace event filter"><option value="">All events</option><option value="previewed_order">Previewed</option><option value="placed_order">Placed</option><option value="cancelled_order">Canceled</option><option value="manual_note">Manual</option></select>' +
+                        '<input data-trade-journal-workspace-search type="search" maxlength="120" placeholder="Search ticker, contract, setup, tags, notes">' +
+                        '<button type="button" data-trade-journal-workspace-clear>Clear</button>' +
+                    '</div>' +
+                    '<div class="journal-workspace-grid">' +
+                        '<div class="journal-workspace-main">' +
+                            '<div class="journal-stat-grid" data-trade-journal-workspace-stats></div>' +
+                            '<div class="journal-panel" data-trade-journal-workspace-lifecycle><span class="journal-section-title">Lifecycle</span><div class="journal-empty">Previewed, placed, canceled, closed, reviewed, and manual entries will group here.</div></div>' +
+                            '<div class="journal-panel journal-table-wrap">' +
+                                '<div class="journal-table-head"><div>Time</div><div>Event</div><div>Ticker</div><div>Contract</div><div>Status</div><div>Setup / Tags</div><div>P/L</div></div>' +
+                                '<div class="journal-table-body" data-trade-journal-workspace-table><div class="journal-empty">No journal events yet.</div></div>' +
+                            '</div>' +
+                        '</div>' +
+                        '<aside class="journal-workspace-side">' +
+                            '<div class="journal-panel journal-workspace-detail" data-trade-journal-workspace-detail><div class="journal-empty">Select an event to review details.</div></div>' +
+                            '<div class="journal-summary-grid" data-trade-journal-workspace-summaries></div>' +
+                        '</aside>' +
+                    '</div>' +
+                '</section>'
+            );
+        }
+
+        function ensureTradeJournalWorkspace(grid = document.getElementById('chart-grid')) {
+            if (!grid) return null;
+            const workspaces = Array.from(document.querySelectorAll('#trade-journal-workspace'));
+            workspaces.slice(1).forEach(extra => extra.remove());
+            let workspace = workspaces[0] || null;
+            if (!workspace || !grid.contains(workspace)) {
+                if (workspace && workspace.parentNode) workspace.parentNode.removeChild(workspace);
+                grid.insertAdjacentHTML('beforeend', buildTradeJournalWorkspaceHtml());
+                workspace = document.getElementById('trade-journal-workspace');
+            }
+            const lane = document.getElementById('flow-event-lane');
+            if (workspace && lane && workspace.previousElementSibling !== lane) {
+                lane.insertAdjacentElement('afterend', workspace);
+            }
+            if (typeof tradeRailState !== 'undefined') {
+                wireTradeJournalWorkspaceControls(workspace);
+                renderTradeJournalWorkspace();
+            }
+            return workspace;
+        }
+
         // Single source of truth for the overview-panel markup. Both the initial
         // server-rendered HTML and ensurePriceChartDom's rebuild path must
         // produce identical DOM, or tick rebuilds (ticker switch) drop the
@@ -27042,7 +27541,7 @@ def index():
                         '<div data-trade-orders-list><div class="trade-empty">Select an account to show open and recent orders.</div></div>' +
                     '</section>' +
                     '<section class="trade-panel trade-journal-panel" data-trade-journal-panel>' +
-                        '<div class="trade-panel-head"><div class="trade-panel-title">Journal</div><button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button></div>' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Journal</div><div class="trade-journal-panel-actions"><button type="button" class="trade-journal-workspace-link" data-trade-journal-workspace-open>Review</button><button type="button" class="trade-journal-refresh" data-trade-journal-refresh>Refresh</button></div></div>' +
                         '<div class="trade-panel-note" data-trade-journal-note>Local rail events</div>' +
                         '<div class="trade-journal-tools">' +
                             '<select data-trade-journal-status-filter aria-label="Journal status filter"><option value="">All status</option><option value="planned">Planned</option><option value="open">Open</option><option value="closed">Closed</option><option value="review">Review</option></select>' +
@@ -27126,6 +27625,7 @@ def index():
                 ensureRightRailControls(grid);
                 ensureTradeRailDom(grid);
                 ensureFlowEventLane();
+                ensureTradeJournalWorkspace(grid);
                 return priceContainer;
             }
 
@@ -27260,12 +27760,13 @@ def index():
             }
             ensureTradeRailDom(grid);
             ensureFlowEventLane();
+            ensureTradeJournalWorkspace(grid);
             renderStrikeRailPanel();
             return priceContainer;
         }
 
         function showPriceChartUI() {
-            const ids = ['workspace-toolbar-shell', 'tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels', 'right-rail-collapse-toggle', 'right-rail-resize-handle', 'trade-rail-header', 'trade-rail-collapse-toggle', 'trade-rail-resize-handle', 'trade-rail', 'flow-event-lane'];
+            const ids = ['workspace-toolbar-shell', 'tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels', 'right-rail-collapse-toggle', 'right-rail-resize-handle', 'trade-rail-header', 'trade-rail-collapse-toggle', 'trade-rail-resize-handle', 'trade-rail', 'flow-event-lane', 'trade-journal-workspace'];
             ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
             const pc = document.querySelector('.price-chart-container');
             if (pc) pc.style.display = 'block';
@@ -27658,6 +28159,10 @@ def index():
             journalStatusFilter: '',
             journalTypeFilter: '',
             journalSearch: '',
+            journalWorkspaceStatusFilter: '',
+            journalWorkspaceTypeFilter: '',
+            journalWorkspaceSearch: '',
+            journalWorkspaceSelectedId: '',
             journalSaving: false,
             journalSaveError: '',
             positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
@@ -28350,17 +28855,22 @@ def index():
             if (statusFilter && statusFilter.value !== tradeRailState.journalStatusFilter) statusFilter.value = tradeRailState.journalStatusFilter || '';
             if (typeFilter && typeFilter.value !== tradeRailState.journalTypeFilter) typeFilter.value = tradeRailState.journalTypeFilter || '';
             if (searchInput && searchInput.value !== tradeRailState.journalSearch) searchInput.value = tradeRailState.journalSearch || '';
-            if (!list) return;
+            if (!list) {
+                renderTradeJournalWorkspace();
+                return;
+            }
             if (tradeRailState.journalLoading) {
                 if (note) note.textContent = 'Loading';
                 list.innerHTML = '<div class="trade-empty">Loading local trade events...</div>';
                 renderTradeJournalDetail(null);
+                renderTradeJournalWorkspace();
                 return;
             }
             if (tradeRailState.journalError) {
                 if (note) note.textContent = 'Unavailable';
                 list.innerHTML = '<div class="trade-empty">' + _escapeHtml(tradeRailState.journalError) + '</div>';
                 renderTradeJournalDetail(null);
+                renderTradeJournalWorkspace();
                 return;
             }
             const events = Array.isArray(tradeRailState.journalEvents) ? tradeRailState.journalEvents : [];
@@ -28375,11 +28885,13 @@ def index():
             if (!events.length) {
                 list.innerHTML = '<div class="trade-empty">Previewed, placed, canceled, and manual rail notes will appear here.</div>';
                 renderTradeJournalDetail(null);
+                renderTradeJournalWorkspace();
                 return;
             }
             if (!filtered.length) {
                 list.innerHTML = '<div class="trade-empty">No journal events match the current filters.</div>';
                 renderTradeJournalDetail(null);
+                renderTradeJournalWorkspace();
                 return;
             }
             list.innerHTML = filtered.map(event => {
@@ -28420,6 +28932,7 @@ def index():
                 });
             });
             renderTradeJournalDetail(getTradeJournalEvent(tradeRailState.journalSelectedId));
+            renderTradeJournalWorkspace();
         }
         function formatTradeJournalEventType(eventType) {
             const text = String(eventType || '').replace(/_/g, ' ');
@@ -28454,6 +28967,349 @@ def index():
                 if (type && String(event.event_type || '').toLowerCase() !== type) return false;
                 if (query && !getTradeJournalEventText(event).includes(query)) return false;
                 return true;
+            });
+        }
+        function scrollTradeJournalWorkspaceIntoView() {
+            const workspace = document.querySelector('[data-trade-journal-workspace]');
+            if (!workspace) return;
+            try {
+                workspace.scrollIntoView({ block: 'start', behavior: 'smooth' });
+            } catch (e) {
+                workspace.scrollIntoView(true);
+            }
+        }
+        function getFilteredTradeJournalWorkspaceEvents() {
+            const status = String(tradeRailState.journalWorkspaceStatusFilter || '').toLowerCase();
+            const type = String(tradeRailState.journalWorkspaceTypeFilter || '').toLowerCase();
+            const query = String(tradeRailState.journalWorkspaceSearch || '').trim().toLowerCase();
+            return (Array.isArray(tradeRailState.journalEvents) ? tradeRailState.journalEvents : []).filter(event => {
+                if (status && String(event.journal_status || '').toLowerCase() !== status) return false;
+                if (type && String(event.event_type || '').toLowerCase() !== type) return false;
+                if (query && !getTradeJournalEventText(event).includes(query)) return false;
+                return true;
+            });
+        }
+        function fmtTradeSignedMoney(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return 'Not inferred';
+            const abs = '$' + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            return (n > 0 ? '+' : n < 0 ? '-' : '') + abs;
+        }
+        function getTradeJournalDate(value) {
+            const d = new Date(value || '');
+            return Number.isNaN(d.getTime()) ? null : d;
+        }
+        function getTradeJournalDateKey(value) {
+            const d = value instanceof Date ? value : getTradeJournalDate(value);
+            if (!d) return 'Unknown';
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return y + '-' + m + '-' + day;
+        }
+        function getTradeJournalWeekKey(value) {
+            const d = value instanceof Date ? new Date(value.getTime()) : getTradeJournalDate(value);
+            if (!d) return 'Unknown';
+            const day = d.getDay();
+            const offset = day === 0 ? -6 : 1 - day;
+            d.setDate(d.getDate() + offset);
+            return getTradeJournalDateKey(d);
+        }
+        function addJournalCount(map, key, amount = 1) {
+            const label = String(key || 'Unknown').trim() || 'Unknown';
+            map.set(label, (map.get(label) || 0) + amount);
+        }
+        function getJournalCountRows(map, limit = 6) {
+            return Array.from(map.entries())
+                .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+                .slice(0, limit);
+        }
+        function getTradeJournalTags(event) {
+            return String(event && event.journal_tags || '')
+                .split(/[,\\n]+/)
+                .map(tag => tag.trim())
+                .filter(Boolean);
+        }
+        function getTradeJournalSetupTags(event) {
+            return [event && event.journal_setup, getTradeJournalTags(event).join(', ')].filter(Boolean).join(' / ');
+        }
+        function getTradeJournalExplicitPnl(event) {
+            const details = event && event.details ? event.details : {};
+            const candidates = [
+                details.realized_pnl,
+                details.realizedPnl,
+                details.pnl,
+                details.profit_loss,
+                details.profitLoss,
+                details.day_pnl,
+                details.dayPnl,
+            ];
+            for (const value of candidates) {
+                const n = Number(value);
+                if (Number.isFinite(n)) return { value: n, source: 'event data' };
+            }
+            return null;
+        }
+        function getTradeJournalPositionPnl(event) {
+            if (!event || !event.contract_symbol || !tradeRailState.accountDetails) return null;
+            if (event.account_hash && tradeRailState.accountHash && String(event.account_hash) !== String(tradeRailState.accountHash)) return null;
+            const positions = Array.isArray(tradeRailState.accountDetails.positions) ? tradeRailState.accountDetails.positions : [];
+            const match = positions.find(pos => String(pos.symbol || '') === String(event.contract_symbol));
+            if (!match) return null;
+            const n = Number(match.day_pnl);
+            if (!Number.isFinite(n)) return null;
+            return { value: n, source: 'current position day P/L' };
+        }
+        function getTradeJournalPnlInfo(event, options = {}) {
+            const explicit = getTradeJournalExplicitPnl(event);
+            if (explicit) return explicit;
+            if (options.allowPosition) return getTradeJournalPositionPnl(event);
+            return null;
+        }
+        function buildTradeJournalLifecycle(events) {
+            const groups = new Map();
+            events.forEach(event => {
+                const fallback = [event.ticker, event.contract_symbol, event.account_hash, event.instruction].filter(Boolean).join('|');
+                const key = event.order_hash || fallback || ('manual-' + event.id);
+                if (!groups.has(key)) {
+                    groups.set(key, {
+                        key,
+                        events: [],
+                        ticker: event.ticker || '',
+                        contract: event.contract_symbol || '',
+                        instruction: event.instruction || '',
+                        status: event.journal_status || '',
+                    });
+                }
+                const group = groups.get(key);
+                group.events.push(event);
+                if (!group.ticker && event.ticker) group.ticker = event.ticker;
+                if (!group.contract && event.contract_symbol) group.contract = event.contract_symbol;
+                if (!group.instruction && event.instruction) group.instruction = event.instruction;
+                if (event.journal_status === 'closed' || event.journal_status === 'review') group.status = event.journal_status;
+                else if (!group.status && event.journal_status) group.status = event.journal_status;
+            });
+            return Array.from(groups.values())
+                .map(group => {
+                    group.events.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+                    return group;
+                })
+                .sort((a, b) => {
+                    const ad = a.events.length ? String(a.events[a.events.length - 1].created_at || '') : '';
+                    const bd = b.events.length ? String(b.events[b.events.length - 1].created_at || '') : '';
+                    return bd.localeCompare(ad);
+                });
+        }
+        function renderTradeJournalStats(events, filtered) {
+            const target = document.querySelector('[data-trade-journal-workspace-stats]');
+            if (!target) return;
+            const today = getTradeJournalDateKey(new Date());
+            const week = getTradeJournalWeekKey(new Date());
+            const todayCount = filtered.filter(event => getTradeJournalDateKey(event.created_at) === today).length;
+            const weekCount = filtered.filter(event => getTradeJournalWeekKey(event.created_at) === week).length;
+            const openCount = filtered.filter(event => String(event.journal_status || '').toLowerCase() === 'open').length;
+            const reviewedCount = filtered.filter(event => ['closed', 'review'].includes(String(event.journal_status || '').toLowerCase())).length;
+            const explicitPnls = filtered.map(event => getTradeJournalPnlInfo(event, { allowPosition: false })).filter(Boolean);
+            const pnlTotal = explicitPnls.reduce((sum, item) => sum + Number(item.value || 0), 0);
+            const pnlText = explicitPnls.length ? fmtTradeSignedMoney(pnlTotal) : 'Not inferred';
+            target.innerHTML = [
+                ['Filtered Events', filtered.length, events.length === filtered.length ? 'All local events' : filtered.length + ' of ' + events.length],
+                ['Today', todayCount, today],
+                ['This Week', weekCount, 'Week of ' + week],
+                ['Open / Reviewed', openCount + ' / ' + reviewedCount, 'Open vs closed/review'],
+                ['Deterministic P/L', pnlText, explicitPnls.length ? explicitPnls.length + ' event values' : 'Positions/orders not inferred'],
+            ].map(([label, value, note]) => (
+                '<div class="journal-stat"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(String(value)) + '</strong><em>' + _escapeHtml(note) + '</em></div>'
+            )).join('');
+        }
+        function renderTradeJournalLifecycle(events) {
+            const target = document.querySelector('[data-trade-journal-workspace-lifecycle]');
+            if (!target) return;
+            const groups = buildTradeJournalLifecycle(events).slice(0, 8);
+            if (!groups.length) {
+                target.innerHTML = '<span class="journal-section-title">Lifecycle</span><div class="journal-empty">No lifecycle groups match the current filters.</div>';
+                return;
+            }
+            target.innerHTML =
+                '<span class="journal-section-title">Lifecycle</span>' +
+                '<div class="journal-lifecycle-list">' + groups.map(group => {
+                    const typeCounts = new Map();
+                    group.events.forEach(event => addJournalCount(typeCounts, formatTradeJournalEventType(event.event_type)));
+                    const badges = getJournalCountRows(typeCounts, 5).map(([label, count]) => (
+                        '<span class="journal-badge">' + _escapeHtml(label + ' ' + count) + '</span>'
+                    )).join('');
+                    const first = group.events[0] || {};
+                    const last = group.events[group.events.length - 1] || {};
+                    const title = [group.ticker, group.instruction, group.contract].filter(Boolean).join(' ') || 'Manual journal lifecycle';
+                    const meta = [fmtTradeOrderTime(first.created_at), 'to', fmtTradeOrderTime(last.created_at), group.status ? 'status ' + group.status : ''].filter(Boolean).join(' ');
+                    return '<div class="journal-lifecycle-row">' +
+                        '<div><div class="journal-lifecycle-title" title="' + _escapeHtml(title) + '">' + _escapeHtml(title) + '</div><div class="journal-lifecycle-meta">' + _escapeHtml(meta) + '</div></div>' +
+                        '<div class="journal-lifecycle-badges">' + badges + '</div>' +
+                    '</div>';
+                }).join('') + '</div>';
+        }
+        function renderTradeJournalSummaries(events) {
+            const target = document.querySelector('[data-trade-journal-workspace-summaries]');
+            if (!target) return;
+            const statusCounts = new Map();
+            const typeCounts = new Map();
+            const tickerCounts = new Map();
+            const contractCounts = new Map();
+            const setupCounts = new Map();
+            const tagCounts = new Map();
+            const dailyCounts = new Map();
+            const weeklyCounts = new Map();
+            events.forEach(event => {
+                addJournalCount(statusCounts, event.journal_status || 'planned');
+                addJournalCount(typeCounts, formatTradeJournalEventType(event.event_type));
+                addJournalCount(tickerCounts, event.ticker || 'No ticker');
+                if (event.contract_symbol) addJournalCount(contractCounts, event.contract_symbol);
+                if (event.journal_setup) addJournalCount(setupCounts, event.journal_setup);
+                getTradeJournalTags(event).forEach(tag => addJournalCount(tagCounts, tag));
+                addJournalCount(dailyCounts, getTradeJournalDateKey(event.created_at));
+                addJournalCount(weeklyCounts, getTradeJournalWeekKey(event.created_at));
+            });
+            const buildPanel = (title, rows, emptyText) => (
+                '<div class="journal-panel"><span class="journal-section-title">' + _escapeHtml(title) + '</span>' +
+                (rows.length ? '<div class="journal-summary-list">' + rows.map(([label, count]) => (
+                    '<div class="journal-summary-row"><div><div class="journal-lifecycle-title" title="' + _escapeHtml(label) + '">' + _escapeHtml(label) + '</div></div><span class="journal-badge">' + _escapeHtml(String(count)) + '</span></div>'
+                )).join('') + '</div>' : '<div class="journal-empty">' + _escapeHtml(emptyText) + '</div>') +
+                '</div>'
+            );
+            const buildCountPanel = (title, rows, emptyText) => (
+                '<div class="journal-panel"><span class="journal-section-title">' + _escapeHtml(title) + '</span>' +
+                (rows.length ? '<div class="journal-count-list">' + rows.map(([label, count]) => (
+                    '<div class="journal-count-row"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(String(count)) + '</strong></div>'
+                )).join('') + '</div>' : '<div class="journal-empty">' + _escapeHtml(emptyText) + '</div>') +
+                '</div>'
+            );
+            target.innerHTML = [
+                buildPanel('Status Summary', getJournalCountRows(statusCounts, 6), 'No status data.'),
+                buildPanel('Event Types', getJournalCountRows(typeCounts, 6), 'No event types.'),
+                buildPanel('Tickers', getJournalCountRows(tickerCounts, 8), 'No ticker data.'),
+                buildPanel('Contracts', getJournalCountRows(contractCounts, 6), 'No contract data.'),
+                buildPanel('Setups', getJournalCountRows(setupCounts, 6), 'No setup tags yet.'),
+                buildPanel('Tags', getJournalCountRows(tagCounts, 8), 'No tags yet.'),
+                buildCountPanel('Daily Counts', Array.from(dailyCounts.entries()).sort((a, b) => String(b[0]).localeCompare(String(a[0]))).slice(0, 7), 'No daily counts.'),
+                buildCountPanel('Weekly Counts', Array.from(weeklyCounts.entries()).sort((a, b) => String(b[0]).localeCompare(String(a[0]))).slice(0, 6), 'No weekly counts.'),
+            ].join('');
+        }
+        function renderTradeJournalWorkspaceDetail(event) {
+            const target = document.querySelector('[data-trade-journal-workspace-detail]');
+            if (!target) return;
+            if (!event) {
+                target.innerHTML = '<div class="journal-empty">Select an event to review details.</div>';
+                return;
+            }
+            const details = event.details || {};
+            const title = formatTradeJournalTitle(event);
+            const pnl = getTradeJournalPnlInfo(event, { allowPosition: true });
+            const bracket = details.bracket_plan && typeof details.bracket_plan === 'object'
+                ? Object.entries(details.bracket_plan).filter(([key, value]) => value != null && value !== '').slice(0, 5).map(([key, value]) => key + ': ' + value).join(' / ')
+                : '';
+            const fields = [
+                ['Event', formatTradeJournalEventType(event.event_type)],
+                ['Created', fmtTradeOrderTime(event.created_at)],
+                ['Status', event.journal_status || 'planned'],
+                ['Ticker', event.ticker || 'No ticker'],
+                ['Contract', event.contract_symbol || 'No contract'],
+                ['Instruction', event.instruction || 'No instruction'],
+                ['Quantity / Limit', [event.quantity ? 'x' + event.quantity : '', event.limit_price ? '@ ' + event.limit_price : ''].filter(Boolean).join(' ') || 'No order fields'],
+                ['P/L', pnl ? fmtTradeSignedMoney(pnl.value) + ' (' + pnl.source + ')' : 'Not inferred from incomplete order/position data'],
+                ['Setup', event.journal_setup || 'None'],
+                ['Tags', event.journal_tags || 'None'],
+                ['Thesis', event.journal_thesis || 'None'],
+                ['Notes', event.journal_notes || 'None'],
+                ['Outcome', event.journal_outcome || 'None'],
+                ['Order Hash', event.order_hash ? String(event.order_hash).slice(0, 16) : 'None'],
+                ['Schwab', [event.schwab_status ? 'Status ' + event.schwab_status : '', event.location ? 'Location saved' : ''].filter(Boolean).join(' / ') || 'None'],
+                ['Bracket Plan', bracket || 'Planning data unavailable'],
+            ];
+            target.innerHTML =
+                '<div class="journal-detail-head">' +
+                    '<div><div class="journal-detail-title" title="' + _escapeHtml(title) + '">' + _escapeHtml(title) + '</div><div class="journal-detail-meta">' + _escapeHtml([formatTradeJournalEventType(event.event_type), fmtTradeOrderTime(event.created_at), event.updated_at ? 'Edited ' + fmtTradeOrderTime(event.updated_at) : ''].filter(Boolean).join(' / ')) + '</div></div>' +
+                    '<button type="button" class="journal-detail-edit" data-trade-journal-workspace-edit="' + _escapeHtml(event.id) + '">Edit</button>' +
+                '</div>' +
+                '<div class="journal-detail-grid">' + fields.map(([label, value]) => (
+                    '<div class="journal-detail-field"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(value) + '</strong></div>'
+                )).join('') + '</div>';
+            const edit = target.querySelector('[data-trade-journal-workspace-edit]');
+            if (edit) edit.addEventListener('click', () => openTradeJournalEditor(edit.dataset.tradeJournalWorkspaceEdit || ''));
+        }
+        function renderTradeJournalWorkspace() {
+            const workspace = document.querySelector('[data-trade-journal-workspace]');
+            if (!workspace) return;
+            const note = workspace.querySelector('[data-trade-journal-workspace-note]');
+            const statusFilter = workspace.querySelector('[data-trade-journal-workspace-status]');
+            const typeFilter = workspace.querySelector('[data-trade-journal-workspace-type]');
+            const searchInput = workspace.querySelector('[data-trade-journal-workspace-search]');
+            const table = workspace.querySelector('[data-trade-journal-workspace-table]');
+            if (statusFilter && statusFilter.value !== tradeRailState.journalWorkspaceStatusFilter) statusFilter.value = tradeRailState.journalWorkspaceStatusFilter || '';
+            if (typeFilter && typeFilter.value !== tradeRailState.journalWorkspaceTypeFilter) typeFilter.value = tradeRailState.journalWorkspaceTypeFilter || '';
+            if (searchInput && searchInput.value !== tradeRailState.journalWorkspaceSearch) searchInput.value = tradeRailState.journalWorkspaceSearch || '';
+            if (tradeRailState.journalLoading) {
+                if (note) note.textContent = 'Loading local journal events';
+                if (table) table.innerHTML = '<div class="journal-empty">Loading local journal events...</div>';
+                renderTradeJournalStats([], []);
+                renderTradeJournalLifecycle([]);
+                renderTradeJournalSummaries([]);
+                renderTradeJournalWorkspaceDetail(null);
+                return;
+            }
+            if (tradeRailState.journalError) {
+                if (note) note.textContent = 'Journal unavailable';
+                if (table) table.innerHTML = '<div class="journal-empty">' + _escapeHtml(tradeRailState.journalError) + '</div>';
+                renderTradeJournalStats([], []);
+                renderTradeJournalLifecycle([]);
+                renderTradeJournalSummaries([]);
+                renderTradeJournalWorkspaceDetail(null);
+                return;
+            }
+            const events = Array.isArray(tradeRailState.journalEvents) ? tradeRailState.journalEvents : [];
+            const filtered = getFilteredTradeJournalWorkspaceEvents();
+            if (note) {
+                note.textContent = events.length
+                    ? (filtered.length === events.length ? events.length + ' local events' : filtered.length + ' of ' + events.length + ' events')
+                    : 'No local journal events yet';
+            }
+            renderTradeJournalStats(events, filtered);
+            renderTradeJournalLifecycle(filtered);
+            renderTradeJournalSummaries(filtered);
+            const selectedStillVisible = filtered.some(event => String(event.id) === String(tradeRailState.journalWorkspaceSelectedId));
+            if (!selectedStillVisible) tradeRailState.journalWorkspaceSelectedId = filtered[0] ? String(filtered[0].id) : '';
+            const selected = filtered.find(event => String(event.id) === String(tradeRailState.journalWorkspaceSelectedId)) || null;
+            renderTradeJournalWorkspaceDetail(selected);
+            if (!table) return;
+            if (!events.length) {
+                table.innerHTML = '<div class="journal-empty">Previewed orders, live placements, confirmed cancels, and manual notes will appear here.</div>';
+                return;
+            }
+            if (!filtered.length) {
+                table.innerHTML = '<div class="journal-empty">No journal events match the current filters.</div>';
+                return;
+            }
+            table.innerHTML = filtered.map(event => {
+                const active = String(event.id) === String(tradeRailState.journalWorkspaceSelectedId);
+                const pnl = getTradeJournalPnlInfo(event, { allowPosition: true });
+                const setupTags = getTradeJournalSetupTags(event) || 'No setup/tags';
+                const rowTitle = formatTradeJournalTitle(event);
+                return '<button type="button" class="journal-table-row' + (active ? ' active' : '') + '" data-trade-journal-workspace-row="' + _escapeHtml(event.id) + '">' +
+                    '<span class="journal-table-cell">' + _escapeHtml(fmtTradeOrderTime(event.created_at)) + '</span>' +
+                    '<span class="journal-table-cell strong">' + _escapeHtml(formatTradeJournalEventType(event.event_type)) + '</span>' +
+                    '<span class="journal-table-cell">' + _escapeHtml(event.ticker || '-') + '</span>' +
+                    '<span class="journal-table-cell" title="' + _escapeHtml(event.contract_symbol || '') + '">' + _escapeHtml(event.contract_symbol || 'No contract') + '</span>' +
+                    '<span class="journal-table-cell">' + _escapeHtml(event.journal_status || 'planned') + '</span>' +
+                    '<span class="journal-table-cell" title="' + _escapeHtml(setupTags) + '">' + _escapeHtml(setupTags) + '</span>' +
+                    '<span class="journal-table-cell" title="' + _escapeHtml(rowTitle) + '">' + _escapeHtml(pnl ? fmtTradeSignedMoney(pnl.value) : 'Not inferred') + '</span>' +
+                '</button>';
+            }).join('');
+            table.querySelectorAll('[data-trade-journal-workspace-row]').forEach(row => {
+                if (row.__tradeJournalWorkspaceRowBound) return;
+                row.__tradeJournalWorkspaceRowBound = true;
+                row.addEventListener('click', () => {
+                    tradeRailState.journalWorkspaceSelectedId = row.dataset.tradeJournalWorkspaceRow || '';
+                    renderTradeJournalWorkspace();
+                });
             });
         }
         function renderTradeJournalDetail(event) {
@@ -28519,7 +29375,16 @@ def index():
             if (options.force || !tradeRailState.journalEvents.length) requestTradeJournal({ force: !!options.force, scroll: true });
             setTimeout(scrollTradeJournalIntoView, 0);
         }
+        function ensureTradeJournalEditorSurface() {
+            const grid = document.getElementById('chart-grid');
+            if (grid) ensureTradeRailDom(grid);
+            if (isTradeRailCollapsed()) {
+                try { localStorage.setItem(TRADE_RAIL_COLLAPSE_KEY, '0'); } catch (e) {}
+                applyTradeRailCollapse(false);
+            }
+        }
         function openNewTradeJournalEntry() {
+            ensureTradeJournalEditorSurface();
             tradeRailState.journalEditorMode = 'create';
             tradeRailState.journalEditorId = '';
             tradeRailState.journalSaveError = '';
@@ -28543,6 +29408,7 @@ def index():
             }
         }
         function openTradeJournalEditor(eventId) {
+            ensureTradeJournalEditorSurface();
             const event = getTradeJournalEvent(eventId);
             if (!event) return;
             tradeRailState.journalEditorMode = 'edit';
@@ -28621,12 +29487,15 @@ def index():
                 if (createMode) {
                     tradeRailState.journalEvents = [updated].concat(tradeRailState.journalEvents || []);
                     tradeRailState.journalSelectedId = String(updated.id);
+                    tradeRailState.journalWorkspaceSelectedId = String(updated.id);
                 } else {
                     tradeRailState.journalEvents = tradeRailState.journalEvents.map(event => String(event.id) === String(eventId) ? updated : event);
                     tradeRailState.journalSelectedId = String(updated.id);
+                    tradeRailState.journalWorkspaceSelectedId = String(updated.id);
                 }
                 tradeRailState.journalSaving = false;
                 renderTradeJournal();
+                renderTradeJournalWorkspace();
                 closeTradeJournalEditor();
             })
             .catch(err => {
@@ -28638,13 +29507,16 @@ def index():
         function requestTradeJournal(options = {}) {
             if (!options.force && tradeRailState.journalEvents.length) {
                 renderTradeJournal();
+                renderTradeJournalWorkspace();
                 if (options.scroll) setTimeout(scrollTradeJournalIntoView, 0);
+                if (options.scrollWorkspace) setTimeout(scrollTradeJournalWorkspaceIntoView, 0);
                 return;
             }
             tradeRailState.journalLoading = true;
             tradeRailState.journalError = '';
             renderTradeJournal();
-            fetch('/trade/journal?limit=50')
+            renderTradeJournalWorkspace();
+            fetch('/trade/journal?limit=200')
             .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Journal unavailable');
@@ -28652,14 +29524,18 @@ def index():
                 tradeRailState.journalLoading = false;
                 tradeRailState.journalError = '';
                 renderTradeJournal();
+                renderTradeJournalWorkspace();
                 if (options.scroll) setTimeout(scrollTradeJournalIntoView, 0);
+                if (options.scrollWorkspace) setTimeout(scrollTradeJournalWorkspaceIntoView, 0);
             })
             .catch(err => {
                 tradeRailState.journalEvents = [];
                 tradeRailState.journalLoading = false;
                 tradeRailState.journalError = err.message || 'Journal unavailable';
                 renderTradeJournal();
+                renderTradeJournalWorkspace();
                 if (options.scroll) setTimeout(scrollTradeJournalIntoView, 0);
+                if (options.scrollWorkspace) setTimeout(scrollTradeJournalWorkspaceIntoView, 0);
             });
         }
         function requestTradeAccountDetails(options = {}) {
@@ -29122,6 +29998,36 @@ def index():
                 renderTradeOrders();
             });
         }
+        function wireTradeJournalWorkspaceControls(workspace = document.querySelector('[data-trade-journal-workspace]')) {
+            if (!workspace || workspace.__tradeJournalWorkspaceWired) return;
+            workspace.__tradeJournalWorkspaceWired = true;
+            const refresh = workspace.querySelector('[data-trade-journal-workspace-refresh]');
+            if (refresh) refresh.addEventListener('click', () => requestTradeJournal({ force: true, scrollWorkspace: true }));
+            const newEntry = workspace.querySelector('[data-trade-journal-workspace-new]');
+            if (newEntry) newEntry.addEventListener('click', () => openNewTradeJournalEntry());
+            const status = workspace.querySelector('[data-trade-journal-workspace-status]');
+            if (status) status.addEventListener('change', () => {
+                tradeRailState.journalWorkspaceStatusFilter = status.value || '';
+                renderTradeJournalWorkspace();
+            });
+            const type = workspace.querySelector('[data-trade-journal-workspace-type]');
+            if (type) type.addEventListener('change', () => {
+                tradeRailState.journalWorkspaceTypeFilter = type.value || '';
+                renderTradeJournalWorkspace();
+            });
+            const search = workspace.querySelector('[data-trade-journal-workspace-search]');
+            if (search) search.addEventListener('input', () => {
+                tradeRailState.journalWorkspaceSearch = search.value || '';
+                renderTradeJournalWorkspace();
+            });
+            const clear = workspace.querySelector('[data-trade-journal-workspace-clear]');
+            if (clear) clear.addEventListener('click', () => {
+                tradeRailState.journalWorkspaceStatusFilter = '';
+                tradeRailState.journalWorkspaceTypeFilter = '';
+                tradeRailState.journalWorkspaceSearch = '';
+                renderTradeJournalWorkspace();
+            });
+        }
         function wireTradeRailPickerControls(root = document.getElementById('trade-rail')) {
             const accountSelect = document.querySelector('[data-trade-account-select]');
             if (accountSelect && !accountSelect.__tradeAccountSelectWired) {
@@ -29166,6 +30072,8 @@ def index():
             root.__tradePickerWired = true;
             const journalRefresh = root.querySelector('[data-trade-journal-refresh]');
             if (journalRefresh) journalRefresh.addEventListener('click', () => requestTradeJournal({ force: true, scroll: true }));
+            const journalWorkspaceOpen = root.querySelector('[data-trade-journal-workspace-open]');
+            if (journalWorkspaceOpen) journalWorkspaceOpen.addEventListener('click', () => requestTradeJournal({ force: true, scrollWorkspace: true }));
             const journalStatusFilter = root.querySelector('[data-trade-journal-status-filter]');
             if (journalStatusFilter) journalStatusFilter.addEventListener('change', () => {
                 tradeRailState.journalStatusFilter = journalStatusFilter.value || '';
@@ -32787,6 +33695,8 @@ def index():
         // Initial load - automatically load saved settings, or use defaults
         applyPersistedTimeframePreference();
         loadSettings(false);
+        ensureTradeJournalWorkspace();
+        requestTradeJournal({ force: true });
 
         // Auto-update every 1 second
         updateInterval = setInterval(updateData, 1000);
