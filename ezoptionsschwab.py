@@ -972,6 +972,9 @@ current_expiry = None
 # so the price chart can refresh independently without re-fetching the full chain.
 _options_cache = {}  # ticker -> {'calls': DataFrame, 'puts': DataFrame, 'S': float}
 
+# Successful Schwab previews are valid for five minutes. The UI mirrors this
+# TTL near the Active Trader fast controls so an old preview is visible before
+# any live-send attempt.
 TRADE_PREVIEW_TTL_SECONDS = 300
 _trade_preview_lock = threading.Lock()
 _trade_preview_records = {}
@@ -6349,11 +6352,21 @@ def _compute_session_deltas(ticker, net_gex, net_dex, scope_id=None):
         return None
     key = (ticker, today, scope_id or 'default')
     if key not in _SESSION_BASELINE:
-        _SESSION_BASELINE[key] = {'net_gex': net_gex, 'net_dex': net_dex}
+        is_open_sample = abs((now_et - market_open).total_seconds()) <= 120
+        _SESSION_BASELINE[key] = {
+            'net_gex': net_gex,
+            'net_dex': net_dex,
+            'baseline_time': now_et.isoformat(),
+            'baseline_type': 'open' if is_open_sample else 'first_sample',
+            'baseline_label': 'Since Open' if is_open_sample else 'Since First Sample',
+        }
     base = _SESSION_BASELINE[key]
     return {
         'net_gex_vs_open': (net_gex - base['net_gex']) if base.get('net_gex') is not None else None,
         'net_dex_vs_open': (net_dex - base['net_dex']) if (net_dex is not None and base.get('net_dex') is not None) else None,
+        'baseline_time': base.get('baseline_time'),
+        'baseline_type': base.get('baseline_type') or 'first_sample',
+        'baseline_label': base.get('baseline_label') or 'Since First Sample',
     }
 
 
@@ -6364,16 +6377,34 @@ def _compute_level_session_deltas(ticker, levels, scope_id=None):
         today = datetime.now(pytz.timezone('US/Eastern')).date()
     except Exception:
         return None
-    keys = ('call_wall', 'put_wall', 'gamma_flip', 'max_pain', 'em_upper', 'em_lower')
+    keys = (
+        'call_wall', 'put_wall', 'gamma_flip', 'max_pain',
+        'em_upper', 'em_lower', 'call_wall_2', 'put_wall_2',
+        'hvl', 'max_positive_gex', 'max_negative_gex',
+        'em_upper_2', 'em_lower_2',
+    )
     key = (ticker, today, scope_id or 'default')
     if key not in _SESSION_LEVEL_BASELINE:
-        _SESSION_LEVEL_BASELINE[key] = {name: _level_price_value(levels.get(name)) for name in keys}
+        now_et = datetime.now(pytz.timezone('US/Eastern'))
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        is_open_sample = abs((now_et - market_open).total_seconds()) <= 120
+        _SESSION_LEVEL_BASELINE[key] = {
+            'values': {name: _level_price_value(levels.get(name)) for name in keys},
+            'baseline_time': now_et.isoformat(),
+            'baseline_type': 'open' if is_open_sample else 'first_sample',
+            'baseline_label': 'Since Open' if is_open_sample else 'Since First Sample',
+        }
     base = _SESSION_LEVEL_BASELINE[key]
+    base_values = base.get('values') if isinstance(base, dict) and isinstance(base.get('values'), dict) else base
     out = {}
     for name in keys:
         cur = _level_price_value(levels.get(name))
-        ref = base.get(name)
+        ref = base_values.get(name) if isinstance(base_values, dict) else None
         out[name] = (cur - ref) if (cur is not None and ref is not None) else None
+    if isinstance(base, dict):
+        out['__baseline_time'] = base.get('baseline_time')
+        out['__baseline_type'] = base.get('baseline_type') or 'first_sample'
+        out['__baseline_label'] = base.get('baseline_label') or 'Since First Sample'
     return out
 
 
@@ -6433,6 +6464,8 @@ def compute_iv_context(calls, puts, S, ticker=None):
         'skew_ratio': None,
         'atm_iv_change': None,
         'skew_change': None,
+        'skew_change_label': 'Since First Sample',
+        'skew_change_baseline_type': 'first_sample',
         'headline': 'IV context unavailable',
         'blurb': 'Need implied volatility on the near expiry to build a skew read.',
     }
@@ -6485,7 +6518,16 @@ def compute_iv_context(calls, puts, S, ticker=None):
         today = datetime.now(pytz.timezone('US/Eastern')).date()
         key = (ticker or '__anon__', nearest, today)
         if key not in _SESSION_IV_BASELINE:
-            _SESSION_IV_BASELINE[key] = {'atm_iv': atm_iv, 'skew_spread': skew_spread}
+            now_et = datetime.now(pytz.timezone('US/Eastern'))
+            market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            is_open_sample = abs((now_et - market_open).total_seconds()) <= 120
+            _SESSION_IV_BASELINE[key] = {
+                'atm_iv': atm_iv,
+                'skew_spread': skew_spread,
+                'baseline_time': now_et.isoformat(),
+                'baseline_type': 'open' if is_open_sample else 'first_sample',
+                'baseline_label': 'Since Open' if is_open_sample else 'Since First Sample',
+            }
         base = _SESSION_IV_BASELINE[key]
         out['atm_iv_change'] = (
             atm_iv - base['atm_iv']
@@ -6497,9 +6539,13 @@ def compute_iv_context(calls, puts, S, ticker=None):
             if skew_spread is not None and base.get('skew_spread') is not None
             else None
         )
+        out['skew_change_label'] = base.get('baseline_label') or 'Since First Sample'
+        out['skew_change_baseline_type'] = base.get('baseline_type') or 'first_sample'
     except Exception:
         out['atm_iv_change'] = None
         out['skew_change'] = None
+        out['skew_change_label'] = 'Since First Sample'
+        out['skew_change_baseline_type'] = 'first_sample'
 
     spread_pts = (skew_spread * 100.0) if skew_spread is not None else None
     atm_pts = (atm_iv * 100.0) if atm_iv is not None else None
@@ -7150,20 +7196,50 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
 
 # Phase 3 Stage 3 — Live flow alerts engine
 # Module-level state; intentionally module-scoped so it survives across ticks.
-_ALERT_COOLDOWNS = {}   # (ticker, alert_id) -> float unix ts of last fire
+_ALERT_COOLDOWNS = {}   # (ticker, scope_id, alert_id) -> float unix ts of last fire
 _IV_BUFFER = collections.defaultdict(lambda: collections.deque(maxlen=30))  # (ticker, side, expiry, strike) -> deque[float]
-_LAST_WALLS = {}        # ticker -> {'call_wall': float|None, 'put_wall': float|None}
+_LAST_WALLS = {}        # (ticker, scope_id) -> {'call_wall': float|None, 'put_wall': float|None}
 _VOL_SPIKE_CACHE = {}   # (ticker, date, lo, hi) -> {'ts': float, 'data': {strike: {'avg20', 'curr'}}}
 
 
-def _alert_cooldown_ok(ticker, alert_id, seconds):
-    key = (ticker, alert_id)
+def _alert_scope_key(scope_id=None):
+    return str(scope_id or 'default')
+
+
+def _alert_cooldown_ok(ticker, alert_id, seconds, scope_id=None):
+    key = (ticker, _alert_scope_key(scope_id), alert_id)
     last = _ALERT_COOLDOWNS.get(key, 0.0)
     now_ts = time.time()
     if now_ts - last >= seconds:
         _ALERT_COOLDOWNS[key] = now_ts
         return True
     return False
+
+
+def _stable_alert_id(ticker, scope_id, alert):
+    """Build deterministic alert IDs; Python hash() is randomized per process."""
+    if not isinstance(alert, dict):
+        alert = {'text': str(alert or '')}
+    parts = [
+        str(ticker or '').upper(),
+        _alert_scope_key(scope_id),
+        str(alert.get('alert_type') or alert.get('level') or 'alert'),
+        str(alert.get('wall_type') or ''),
+        str(alert.get('option_type') or ''),
+        str(alert.get('expiry_iso') or ''),
+    ]
+    strike = alert.get('strike')
+    if strike is not None:
+        try:
+            parts.append(f"{float(strike):.4f}")
+        except Exception:
+            parts.append(str(strike))
+    parts.append(str(alert.get('text') or ''))
+    raw = '|'.join(parts)
+    digest = hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]
+    prefix = str(alert.get('alert_type') or alert.get('level') or 'alert').lower()
+    prefix = ''.join(ch if ch.isalnum() else '_' for ch in prefix).strip('_') or 'alert'
+    return f'{prefix}:{digest}'
 
 
 def _fetch_vol_spike_data(ticker, S, strike_range):
@@ -7233,7 +7309,7 @@ def _extract_key_level_prices(key_levels):
 
 def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                         call_wall=None, put_wall=None, key_levels=None,
-                        gate_strike_alerts=True):
+                        gate_strike_alerts=True, scope_id=None):
     """Return list of flow-level alert dicts. Called from compute_trader_stats."""
     if not ticker or S is None:
         return []
@@ -7254,14 +7330,15 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
         return proximity <= 0.0025
 
     # 1. Wall shift
-    prev_walls = _LAST_WALLS.get(ticker, {})
-    _LAST_WALLS[ticker] = {'call_wall': call_wall, 'put_wall': put_wall}
+    wall_scope_key = (ticker, _alert_scope_key(scope_id))
+    prev_walls = _LAST_WALLS.get(wall_scope_key, {})
+    _LAST_WALLS[wall_scope_key] = {'call_wall': call_wall, 'put_wall': put_wall}
     for wtype, label in (('call_wall', 'Call Wall'), ('put_wall', 'Put Wall')):
         prev = prev_walls.get(wtype)
         curr = {'call_wall': call_wall, 'put_wall': put_wall}[wtype]
         if prev is not None and curr is not None and prev != curr:
-            aid = f'wall_shift:{wtype}'
-            if _alert_cooldown_ok(ticker, aid, 120):
+            aid = f'wall_shift:{wtype}:{_alert_scope_key(scope_id)}'
+            if _alert_cooldown_ok(ticker, aid, 120, scope_id=scope_id):
                 alerts.append({
                     'id': aid, 'level': 'flow',
                     'text': f'{label} {prev:.0f} → {curr:.0f}',
@@ -7281,7 +7358,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
             if curr_v >= max(500.0, 3.0 * avg20):
                 aid = f'vol_spike:{strike:.0f}'
                 ratio = (curr_v / avg20) if avg20 > 0 else 99.0
-                if _passes_key_level_gate('vol_spike', strike) and _alert_cooldown_ok(ticker, aid, 300):
+                if _passes_key_level_gate('vol_spike', strike) and _alert_cooldown_ok(ticker, aid, 300, scope_id=scope_id):
                     alerts.append({
                         'id': aid, 'level': 'flow',
                         'text': f'Vol spike @ {strike:.0f} ({ratio:.1f}× avg)',
@@ -7310,7 +7387,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 if oi < 100 or vol / oi <= 0.25:
                     continue
                 aid = f'voi_ratio:{option_type}:{expiry_iso}:{strike:.0f}'
-                if _passes_key_level_gate('voi_ratio', strike) and _alert_cooldown_ok(ticker, aid, 600):
+                if _passes_key_level_gate('voi_ratio', strike) and _alert_cooldown_ok(ticker, aid, 600, scope_id=scope_id):
                     direction_meta = _build_contract_direction_meta(
                         option_type=option_type,
                         strike=strike,
@@ -7363,7 +7440,7 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 z = (curr_iv - mu) / std
                 if z > 2.0:
                     aid = f'iv_surge:{option_type}:{expiry_iso}:{strike:.0f}'
-                    if _passes_key_level_gate('iv_surge', strike) and _alert_cooldown_ok(ticker, aid, 600):
+                    if _passes_key_level_gate('iv_surge', strike) and _alert_cooldown_ok(ticker, aid, 600, scope_id=scope_id):
                         detail = f'Expiry {expiry_iso}' if expiry_iso else None
                         direction_meta = _build_contract_direction_meta(
                             option_type=option_type,
@@ -7560,7 +7637,10 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         out['max_pain'] = None
 
     try:
-        out['level_deltas'] = _compute_level_session_deltas(ticker, out, scope_id=scope_id)
+        level_delta_payload = dict(levels) if isinstance(levels, dict) else {}
+        if out.get('max_pain') is not None:
+            level_delta_payload['max_pain'] = out.get('max_pain')
+        out['level_deltas'] = _compute_level_session_deltas(ticker, level_delta_payload, scope_id=scope_id)
     except Exception as e:
         print(f"[compute_trader_stats] level_deltas failed: {e}")
         out['level_deltas'] = None
@@ -7794,7 +7874,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
     # Stamp existing rule-based alerts with id + ts (backwards-compatible)
     now_iso = datetime.now(pytz.UTC).isoformat().replace('+00:00', 'Z')
     for a in alerts:
-        a.setdefault('id', f"{a['level']}:{hash(a['text']) & 0xffff}")
+        a.setdefault('id', _stable_alert_id(ticker, scope_id, a))
         a.setdefault('ts', now_iso)
 
     # Append live flow alerts
@@ -7806,6 +7886,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
             put_wall=out.get('put_wall'),
             key_levels=levels,
             gate_strike_alerts=gate_strike_alerts,
+            scope_id=scope_id,
         )
         alerts.extend(flow)
     except Exception as e:
@@ -7823,7 +7904,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
             expiry_text = pulse.get('expiry_text') or ''
             contract_label = f"{strike:.0f}{'C' if pulse.get('option_type') == 'call' else 'P'}"
             aid = f"flow_pulse:{pulse.get('key')}"
-            if not _alert_cooldown_ok(ticker, aid, 180):
+            if not _alert_cooldown_ok(ticker, aid, 180, scope_id=scope_id):
                 continue
             alerts.append({
                 'id': aid,
@@ -11305,9 +11386,13 @@ def index():
         }
         .trade-active-context {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 5px;
             margin-top: 7px;
+        }
+        .trade-ticket-freshness {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            margin: 8px 0 0;
         }
         .trade-active-stat {
             border: 1px solid var(--border);
@@ -11336,6 +11421,12 @@ def index():
             text-overflow: ellipsis;
             white-space: nowrap;
             font-variant-numeric: tabular-nums;
+        }
+        .trade-active-stat.warn strong {
+            color: var(--warn);
+        }
+        .trade-active-stat.bad strong {
+            color: var(--put);
         }
         .trade-active-ladder {
             margin-top: 7px;
@@ -12489,6 +12580,51 @@ def index():
             padding: 8px;
             white-space: pre-wrap;
             word-break: break-word;
+        }
+        .trade-preview-summary {
+            display: grid;
+            gap: 5px;
+            white-space: normal;
+        }
+        .trade-preview-summary-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 4px;
+        }
+        .trade-preview-summary-row:last-child {
+            border-bottom: 0;
+            padding-bottom: 0;
+        }
+        .trade-preview-summary-row span:first-child {
+            color: var(--fg-2);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 9px;
+        }
+        .trade-preview-summary-row strong {
+            color: var(--fg-0);
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-preview-raw {
+            margin-top: 7px;
+            color: var(--fg-1);
+        }
+        .trade-preview-raw summary {
+            cursor: pointer;
+            color: var(--fg-2);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .trade-preview-raw pre {
+            margin: 6px 0 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: var(--font-mono);
+            font-size: 10px;
         }
         .trade-journal-panel {
             display: none;
@@ -17033,8 +17169,8 @@ def index():
                     <summary>Exposure</summary>
                     <div class="drawer-content">
                         <div class="control-group">
-                            <label for="exposure_metric">Exposure Metric:</label>
-                            <select id="exposure_metric" title="Select the metric used to weight exposure formulas (GEX/DEX/VEX etc)">
+                            <label for="exposure_metric">Exposure Weighting Metric:</label>
+                            <select id="exposure_metric" title="Selects the option-chain weighting input for exposure charts/formulas; it does not change the Strike Rail metric selector.">
                                 <option value="Open Interest" selected>Open Interest</option>
                                 <option value="Volume">Volume</option>
                                 <option value="Max OI vs Volume">Max OI vs Volume</option>
@@ -17586,7 +17722,7 @@ def index():
                                     <div class="d" data-met="net_dex_delta"></div>
                                 </div>
                             </div>
-                            <div class="rail-drift-wrap" id="rail-spark-netex" title="Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — centered at unchanged">
+                            <div class="rail-drift-wrap" id="rail-spark-netex" title="Intraday Net GEX / Net DEX drift from the session open or first available sample — centered at unchanged">
                                 <div class="rail-drift-row" data-drift-row="gex">
                                     <span class="rail-drift-label">GEX</span>
                                     <div class="rail-drift-track" aria-hidden="true"><div class="rail-drift-fill" data-drift-fill="gex"></div></div>
@@ -17597,8 +17733,8 @@ def index():
                                     <div class="rail-drift-track" aria-hidden="true"><div class="rail-drift-fill" data-drift-fill="dex"></div></div>
                                     <span class="rail-drift-value" data-drift-value="dex">—</span>
                                 </div>
-                                <div class="rail-drift-footer">
-                                    <span class="rail-drift-scale">Δ open</span>
+                            <div class="rail-drift-footer">
+                                    <span class="rail-drift-scale">Δ first sample</span>
                                     <span class="rail-drift-read" data-met="netex_read">Exposure drift unavailable</span>
                                 </div>
                             </div>
@@ -17692,6 +17828,14 @@ def index():
                                 <div class="rail-sentiment-marker" data-met="sentiment_marker"></div>
                             </div>
                             <div class="rail-bar rail-bar-rich">
+                                <span>OI</span>
+                                <div>
+                                    <div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div>
+                                    <div class="rail-bar-split" data-met="oi_split">—</div>
+                                </div>
+                                <span class="num" data-met="oi_cp">—</span>
+                            </div>
+                            <div class="rail-bar rail-bar-rich">
                                 <span>VOL</span>
                                 <div>
                                     <div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div>
@@ -17721,7 +17865,7 @@ def index():
                         <div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>
                         <div class="rail-iv-grid">
                             <div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div>
-                            <div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
+                            <div class="rail-iv-stat"><span class="rail-iv-stat-label" data-met="iv_skew_change_label">Since First Sample</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div>
                         </div>
                         <div class="rail-iv-rv" data-met="rv_iv_line">HV20 — · ATM IV — · IV —</div>
                         <div class="rail-vol-pressure">
@@ -17786,8 +17930,8 @@ def index():
                             <thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>
                             <tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>
                         </table>
-                        </div>
                     </div>
+                </div>
                 <div class="right-rail-panel" data-rail-panel="flow">
                     <div class="rail-flow-shell" id="right-rail-flow">
                         <div class="rail-flow-summary-card">
@@ -17866,6 +18010,8 @@ def index():
                             <div class="trade-active-context">
                                 <div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div>
                                 <div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div>
+                                <div class="trade-active-stat" data-trade-fast-quote-age-wrap><span>Quote Age</span><strong data-trade-fast-quote-age>—</strong></div>
+                                <div class="trade-active-stat" data-trade-fast-preview-ttl-wrap><span>Preview TTL</span><strong data-trade-fast-preview-ttl>5:00</strong></div>
                                 <div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div>
                             </div>
                             <div class="trade-active-ladder">
@@ -18013,6 +18159,10 @@ def index():
                             <button type="button" class="trade-price-preset" data-trade-price-preset="mid">Mid</button>
                             <button type="button" class="trade-price-preset" data-trade-price-preset="ask">Ask</button>
                             <button type="button" class="trade-price-preset" data-trade-price-preset="mark">Mark</button>
+                        </div>
+                        <div class="trade-active-context trade-ticket-freshness">
+                            <div class="trade-active-stat" data-trade-ticket-quote-age-wrap><span>Quote Age</span><strong data-trade-ticket-quote-age>—</strong></div>
+                            <div class="trade-active-stat" data-trade-ticket-preview-ttl-wrap><span>Preview TTL</span><strong data-trade-ticket-preview-ttl>5:00</strong></div>
                         </div>
                         <div class="trade-warning-list" data-trade-ticket-warnings></div>
                     </section>
@@ -18183,7 +18333,7 @@ def index():
                         </div>
                     </div>
                     <div class="rail-pulse-list flow-event-list" id="rail-flow-pulse">
-                        <div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>
+                        <div class="rail-pulse-empty">Flow Blotter can be populated while Pulse waits for repeated recent contract updates; it needs at least a minute of live same-contract history.</div>
                     </div>
                 </div>
             </div>
@@ -20592,7 +20742,6 @@ def index():
                     updatePriceInfo(data.price_info);
                 }
                 if (!isTradeRailCollapsed()) {
-                    tradeRailState.expiry = '';
                     requestTradeChain({ force: true });
                 }
                 // Options cache is now populated — refresh price levels immediately.
@@ -28230,7 +28379,7 @@ def index():
                             '</div>' +
                         '</div>' +
                         '<div class="rail-pulse-list flow-event-list" id="rail-flow-pulse">' +
-                            '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>' +
+                            '<div class="rail-pulse-empty">Flow Blotter can be populated while Pulse waits for repeated recent contract updates; it needs at least a minute of live same-contract history.</div>' +
                         '</div>' +
                     '</div>' +
                 '</div>'
@@ -28341,10 +28490,10 @@ def index():
                                 '<div class="rail-metric"><div class="rail-card-header">Net GEX</div><div class="v" data-met="net_gex">—</div><div class="d" data-met="net_gex_delta"></div></div>' +
                                 '<div class="rail-metric"><div class="rail-card-header">Net DEX</div><div class="v" data-met="net_dex">—</div><div class="d" data-met="net_dex_delta"></div></div>' +
                             '</div>' +
-                            '<div class="rail-drift-wrap" id="rail-spark-netex" title="Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — centered at unchanged">' +
+                            '<div class="rail-drift-wrap" id="rail-spark-netex" title="Intraday Net GEX / Net DEX drift from the session open or first available sample — centered at unchanged">' +
                                 '<div class="rail-drift-row" data-drift-row="gex"><span class="rail-drift-label">GEX</span><div class="rail-drift-track" aria-hidden="true"><div class="rail-drift-fill" data-drift-fill="gex"></div></div><span class="rail-drift-value" data-drift-value="gex">—</span></div>' +
                                 '<div class="rail-drift-row" data-drift-row="dex"><span class="rail-drift-label">DEX</span><div class="rail-drift-track" aria-hidden="true"><div class="rail-drift-fill" data-drift-fill="dex"></div></div><span class="rail-drift-value" data-drift-value="dex">—</span></div>' +
-                                '<div class="rail-drift-footer"><span class="rail-drift-scale">Δ open</span><span class="rail-drift-read" data-met="netex_read">Exposure drift unavailable</span></div>' +
+                                '<div class="rail-drift-footer"><span class="rail-drift-scale">Δ first sample</span><span class="rail-drift-read" data-met="netex_read">Exposure drift unavailable</span></div>' +
                             '</div>' +
                             '<div class="gex-scope-pill" id="gex-scope-pill"><button class="gex-scope-btn" data-scope="all">All</button><button class="gex-scope-btn" data-scope="0dte">0DTE</button></div>' +
                         '</div>' +
@@ -28372,6 +28521,7 @@ def index():
                         '<div class="rail-card-section tight" id="rail-card-activity">' +
                             '<div class="rail-activity-bias"><span class="rail-activity-bias-label">Bias</span><span class="rail-activity-bias-value" data-met="activity_bias">—</span></div>' +
                             '<div class="rail-sentiment-labels"><span>bearish</span><span>bullish</span></div><div class="rail-sentiment-track"><div class="rail-sentiment-marker" data-met="sentiment_marker"></div></div>' +
+                            '<div class="rail-bar rail-bar-rich"><span>OI</span><div><div class="rail-bar-track"><div class="rail-bar-fill" data-met="oi_fill"></div></div><div class="rail-bar-split" data-met="oi_split">—</div></div><span class="num" data-met="oi_cp">—</span></div>' +
                             '<div class="rail-bar rail-bar-rich"><span>VOL</span><div><div class="rail-bar-track"><div class="rail-bar-fill" data-met="vol_fill"></div></div><div class="rail-bar-split" data-met="vol_split">—</div></div><span class="num" data-met="vol_cp">—</span></div>' +
                             '<div class="rail-bar rail-bar-rich"><span>V/OI</span><div><div class="rail-bar-track"><div class="rail-bar-fill" data-met="voi_fill"></div></div><div class="rail-bar-split" data-met="voi_split">—</div></div><span class="num" data-met="voi_cp">—</span></div>' +
                         '</div>' +
@@ -28380,7 +28530,7 @@ def index():
                         '<div class="rail-card-header-row"><div class="rail-card-header">Skew / IV</div><div class="rail-card-note" data-met="iv_expiry">Near expiry</div></div>' +
                         '<div class="rail-iv-top"><div class="rail-iv-atm" data-met="iv_atm">—</div><div class="rail-iv-headline" data-met="iv_headline">IV context unavailable</div></div>' +
                         '<div class="rail-iv-blurb" data-met="iv_blurb">Need implied volatility on the near expiry to build a skew read.</div>' +
-                        '<div class="rail-iv-grid"><div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div><div class="rail-iv-stat"><span class="rail-iv-stat-label">Since Open</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div></div>' +
+                        '<div class="rail-iv-grid"><div class="rail-iv-stat"><span class="rail-iv-stat-label">Put-Call</span><span class="rail-iv-stat-value" data-met="iv_skew_spread">—</span></div><div class="rail-iv-stat"><span class="rail-iv-stat-label" data-met="iv_skew_change_label">Since First Sample</span><span class="rail-iv-stat-value" data-met="iv_skew_change">—</span></div></div>' +
                         '<div class="rail-iv-rv" data-met="rv_iv_line">HV20 — · ATM IV — · IV —</div>' +
                         '<div class="rail-vol-pressure"><div class="rail-vol-pressure-row"><span class="rail-vol-pressure-headline" data-met="vol_pressure_headline">Vol pressure unavailable</span><span data-met="vol_pressure_pace">—</span></div><div class="rail-vol-pressure-track" aria-hidden="true"><div class="rail-vol-pressure-fill" data-met="vol_pressure_fill"></div><div class="rail-vol-pressure-mid"></div></div><div class="rail-vol-pressure-meta" data-met="vol_pressure_meta">0DTE move pressure loads with price candles.</div></div>' +
                     '</div>' +
@@ -28410,7 +28560,7 @@ def index():
                         '</div>' +
                         '<div class="trade-active-template-plan" data-trade-fast-bracket-plan><div class="trade-active-template-head"><strong data-trade-fast-bracket-title>TRG template</strong><span data-trade-fast-bracket-summary>Planning only</span></div><div class="trade-active-offsets"><label>Limit +<input data-trade-fast-target-offset type="number" min="0.01" max="99" step="0.01" value="1"></label><label>Stop -<input data-trade-fast-stop-offset type="number" min="0.01" max="99" step="0.01" value="1"></label></div><div class="trade-active-bracket-rows" data-trade-fast-bracket-rows><div class="trade-empty">Select a contract to plan exits.</div></div></div>' +
                         '<label class="trade-active-arm" data-trade-fast-arm-wrap><span>Auto-send</span><input data-trade-fast-arm type="checkbox"></label>' +
-                        '<div class="trade-active-context"><div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div><div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div><div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div></div>' +
+                        '<div class="trade-active-context"><div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div><div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div><div class="trade-active-stat" data-trade-fast-quote-age-wrap><span>Quote Age</span><strong data-trade-fast-quote-age>—</strong></div><div class="trade-active-stat" data-trade-fast-preview-ttl-wrap><span>Preview TTL</span><strong data-trade-fast-preview-ttl>5:00</strong></div><div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div></div>' +
                         '<div class="trade-active-ladder"><div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span></div><div data-trade-fast-ladder><div class="trade-empty">Select a contract to show the price ladder.</div></div></div>' +
                         '<div class="trade-active-message" data-trade-fast-message>Auto-send starts off. Live sends still require a successful preview.</div>' +
                     '</div>' +
@@ -28502,6 +28652,7 @@ def index():
                             '<button type="button" class="trade-price-preset" data-trade-price-preset="ask">Ask</button>' +
                             '<button type="button" class="trade-price-preset" data-trade-price-preset="mark">Mark</button>' +
                         '</div>' +
+                        '<div class="trade-active-context trade-ticket-freshness"><div class="trade-active-stat" data-trade-ticket-quote-age-wrap><span>Quote Age</span><strong data-trade-ticket-quote-age>—</strong></div><div class="trade-active-stat" data-trade-ticket-preview-ttl-wrap><span>Preview TTL</span><strong data-trade-ticket-preview-ttl>5:00</strong></div></div>' +
                         '<div class="trade-warning-list" data-trade-ticket-warnings></div>' +
                     '</section>' +
                     '<section class="trade-panel trade-bracket-panel">' +
@@ -29095,6 +29246,7 @@ def index():
         const TRADE_HELPER_COMPACT_KEY = 'gex.tradeHelperCompact';
         const TRADE_ACTIVE_TRADER_COLLAPSE_KEY = 'gex.tradeActiveTraderCollapsed';
         const TRADE_RAIL_DEFAULT_WIDTH = 400;
+        const TRADE_PREVIEW_TTL_SECONDS = 300;
         const TRADE_BUILTIN_BRACKET_TEMPLATES = {
             single: { label: 'Single', rows: 0, targetOffset: 1, stopOffset: 1 },
             oco: { label: 'OCO', rows: 1, targetOffset: 1, stopOffset: 1 },
@@ -29135,6 +29287,7 @@ def index():
             limitPrice: '',
             preview: null,
             previewToken: '',
+            previewCreatedAt: 0,
             previewLoading: false,
             previewError: '',
             placement: null,
@@ -29231,6 +29384,38 @@ def index():
             } catch (e) {
                 return new Date(n).toLocaleTimeString();
             }
+        }
+        function fmtTradeDuration(seconds) {
+            const n = Number(seconds);
+            if (!Number.isFinite(n) || n < 0) return '—';
+            if (n < 1) return 'now';
+            if (n < 60) return Math.round(n) + 's';
+            if (n < 3600) {
+                const mins = Math.floor(n / 60);
+                const secs = Math.round(n % 60);
+                return mins + ':' + String(secs).padStart(2, '0');
+            }
+            const hours = Math.floor(n / 3600);
+            const mins = Math.floor((n % 3600) / 60);
+            return hours + 'h ' + mins + 'm';
+        }
+        function getTradeQuoteAgeSeconds(contract) {
+            if (!contract) return null;
+            const explicit = Number(contract.quote_age_seconds);
+            if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+            const stamp = Number(contract.quote_time);
+            if (!Number.isFinite(stamp) || stamp <= 0) return null;
+            return Math.max(0, (Date.now() - stamp) / 1000);
+        }
+        function getTradePreviewTtlInfo() {
+            if (tradeRailState.previewLoading) return { text: 'Loading', cls: 'warn', detail: 'Preview request in progress.' };
+            if (!tradeRailState.previewToken || !tradeRailState.previewCreatedAt) {
+                return { text: '5:00', cls: '', detail: 'Preview required; successful previews expire after 5 minutes.' };
+            }
+            const ageSeconds = Math.max(0, (Date.now() - tradeRailState.previewCreatedAt) / 1000);
+            const remaining = TRADE_PREVIEW_TTL_SECONDS - ageSeconds;
+            if (remaining <= 0) return { text: 'Expired', cls: 'bad', detail: 'Preview is older than 5 minutes. Preview again before live placement.' };
+            return { text: fmtTradeDuration(remaining), cls: remaining <= 60 ? 'warn' : 'ready', detail: 'Preview expires in ' + fmtTradeDuration(remaining) + '.' };
         }
         function fmtTradeOrderTime(value) {
             if (!value) return '—';
@@ -29458,6 +29643,7 @@ def index():
         function invalidateTradePreview(message = '') {
             tradeRailState.preview = null;
             tradeRailState.previewToken = '';
+            tradeRailState.previewCreatedAt = 0;
             tradeRailState.previewError = message;
             tradeRailState.placement = null;
             tradeRailState.placementError = '';
@@ -29475,6 +29661,41 @@ def index():
             const price = Number(tradeRailState.limitPrice);
             if (!qty || !Number.isFinite(price) || price <= 0) return null;
             return price * qty * 100;
+        }
+        function buildTradeRawDetailsHtml(payload) {
+            if (!payload) return '';
+            let raw = '';
+            try {
+                raw = JSON.stringify(payload, null, 2);
+            } catch (e) {
+                raw = String(payload);
+            }
+            return '<details class="trade-preview-raw"><summary>Raw details</summary><pre>' + _escapeHtml(raw) + '</pre></details>';
+        }
+        function buildTradePreviewSummaryHtml(kind, payload) {
+            const selected = getSelectedTradeContract() || {};
+            const order = (payload && payload.order) || {};
+            const leg = (Array.isArray(order.orderLegCollection) && order.orderLegCollection[0]) || {};
+            const instruction = leg.instruction || tradeRailState.action || 'Order';
+            const quantity = leg.quantity || tradeRailState.quantity || 1;
+            const contractSymbol = (leg.instrument && leg.instrument.symbol) || selected.contract_symbol || '—';
+            const limitPrice = Number(order.price || tradeRailState.limitPrice);
+            const notional = Number(payload && payload.estimated_notional);
+            const schwabStatus = payload && (payload.schwab_status || payload.status || payload.status_code);
+            const ttl = getTradePreviewTtlInfo();
+            const rows = [
+                ['Status', kind === 'placement' ? 'Live order sent' : 'Preview ready'],
+                ['Action', instruction + ' x' + quantity],
+                ['Contract', contractSymbol],
+                ['Limit', Number.isFinite(limitPrice) ? fmtTradePrice(limitPrice) : '—'],
+                ['Est. ' + (instruction === 'SELL_TO_CLOSE' ? 'Credit' : 'Debit'), Number.isFinite(notional) ? fmtTradeMoney(notional) : '—'],
+                ['Schwab', schwabStatus ? ('Status ' + schwabStatus) : 'Status —'],
+            ];
+            if (kind !== 'placement') rows.push(['Preview TTL', ttl.text]);
+            const summary = rows.map(([label, value]) =>
+                '<div class="trade-preview-summary-row"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(value) + '</strong></div>'
+            ).join('');
+            return '<div class="trade-preview-summary">' + summary + '</div>' + buildTradeRawDetailsHtml(payload);
         }
         function getTradeBracketTemplates() {
             return Object.assign({}, TRADE_BUILTIN_BRACKET_TEMPLATES, tradeCustomBracketTemplates);
@@ -29710,6 +29931,10 @@ def index():
             const armWrap = panel.querySelector('[data-trade-fast-arm-wrap]');
             const positionEl = panel.querySelector('[data-trade-fast-position]');
             const previewEl = panel.querySelector('[data-trade-fast-preview]');
+            const quoteAgeEl = panel.querySelector('[data-trade-fast-quote-age]');
+            const quoteAgeWrap = panel.querySelector('[data-trade-fast-quote-age-wrap]');
+            const previewTtlEl = panel.querySelector('[data-trade-fast-preview-ttl]');
+            const previewTtlWrap = panel.querySelector('[data-trade-fast-preview-ttl-wrap]');
             const ordersEl = panel.querySelector('[data-trade-fast-orders]');
             const ladder = panel.querySelector('[data-trade-fast-ladder]');
             const message = panel.querySelector('[data-trade-fast-message]');
@@ -29749,6 +29974,18 @@ def index():
             const posQty = position ? getSelectedTradePositionQuantity() : 0;
             if (positionEl) positionEl.textContent = position ? ('Net ' + posQty + ' · Day ' + fmtTradeMoney(position.day_pnl)) : 'Flat';
             if (previewEl) previewEl.textContent = tradeRailState.previewToken ? 'Ready' : (tradeRailState.previewLoading ? 'Loading' : 'Required');
+            const quoteAgeSeconds = getTradeQuoteAgeSeconds(selected);
+            if (quoteAgeEl) quoteAgeEl.textContent = quoteAgeSeconds == null ? '—' : fmtTradeDuration(quoteAgeSeconds);
+            if (quoteAgeWrap) {
+                quoteAgeWrap.classList.toggle('warn', quoteAgeSeconds != null && quoteAgeSeconds >= 60 && quoteAgeSeconds < 15 * 60);
+                quoteAgeWrap.classList.toggle('bad', quoteAgeSeconds == null || quoteAgeSeconds >= 15 * 60);
+            }
+            const ttl = getTradePreviewTtlInfo();
+            if (previewTtlEl) previewTtlEl.textContent = ttl.text;
+            if (previewTtlWrap) {
+                previewTtlWrap.classList.toggle('warn', ttl.cls === 'warn');
+                previewTtlWrap.classList.toggle('bad', ttl.cls === 'bad');
+            }
             const orders = Array.isArray(tradeRailState.orders) ? tradeRailState.orders : [];
             if (ordersEl) ordersEl.textContent = tradeRailState.ordersLoading ? 'Loading' : (orders.length ? orders.length + ' open/recent' : 'None');
             if (flatten) flatten.disabled = !selected || !posQty;
@@ -30039,6 +30276,10 @@ def index():
             const previewButton = document.querySelector('[data-trade-preview]');
             const placeButton = document.querySelector('[data-trade-place]');
             const previewResponse = document.querySelector('[data-trade-preview-response]');
+            const quoteAgeEl = document.querySelector('[data-trade-ticket-quote-age]');
+            const quoteAgeWrap = document.querySelector('[data-trade-ticket-quote-age-wrap]');
+            const previewTtlEl = document.querySelector('[data-trade-ticket-preview-ttl]');
+            const previewTtlWrap = document.querySelector('[data-trade-ticket-preview-ttl-wrap]');
             if (qtyInput && String(qtyInput.value) !== String(tradeRailState.quantity)) qtyInput.value = tradeRailState.quantity;
             if (limitInput && String(limitInput.value) !== String(tradeRailState.limitPrice || '')) limitInput.value = tradeRailState.limitPrice || '';
             document.querySelectorAll('[data-trade-action]').forEach(btn => {
@@ -30053,8 +30294,20 @@ def index():
             });
             const estimate = getTradeTicketEstimate();
             const isSell = tradeRailState.action === 'SELL_TO_CLOSE';
+            const previewTtl = getTradePreviewTtlInfo();
+            const quoteAgeSeconds = getTradeQuoteAgeSeconds(selected);
             setTradeField('est-notional', estimate == null ? '—' : (isSell ? 'Credit ' : 'Debit ') + fmtTradeMoney(estimate));
             setTradeField('est-risk', estimate == null ? '—' : (isSell ? 'Position risk reduces on close' : fmtTradeMoney(estimate)));
+            if (quoteAgeEl) quoteAgeEl.textContent = quoteAgeSeconds == null ? '—' : fmtTradeDuration(quoteAgeSeconds);
+            if (quoteAgeWrap) {
+                quoteAgeWrap.classList.toggle('warn', quoteAgeSeconds != null && quoteAgeSeconds >= 60 && quoteAgeSeconds < 15 * 60);
+                quoteAgeWrap.classList.toggle('bad', quoteAgeSeconds == null || quoteAgeSeconds >= 15 * 60);
+            }
+            if (previewTtlEl) previewTtlEl.textContent = previewTtl.text;
+            if (previewTtlWrap) {
+                previewTtlWrap.classList.toggle('warn', previewTtl.cls === 'warn');
+                previewTtlWrap.classList.toggle('bad', previewTtl.cls === 'bad');
+            }
             if (note) note.textContent = tradeRailState.previewToken ? 'Previewed' : (tradeRailState.previewLoading ? 'Previewing' : 'Preview only');
             const localWarnings = [];
             if (!tradeRailState.accountHash) localWarnings.push('Select an account.');
@@ -30067,16 +30320,16 @@ def index():
                 previewButton.textContent = tradeRailState.previewLoading ? 'Previewing...' : 'Preview Order';
             }
             if (placeButton) {
-                placeButton.disabled = tradeRailState.placementLoading || !tradeRailState.previewToken || !selected || !tradeRailState.accountHash;
+                placeButton.disabled = tradeRailState.placementLoading || !tradeRailState.previewToken || previewTtl.cls === 'bad' || !selected || !tradeRailState.accountHash;
                 placeButton.textContent = tradeRailState.placementLoading ? 'Placing...' : 'Place Live Order';
             }
             if (previewResponse) {
                 if (tradeRailState.placement) {
-                    previewResponse.textContent = JSON.stringify(tradeRailState.placement, null, 2);
+                    previewResponse.innerHTML = buildTradePreviewSummaryHtml('placement', tradeRailState.placement);
                 } else if (tradeRailState.placementError) {
                     previewResponse.textContent = tradeRailState.placementError;
                 } else if (tradeRailState.preview) {
-                    previewResponse.textContent = JSON.stringify(tradeRailState.preview, null, 2);
+                    previewResponse.innerHTML = buildTradePreviewSummaryHtml('preview', tradeRailState.preview);
                 } else if (tradeRailState.previewError) {
                     previewResponse.textContent = tradeRailState.previewError;
                 } else {
@@ -31211,7 +31464,8 @@ def index():
             const select = document.querySelector('[data-trade-expiry]');
             if (!select) return;
             const expiries = Array.isArray(payload && payload.expiries) ? payload.expiries : [];
-            const selected = tradeRailState.expiry || (payload && payload.selected_expiries && payload.selected_expiries[0]) || expiries[0] || '';
+            const manualExpiry = tradeRailState.expiry && expiries.includes(tradeRailState.expiry) ? tradeRailState.expiry : '';
+            const selected = manualExpiry || (payload && payload.selected_expiries && payload.selected_expiries[0]) || expiries[0] || '';
             if (tradeRailState.expiry !== selected) tradeRailState.expiry = selected;
             select.innerHTML = expiries.length
                 ? expiries.map(exp => '<option value="' + _escapeHtml(exp) + '"' + (exp === selected ? ' selected' : '') + '>' + _escapeHtml(exp) + '</option>').join('')
@@ -31399,7 +31653,11 @@ def index():
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Trade chain request failed');
                 tradeRailState.payload = data;
-                tradeRailState.expiry = (data.selected_expiries && data.selected_expiries[0]) || tradeRailState.expiry || '';
+                const expiries = Array.isArray(data.expiries) ? data.expiries : [];
+                const stillAvailable = tradeRailState.expiry && expiries.includes(tradeRailState.expiry);
+                tradeRailState.expiry = stillAvailable
+                    ? tradeRailState.expiry
+                    : ((data.selected_expiries && data.selected_expiries[0]) || expiries[0] || tradeRailState.expiry || '');
                 tradeRailState.loading = false;
                 renderTradeRail();
             })
@@ -31439,6 +31697,7 @@ def index():
                 if (!ok || data.error) throw new Error(data.error || 'Preview failed');
                 tradeRailState.preview = data;
                 tradeRailState.previewToken = data.preview_token || '';
+                tradeRailState.previewCreatedAt = Date.now();
                 tradeRailState.previewError = '';
                 tradeRailState.placement = null;
                 tradeRailState.placementError = '';
@@ -31450,6 +31709,7 @@ def index():
                 tradeRailState.previewLoading = false;
                 tradeRailState.preview = null;
                 tradeRailState.previewToken = '';
+                tradeRailState.previewCreatedAt = 0;
                 tradeRailState.previewError = err.message || 'Preview failed';
                 renderTradeTicket();
             });
@@ -31756,6 +32016,12 @@ def index():
                 renderTradeTicket();
                 return;
             }
+            if (getTradePreviewTtlInfo().cls === 'bad') {
+                tradeRailState.placementError = 'Preview expired after 5 minutes. Preview the exact order again.';
+                tradeRailState.fastTradeMessage = 'Live send blocked: preview expired.';
+                renderTradeTicket();
+                return;
+            }
             const summary = tradeRailState.action + ' ' + tradeRailState.quantity + ' ' + selected.contract_symbol + ' @ ' + tradeRailState.limitPrice;
             if (!skipConfirm && !window.confirm('Send live order to Schwab?\\n\\n' + summary)) return;
             tradeRailState.placementLoading = true;
@@ -31787,6 +32053,7 @@ def index():
                 tradeRailState.placementError = '';
                 tradeRailState.preview = null;
                 tradeRailState.previewToken = '';
+                tradeRailState.previewCreatedAt = 0;
                 tradeRailState.fastTradeMessage = skipConfirm ? 'Live order sent. Preview is consumed; preview again for the next send.' : '';
                 renderTradeTicket();
                 requestTradeAccountDetails({ force: true });
@@ -33565,21 +33832,36 @@ def index():
                 return;
             }
             const spot = stats.spot;
+            const levels = getScopedKeyLevels() || {};
+            const levelPrice = key => {
+                const node = levels && levels[key];
+                if (node && typeof node === 'object' && node.price != null && isFinite(node.price)) return Number(node.price);
+                if (node != null && isFinite(node)) return Number(node);
+                return null;
+            };
             const levelDeltas = (stats && stats.level_deltas) || {};
+            const baselineLabel = levelDeltas.__baseline_label || 'Since First Sample';
             const maxPain = stats && stats.max_pain;
             const rows = [
-                { key: 'call_wall',  label: 'Call Wall',  price: stats.call_wall,  tone: 'call' },
-                { key: 'put_wall',   label: 'Put Wall',   price: stats.put_wall,   tone: 'put'  },
-                { key: 'gamma_flip', label: 'Gamma Flip', price: stats.gamma_flip, tone: 'flip' },
+                { key: 'call_wall',  label: 'Call Wall',  price: levelPrice('call_wall') ?? stats.call_wall,  tone: 'call', meta: 'Primary OI wall' },
+                { key: 'put_wall',   label: 'Put Wall',   price: levelPrice('put_wall') ?? stats.put_wall,   tone: 'put',  meta: 'Primary OI wall' },
+                { key: 'gamma_flip', label: 'Gamma Flip', price: levelPrice('gamma_flip') ?? stats.gamma_flip, tone: 'flip', meta: 'Regime boundary' },
                 {
                     key: 'max_pain',
                     label: (maxPain && maxPain.label) || 'OI Max Pain',
-                    price: maxPain && maxPain.price,
+                    price: levelPrice('max_pain') ?? (maxPain && maxPain.price),
                     tone: 'em',
                     meta: maxPain && maxPain.expiry_text ? maxPain.expiry_text : ''
                 },
-                { key: 'em_upper',   label: '+1σ EM',     price: stats.em_upper,   tone: 'em'   },
-                { key: 'em_lower',   label: '-1σ EM',     price: stats.em_lower,   tone: 'em'   },
+                { key: 'em_upper',   label: '+1σ EM',     price: levelPrice('em_upper') ?? stats.em_upper,   tone: 'em', meta: 'Expected move' },
+                { key: 'em_lower',   label: '-1σ EM',     price: levelPrice('em_lower') ?? stats.em_lower,   tone: 'em', meta: 'Expected move' },
+                { key: 'call_wall_2', label: 'Call Wall 2', price: levelPrice('call_wall_2'), tone: 'call', meta: 'Secondary OI wall' },
+                { key: 'put_wall_2',  label: 'Put Wall 2',  price: levelPrice('put_wall_2'),  tone: 'put',  meta: 'Secondary OI wall' },
+                { key: 'hvl', label: 'HVL', price: levelPrice('hvl'), tone: 'em', meta: 'Highest volume strike' },
+                { key: 'max_positive_gex', label: 'Max +GEX', price: levelPrice('max_positive_gex'), tone: 'call', meta: 'Strongest live +GEX' },
+                { key: 'max_negative_gex', label: 'Max -GEX', price: levelPrice('max_negative_gex'), tone: 'put', meta: 'Strongest live -GEX' },
+                { key: 'em_upper_2', label: '+2σ EM', price: levelPrice('em_upper_2'), tone: 'em', meta: 'Extended expected move' },
+                { key: 'em_lower_2', label: '-2σ EM', price: levelPrice('em_lower_2'), tone: 'em', meta: 'Extended expected move' },
             ];
             const validRows = rows
                 .filter(r => r.price != null && isFinite(r.price))
@@ -33617,7 +33899,7 @@ def index():
                                    (d.secondary ? '<span class="secondary">' + d.secondary + '</span>' : '') +
                                '</div>' +
                                '<div class="rail-level-stat ' + drift.cls + '">' +
-                                   '<span class="rail-level-stat-label">Since Open</span>' +
+                                   '<span class="rail-level-stat-label">' + _escapeHtml(baselineLabel) + '</span>' +
                                    '<span class="primary">' + drift.primary + '</span>' +
                                    (drift.secondary ? '<span class="secondary">' + drift.secondary + '</span>' : '') +
                                '</div>' +
@@ -34653,7 +34935,7 @@ def index():
                 _setMet('net_gex_delta', '');
                 _setMet('net_dex_delta', '');
                 _setMet('netex_read', 'Exposure drift unavailable');
-                netexSparkOpenBaseline = { g: null, d: null };
+                netexSparkOpenBaseline = { g: null, d: null, label: 'first sample' };
                 renderNetExSparkline();
                 document.querySelectorAll('#rail-card-metrics .v').forEach(el => el.classList.remove('pos', 'neg'));
                 return;
@@ -34673,9 +34955,11 @@ def index():
             const sd = stats.session_deltas || {};
             const dGex = (typeof sd.net_gex_vs_open === 'number') ? sd.net_gex_vs_open : null;
             const dDex = (typeof sd.net_dex_vs_open === 'number') ? sd.net_dex_vs_open : null;
+            const sdBaselineLabel = sd.baseline_type === 'open' ? 'open' : 'first sample';
             netexSparkOpenBaseline = {
                 g: (typeof stats.net_gex === 'number' && dGex != null) ? (stats.net_gex - dGex) : null,
                 d: (typeof stats.net_dex === 'number' && dDex != null) ? (stats.net_dex - dDex) : null,
+                label: sdBaselineLabel,
             };
             _setMet('net_gex_delta', dGex == null ? '' : ('Δ ' + (dGex > 0 ? '+' : '') + fmtMoneyCompact(dGex)));
             _setMet('net_dex_delta', dDex == null ? '' : ('Δ ' + (dDex > 0 ? '+' : '') + fmtMoneyCompact(dDex)));
@@ -34699,7 +34983,7 @@ def index():
         // otherwise it falls back to the live "vs open" baseline if available.
         // First-sample mode anchors to the first captured sample of the day.
         const NETEX_SPARK_MAX = 240;
-        let netexSparkOpenBaseline = { g: null, d: null };
+        let netexSparkOpenBaseline = { g: null, d: null, label: 'first sample' };
         function _netexSparkKey() {
             const tickerEl = document.getElementById('ticker');
             const tk = tickerEl ? (tickerEl.value || '').trim().toUpperCase() : '';
@@ -34739,7 +35023,8 @@ def index():
             _saveNetexSpark(samples);
         }
         function _netexSparkAnchorLabel() {
-            return netexSparkAnchorMode === 'first' ? 'first' : 'open';
+            if (netexSparkAnchorMode === 'first') return 'first sample';
+            return (netexSparkOpenBaseline && netexSparkOpenBaseline.label) || 'open';
         }
         function _netexSparkOpenMs(samples) {
             const ref = Array.isArray(samples) && samples.length && Number.isFinite(samples[0] && samples[0].t)
@@ -34904,7 +35189,9 @@ def index():
                 }
                 wrap.title = netexSparkAnchorMode === 'first'
                     ? 'Intraday Net GEX / Net DEX drift from the first captured sample today — centered at unchanged'
-                    : 'Intraday Net GEX / Net DEX drift from the 09:30 ET open when available — centered at unchanged';
+                    : (_netexSparkAnchorLabel() === 'open'
+                        ? 'Intraday Net GEX / Net DEX drift from the 09:30 ET open — centered at unchanged'
+                        : 'Intraday Net GEX / Net DEX drift from the first available app sample — centered at unchanged');
             });
         }
 
@@ -35119,6 +35406,7 @@ def index():
                 _setMet('iv_call_wing', '—');
                 _setMet('iv_skew_spread', '—');
                 _setMet('iv_skew_change', '—');
+                _setMet('iv_skew_change_label', 'Since First Sample');
                 setTone('iv_skew_spread', null);
                 setTone('iv_skew_change', null);
                 renderRvLine();
@@ -35134,6 +35422,7 @@ def index():
             _setMet('iv_call_wing', fmtPct(iv.call_wing_iv));
             _setMet('iv_skew_spread', fmtPts(iv.skew_spread));
             _setMet('iv_skew_change', fmtPts(iv.skew_change));
+            _setMet('iv_skew_change_label', iv.skew_change_label || 'Since First Sample');
             setTone('iv_skew_spread', iv.skew_spread);
             setTone('iv_skew_change', iv.skew_change);
             renderRvLine();
@@ -35234,7 +35523,7 @@ def index():
             const summary = (stats && typeof stats.flow_pulse_summary === 'object') ? stats.flow_pulse_summary : null;
             if (!rows.length) {
                 if (note) note.textContent = 'Mixed Lean';
-                target.innerHTML = '<div class="rail-pulse-empty">Pulse data builds after a minute of live flow history.</div>';
+                target.innerHTML = '<div class="rail-pulse-empty">Flow Blotter can be populated while Pulse waits for repeated recent contract updates; it needs at least a minute of live same-contract history.</div>';
                 return;
             }
             if (note) note.textContent = _flowPulseSummaryText(summary);
