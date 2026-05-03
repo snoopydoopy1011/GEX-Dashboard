@@ -10815,15 +10815,32 @@ def index():
         .chart-context-strip {
             flex: 0 1 640px;
             min-width: 280px;
-            display: grid;
-            grid-template-columns: repeat(5, minmax(58px, auto)) minmax(150px, 1fr) minmax(160px, 1.2fr);
+            display: none;
+            grid-template-columns: repeat(5, minmax(68px, max-content)) minmax(220px, max-content) minmax(220px, max-content);
             gap: 4px;
             align-items: stretch;
             padding: 4px;
             border: 1px solid var(--border);
             border-radius: 10px;
             background: var(--bg-1);
-            overflow: hidden;
+            overflow-x: auto;
+            overflow-y: hidden;
+            overscroll-behavior-x: contain;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-strong) transparent;
+        }
+        .chart-grid.rail-collapsed .chart-context-strip {
+            display: grid;
+        }
+        .chart-context-strip::-webkit-scrollbar {
+            height: 7px;
+        }
+        .chart-context-strip::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .chart-context-strip::-webkit-scrollbar-thumb {
+            background: var(--border-strong);
+            border-radius: 999px;
         }
         .chart-context-chip {
             min-width: 0;
@@ -10878,7 +10895,7 @@ def index():
         @media (max-width: 1500px) {
             .chart-context-strip {
                 flex-basis: 500px;
-                grid-template-columns: repeat(3, minmax(54px, auto)) minmax(128px, 1fr) minmax(140px, 1fr);
+                grid-template-columns: repeat(3, minmax(64px, max-content)) minmax(180px, max-content) minmax(200px, max-content);
             }
             .chart-context-chip.expiry,
             .chart-context-chip.options-age {
@@ -10888,7 +10905,7 @@ def index():
         @media (max-width: 1160px) {
             .chart-context-strip {
                 flex-basis: 320px;
-                grid-template-columns: repeat(2, minmax(54px, auto)) minmax(120px, 1fr);
+                grid-template-columns: repeat(2, minmax(64px, max-content)) minmax(190px, max-content);
             }
             .chart-context-chip.timeframe,
             .chart-context-chip.status,
@@ -16204,6 +16221,17 @@ def index():
             overflow-x: auto;
             overflow-y: hidden;
             scrollbar-width: thin;
+            scrollbar-color: var(--border-strong) transparent;
+        }
+        .tv-toolbar-main::-webkit-scrollbar {
+            height: 7px;
+        }
+        .tv-toolbar-main::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .tv-toolbar-main::-webkit-scrollbar-thumb {
+            background: var(--border-strong);
+            border-radius: 999px;
         }
         .tv-toolbar-right {
             display: flex;
@@ -16582,6 +16610,7 @@ def index():
         .tv-ohlc-tooltip .tt-up   { color: var(--call); }
         .tv-ohlc-tooltip .tt-dn   { color: var(--put); }
         .tv-cum-rvol-badge {
+            --rvol-tier-color: var(--fg-1);
             position: absolute;
             top: 10px;
             left: 50%;
@@ -16589,46 +16618,66 @@ def index():
             z-index: 45;
             display: none;
             align-items: center;
-            gap: 6px;
+            gap: 8px;
             width: auto !important;
             height: auto !important;
             min-width: 0 !important;
             min-height: 0 !important;
             max-width: calc(100% - 160px) !important;
-            padding: 0;
-            border: 0;
-            background: transparent;
+            padding: 5px 10px;
+            border: 1px solid color-mix(in srgb, var(--border-strong) 80%, transparent);
+            border-radius: 999px;
+            background: linear-gradient(180deg,
+                color-mix(in srgb, var(--bg-1) 94%, transparent),
+                color-mix(in srgb, var(--bg-0) 92%, transparent));
             color: var(--fg-1);
-            box-shadow: none;
+            box-shadow:
+                0 8px 22px color-mix(in srgb, var(--bg-0) 58%, transparent),
+                inset 0 1px 0 color-mix(in srgb, var(--fg-0) 8%, transparent);
             flex: none !important;
             align-self: flex-start !important;
             pointer-events: none;
             white-space: nowrap;
-            font-family: 'Courier New', monospace;
+            font-family: var(--font-mono);
             font-variant-numeric: tabular-nums;
             line-height: 1.2;
+            backdrop-filter: blur(8px);
+        }
+        .tv-cum-rvol-badge::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 999px;
+            background: var(--rvol-tier-color);
+            box-shadow: 0 0 12px color-mix(in srgb, var(--rvol-tier-color) 55%, transparent);
+            flex: 0 0 auto;
         }
         .tv-cum-rvol-badge .label {
             color: var(--fg-2);
-            font-size: 10px;
+            font-size: 9.5px;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.08em;
         }
         .tv-cum-rvol-badge .value {
-            color: var(--fg-0);
-            font-size: 13px;
+            color: var(--rvol-tier-color);
+            font-size: 14px;
             font-weight: 800;
         }
         .tv-cum-rvol-badge .detail {
             color: var(--fg-2);
-            font-size: 10px;
+            font-size: 10.5px;
+            padding-left: 8px;
+            border-left: 1px solid var(--border);
         }
-        .tv-cum-rvol-badge.tier-cool .value { color: var(--fg-1); }
-        .tv-cum-rvol-badge.tier-normal .value { color: var(--fg-0); }
-        .tv-cum-rvol-badge.tier-elevated .value { color: var(--info); }
-        .tv-cum-rvol-badge.tier-hot .value { color: var(--warn); }
+        .tv-cum-rvol-badge.tier-cool { --rvol-tier-color: var(--fg-1); }
+        .tv-cum-rvol-badge.tier-normal { --rvol-tier-color: var(--fg-0); }
+        .tv-cum-rvol-badge.tier-elevated { --rvol-tier-color: var(--info); }
+        .tv-cum-rvol-badge.tier-hot { --rvol-tier-color: var(--warn); }
+        .tv-cum-rvol-badge.tier-extreme {
+            --rvol-tier-color: var(--rvol-hot);
+        }
         .tv-cum-rvol-badge.tier-extreme .value {
-            color: var(--rvol-hot);
             text-shadow: 0 0 10px color-mix(in srgb, var(--rvol-hot) 45%, transparent);
         }
         .tv-rvol-marker-layer {
@@ -17320,15 +17369,16 @@ def index():
         /* Fullscreen chart overlay */
         .chart-fullscreen-btn {
             position: absolute;
-            top: 8px;
-            left: 8px;
+            top: 10px;
+            right: 10px;
+            left: auto;
             z-index: 200;
-            background: rgba(45, 45, 45, 0.85);
-            border: 1px solid #555;
-            color: #ccc;
+            background: color-mix(in srgb, var(--bg-1) 92%, transparent);
+            border: 1px solid var(--border-strong);
+            color: var(--fg-1);
             width: 30px;
             height: 30px;
-            border-radius: 4px;
+            border-radius: 8px;
             cursor: pointer;
             display: flex;
             align-items: center;
@@ -17343,9 +17393,9 @@ def index():
             opacity: 1;
         }
         .chart-fullscreen-btn:hover {
-            background: rgba(80, 80, 80, 0.95);
-            color: #fff;
-            border-color: #777;
+            background: var(--bg-2);
+            color: var(--fg-0);
+            border-color: var(--accent);
         }
         .chart-container.fullscreen {
             position: fixed !important;
@@ -17371,21 +17421,23 @@ def index():
             opacity: 1;
             position: fixed;
             top: 14px;
-            left: 14px;
+            right: 14px;
+            left: auto;
             z-index: 10001;
         }
         /* Pop-out button */
         .chart-popout-btn {
             position: absolute;
-            top: 8px;
-            left: 42px;
+            top: 10px;
+            right: 46px;
+            left: auto;
             z-index: 200;
-            background: rgba(45, 45, 45, 0.85);
-            border: 1px solid #555;
-            color: #ccc;
+            background: color-mix(in srgb, var(--bg-1) 92%, transparent);
+            border: 1px solid var(--border-strong);
+            color: var(--fg-1);
             width: 30px;
             height: 30px;
-            border-radius: 4px;
+            border-radius: 8px;
             cursor: pointer;
             display: flex;
             align-items: center;
@@ -17400,15 +17452,16 @@ def index():
             opacity: 1;
         }
         .chart-popout-btn:hover {
-            background: rgba(80, 80, 80, 0.95);
-            color: #fff;
-            border-color: #777;
+            background: var(--bg-2);
+            color: var(--fg-0);
+            border-color: var(--accent);
         }
         .chart-container.fullscreen .chart-popout-btn {
             opacity: 1;
             position: fixed;
             top: 14px;
-            left: 50px;
+            right: 50px;
+            left: auto;
             z-index: 10001;
         }
     </style>
@@ -29317,6 +29370,20 @@ def index():
             return rail;
         }
 
+        function isChartContextStripEnabled() {
+            const grid = document.getElementById('chart-grid');
+            return !!(grid && grid.classList.contains('rail-collapsed'));
+        }
+
+        function applyChartContextStripVisibility(strip = document.getElementById('chart-context-strip')) {
+            if (!strip) return false;
+            const enabled = isChartContextStripEnabled();
+            strip.classList.toggle('active', enabled);
+            strip.setAttribute('aria-hidden', enabled ? 'false' : 'true');
+            strip.tabIndex = enabled ? 0 : -1;
+            return enabled;
+        }
+
         function buildChartContextStripHtml() {
             return (
                 '<div class="chart-context-strip" id="chart-context-strip" aria-label="Chart scalp context">' +
@@ -29345,6 +29412,7 @@ def index():
             } else if (toolbar && contextStrip.nextElementSibling !== toolbar) {
                 toolbar.insertAdjacentElement('beforebegin', contextStrip);
             }
+            applyChartContextStripVisibility(contextStrip);
             return contextStrip;
         }
 
@@ -29742,6 +29810,10 @@ def index():
                 btn.setAttribute('aria-label', btn.title);
             }
             if (!collapsed) syncRightRailWidthForTab();
+            applyChartContextStripVisibility();
+            if (collapsed && typeof renderChartContextStrip === 'function') {
+                renderChartContextStrip();
+            }
             scheduleRightRailResizeRefresh();
         }
         function ensureRightRailControls(grid = document.getElementById('chart-grid')) {
@@ -34970,6 +35042,7 @@ def index():
         }
 
         function renderChartContextAlert(alert) {
+            if (!isChartContextStripEnabled()) return;
             const wrap = document.querySelector('[data-chart-context-wrap="alert"]');
             const text = document.querySelector('[data-chart-context="top_alert"]');
             const hasAlert = !!(alert && alert.text);
@@ -34997,7 +35070,8 @@ def index():
         }
 
         function renderChartContextStrip() {
-            ensureChartContextStrip();
+            const strip = ensureChartContextStrip();
+            if (!applyChartContextStripVisibility(strip)) return;
             const tickerInput = document.getElementById('ticker');
             const timeframeInput = document.getElementById('timeframe');
             const ticker = ((tickerInput && tickerInput.value) || (lastData && lastData.ticker) || '').trim().toUpperCase();
