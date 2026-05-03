@@ -702,6 +702,11 @@ Phase 4 closeout:
 - Remaining validation needs a live regular-session run: confirm side-aware volume-spike wording/cooldowns against fresh rows and inspect a real trade screenshot with overlays enabled. No analytical formulas were changed in Phase 4.
 - No Phase 5 is defined in this implementation plan.
 
+2026-05-03 review pass note:
+
+- Final Phase 1-4 review found a missed audit item: regime alerts were still emitted on every stats refresh, so a structural Long/Short Gamma state could keep occupying the promoted event-alert slot. The code now emits a regime alert only when the scoped ticker/expiry/range regime changes; the first observed regime initializes state without firing. Market State still shows the current regime continuously.
+- The same review also closed the remaining IV-surge alert hardening checklist item: IV surge alerts now require minimum volume, minimum traded premium estimate, and an acceptable bid/ask spread before the ring-buffer z-score can emit an alert.
+
 ## 13. Copy/Paste Prompt for Next Codex Session
 
 ```text

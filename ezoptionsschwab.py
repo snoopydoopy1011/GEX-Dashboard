@@ -7218,7 +7218,11 @@ def compute_contract_helper(calls, puts, S, selected_expiries=None, rv_iv=None, 
 _ALERT_COOLDOWNS = {}   # (ticker, scope_id, alert_id) -> float unix ts of last fire
 _IV_BUFFER = collections.defaultdict(lambda: collections.deque(maxlen=30))  # (ticker, side, expiry, strike) -> deque[float]
 _LAST_WALLS = {}        # (ticker, scope_id) -> {'call_wall': float|None, 'put_wall': float|None}
+_LAST_REGIME_STATE = {}  # (ticker, scope_id) -> 'Long Gamma'|'Short Gamma'
 _VOL_SPIKE_CACHE = {}   # (ticker, date, lo, hi) -> {'ts': float, 'data': {strike: {'avg20', 'curr'}}}
+IV_SURGE_MIN_VOLUME = 25
+IV_SURGE_MIN_PREMIUM = 1000.0
+IV_SURGE_MAX_SPREAD_PCT = 0.30
 
 
 def _alert_scope_key(scope_id=None):
@@ -7233,6 +7237,37 @@ def _alert_cooldown_ok(ticker, alert_id, seconds, scope_id=None):
         _ALERT_COOLDOWNS[key] = now_ts
         return True
     return False
+
+
+def _regime_changed(ticker, scope_id, regime):
+    """Emit regime alerts only for scoped transitions, not every refresh."""
+    if not ticker or not regime:
+        return False
+    key = (str(ticker or '').upper(), _alert_scope_key(scope_id))
+    previous = _LAST_REGIME_STATE.get(key)
+    _LAST_REGIME_STATE[key] = regime
+    return previous is not None and previous != regime
+
+
+def _iv_surge_liquidity_ok(row, volume=None, ref_price=None):
+    """Suppress IV-surge alerts from thin, low-premium, or wide-spread contracts."""
+    try:
+        vol = float(volume if volume is not None else (row.get('volume', 0) or 0))
+        ref = float(ref_price if ref_price is not None else (_estimate_contract_ref_price(row) or 0))
+        bid = float(row.get('bid', 0) or 0)
+        ask = float(row.get('ask', 0) or 0)
+    except Exception:
+        return False
+    if vol < IV_SURGE_MIN_VOLUME or ref <= 0:
+        return False
+    if vol * ref * 100.0 < IV_SURGE_MIN_PREMIUM:
+        return False
+    if ask <= 0 or bid < 0 or ask < bid:
+        return False
+    spread_ref = ((bid + ask) / 2.0) if bid > 0 and ask > 0 else ref
+    if spread_ref <= 0:
+        return False
+    return ((ask - bid) / spread_ref) <= IV_SURGE_MAX_SPREAD_PCT
 
 
 def _stable_alert_id(ticker, scope_id, alert):
@@ -7476,6 +7511,8 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
                 vol = float(row.get('volume', 0) or 0)
                 oi = float(row.get('openInterest', 0) or 0)
                 if curr_iv <= 0:
+                    continue
+                if not _iv_surge_liquidity_ok(row, volume=vol, ref_price=ref_price):
                     continue
                 buffer_key = (ticker, option_type, expiry_iso, round(strike, 4))
                 buf = _IV_BUFFER[buffer_key]
@@ -7901,19 +7938,20 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
             'direction_label': 'structural',
             'direction_hint': 'Gamma flip proximity is structural regime context',
         })
-    if out['regime'] == 'Short Gamma':
+    regime_changed = _regime_changed(ticker, scope_id, out.get('regime'))
+    if regime_changed and out['regime'] == 'Short Gamma':
         alerts.append({
             'level': 'warn',
-            'text': 'Short-gamma regime — moves may accelerate',
+            'text': 'Gamma regime changed to Short Gamma — moves may accelerate',
             'alert_type': 'regime',
             'direction_classifiable': True,
             'direction_label': 'structural',
             'direction_hint': 'Gamma regime is structural volatility context, not a one-sided flow read',
         })
-    elif out['regime'] == 'Long Gamma':
+    elif regime_changed and out['regime'] == 'Long Gamma':
         alerts.append({
             'level': 'info',
-            'text': 'Long-gamma regime — dealer hedging dampens moves',
+            'text': 'Gamma regime changed to Long Gamma — dealer hedging dampens moves',
             'alert_type': 'regime',
             'direction_classifiable': True,
             'direction_label': 'structural',
