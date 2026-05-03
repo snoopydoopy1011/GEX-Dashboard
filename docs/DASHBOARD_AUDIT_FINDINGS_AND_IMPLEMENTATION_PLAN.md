@@ -1,6 +1,6 @@
 # GEX Dashboard Audit Findings and Implementation Plan
 
-Last finalized: 2026-05-03 America/Chicago / 2026-05-03 UTC, after the Phase 3 implementation pass.
+Last finalized: 2026-05-03 America/Chicago / 2026-05-03 UTC, after the Phase 4 implementation closeout.
 
 ## 1. Executive Summary
 
@@ -417,7 +417,7 @@ Status: completed in the 2026-05-03 Phase 3 implementation pass. Plotly CDN pinn
 
 ### Phase 4: Active-Session Polish and Closeout
 
-Start this phase directly after Phase 3. Do not spend the next session re-running Phase 1, Phase 2, or Phase 3 sanity checks before coding.
+Status: completed in the 2026-05-03 Phase 4 implementation pass.
 
 - Validate side-aware volume spike alerts with fresh active-session interval samples. Tune wording/cooldowns only if duplicate, stale, or misleading alerts appear.
 - Decide whether the quarantined popout-only chart renderer should remain as a small legacy island or be removed in a targeted cleanup.
@@ -448,7 +448,7 @@ Start this phase directly after Phase 3. Do not spend the next session re-runnin
 
 - `ezoptionsschwab.py::_fetch_vol_spike_data` and `store_interval_data`
   - Phase 3 completed nullable `call_volume` and `put_volume` storage plus side-aware volume-spike detection.
-  - Phase 4: validate wording and duplicate behavior against fresh active-session interval samples.
+  - Phase 4 inspected the local DB and confirmed there were no populated side-aware interval rows available in the closed-market state. Re-test wording and duplicate behavior during the next regular-session run once fresh side-aware rows accumulate.
 
 - `ezoptionsschwab.py::renderRailKeyLevels`
   - Add secondary walls, HVL, max positive/negative GEX, and +/-2 sigma EM.
@@ -486,7 +486,7 @@ Start this phase directly after Phase 3. Do not spend the next session re-runnin
 
 - `ezoptionsschwab.py::captureTradeChartScreenshotDataUrl`
   - Phase 3 added best-effort DOM/SVG overlay capture and capture-layer metadata.
-  - Phase 4: inspect a representative capture with real overlays before adding any more screenshot UI.
+  - Phase 4 added journal media display for capture-layer metadata. No real screenshot media existed locally, so visual overlay coverage still needs a live/representative capture.
 
 - `ezoptionsschwab.py::buildTVToolbar`
   - Add chart-context strip or reserve space for it.
@@ -676,42 +676,36 @@ Tricky parts / decisions:
 - Strike Inspect width is narrower by default, but saved user widths remain respected. Collapse/resize limits were tightened without changing analytical payloads or y-axis sync.
 - Settings were regrouped around tasks while preserving existing input IDs and event handlers, because changing IDs would have broken save/load wiring.
 
+2026-05-03 Phase 4 implementation pass:
+
+Status: complete. This pass finished the documented Phase 4 scope for the code paths that could be validated on the local closed-market state. Save the broader all-phases sanity/review pass for the PR/final review step.
+
+- Checked local `interval_data` for side-aware volume samples. The database has the new nullable `call_volume` and `put_volume` columns, but the available SPY rows from `2026-04-30` and `2026-05-01` had no populated side-aware rows. Because this pass happened on Sunday, no fresh active-session sample validation was possible. The code path still prefers side-aware deltas and only falls back to legacy net-volume rows when side samples are unavailable, so no duplicate side-plus-net alert behavior was observed locally. Re-test wording/cooldowns during the next regular-session run once new side-aware rows accumulate.
+- Kept the quarantined `renderPopoutPriceChart` renderer as a small popout-only island. The price-chart popout button still depends on that isolated renderer, while the main dashboard continues to use `renderTVPriceChart`. Removing it would delete a working popout feature rather than cleaning an active dashboard path.
+- Refined Session Review for representative local journal entries. The panel now reviews today's events when present, otherwise it falls back to the latest matching session so after-hours/weekend review does not show a misleading zero-event current day. It also shows entry/exit counts, open lifecycle groups, screenshot coverage by lifecycle group, and lifecycle badges for missing/attached screenshots.
+- Added screenshot capture-layer metadata to the journal media card when attachments exist. Future screenshot attachments will show the stored canvas/SVG/DOM layer counts from `capture_layers`, making it easier to inspect whether the DOM/SVG overlay path captured important chart context. The local database had no `trade_event_media` rows and no files under `Screenshots/trade_journal`, so a real overlay capture could not be visually inspected in this pass.
+- Left Plotly CDN pinning unchanged. There was no new browser policy, rendering behavior, or user-facing Plotly chart issue to make the existing `plotly-latest` warning actionable during Phase 4.
+
+Tricky parts / decisions:
+
+- The Phase 4 side-aware alert validation asked for fresh active-session samples, but the local database only had pre-Phase-4 rows with empty side columns and the market was closed. The code path was inspected, but the doc now explicitly separates code readiness from regular-session validation.
+- `renderPopoutPriceChart` remains because it is tied to the price-chart popout feature, not the main dashboard renderer. Removing it would be product deletion rather than dead-code cleanup.
+- Session Review needed to handle weekend/after-hours review differently from live-session review. Falling back to the latest matching session makes existing journal entries visible without pretending today had trades.
+- Screenshot coverage can now be audited from stored capture-layer metadata, but real overlay quality still depends on inspecting an actual captured PNG with overlays enabled.
+
+Phase 4 closeout:
+
+- Phase 1 fixed the highest-confidence state/markup/safety bugs.
+- Phase 2 improved the fast scalp workflow around chart context, Overview priority, order-entry reprice/freshness state, and journal lifecycle grouping.
+- Phase 3 completed the larger cleanup surfaces: Strike Inspect framing, side-aware volume storage/alerts, screenshot capture overlays, settings regrouping, and Session Review.
+- Phase 4 kept the remaining optional work bounded to active-session validation notes, popout retention, Session Review/screenshot metadata polish, and explicit Plotly deferral.
+- Remaining validation needs a live regular-session run: confirm side-aware volume-spike wording/cooldowns against fresh rows and inspect a real trade screenshot with overlays enabled. No analytical formulas were changed in Phase 4.
+- No Phase 5 is defined in this implementation plan.
+
 ## 13. Copy/Paste Prompt for Next Codex Session
 
 ```text
-Read AGENTS.md first, then read:
-- docs/UI_MODERNIZATION_PLAN.md
-- docs/ANALYTICS_CHART_PHASE2_PLAN.md
-- docs/ALERTS_RAIL_PHASE3_PLAN.md
-- docs/DASHBOARD_AUDIT_FINDINGS_AND_IMPLEMENTATION_PLAN.md
+All implementation phases in this document are complete. No Phase 5 is defined.
 
-Confirm branch/worktree with:
-- git branch -a
-- git log --oneline main..HEAD
-- git status --short
-
-Phase 1, Phase 2, and Phase 3 are complete. Do not run a Phase 1/Phase 2/Phase 3 sanity checklist before coding. Do not spend time re-confirming the closed-market SPY `$720.00` state. If there are uncommitted leftovers from the previous session, inspect only enough to avoid overwriting work, then continue.
-
-Constraints:
-- Do not change analytical formulas unless you find a clear bug and document it first.
-- Do not introduce a JS framework.
-- Keep the single-file ezoptionsschwab.py structure.
-- Use existing CSS tokens and design patterns.
-- Grep by anchors rather than trusting line numbers.
-- Any new or changed Overview/right-rail markup must be mirrored between server-rendered HTML and buildAlertsPanelHtml/ensurePriceChartDom rebuild paths.
-- Keep docs/DASHBOARD_AUDIT_FINDINGS_AND_IMPLEMENTATION_PLAN.md updated with implementation notes as work progresses.
-- Use port `5014` only when you need to run the app for the work at hand; do not start with a broad sanity pass.
-
-Goal:
-Start Phase 4 directly from docs/DASHBOARD_AUDIT_FINDINGS_AND_IMPLEMENTATION_PLAN.md.
-
-Phase 4 focus:
-1. Validate side-aware volume spike alerts with fresh active-session interval samples; tune wording/cooldowns only if duplicate, stale, or misleading alerts appear.
-2. Decide whether the quarantined popout-only chart renderer should remain or be removed in a targeted cleanup.
-3. Refine Session Review using representative journal entries and screenshots, especially screenshot coverage and entry/exit lifecycle summaries.
-4. Inspect real trade screenshot captures with overlays enabled and adjust capture metadata/UI only if the new DOM/SVG overlay path misses important chart context.
-5. Revisit Plotly CDN pinning only if browser policy, rendering behavior, or a user-facing chart issue makes the warning actionable.
-6. After Phase 4 work is complete, update the audit doc with closeout notes. Save the all-phases sanity/review pass for after the phase work is finished.
-
-Do not begin by checking all previous phases. Start with the first Phase 4 implementation item.
+If a future session is explicitly asked to do final review, PR prep, or live-session validation, start from the Phase 4 closeout notes above. Do not run a broad all-phases sanity pass unless the user explicitly asks for final review/PR readiness.
 ```

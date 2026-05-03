@@ -31380,6 +31380,21 @@ def index():
         function getTradeJournalMedia(event) {
             return Array.isArray(event && event.media) ? event.media : [];
         }
+        function getTradeJournalScreenshotMedia(event) {
+            return getTradeJournalMedia(event).filter(item => String(item.media_type || '').toLowerCase() === 'screenshot');
+        }
+        function getTradeJournalMediaLayerSummary(item) {
+            const layers = item && item.metadata && item.metadata.capture_layers ? item.metadata.capture_layers : null;
+            if (!layers || typeof layers !== 'object') return '';
+            const canvas = Number(layers.canvas || 0);
+            const svg = Number(layers.svg || 0);
+            const dom = Number(layers.dom || 0);
+            const parts = [];
+            if (canvas) parts.push(canvas + ' canvas');
+            if (svg) parts.push(svg + ' SVG');
+            if (dom) parts.push(dom + ' DOM');
+            return parts.length ? 'Layers: ' + parts.join(', ') : 'Layers: none reported';
+        }
         function renderTradeJournalMedia(event) {
             const media = getTradeJournalMedia(event);
             const storagePath = tradeRailState.journalMediaStoragePath || (event && event.media_storage_path) || '';
@@ -31395,6 +31410,7 @@ def index():
                         item.width && item.height ? item.width + 'x' + item.height : '',
                         fmtTradeJournalBytes(item.bytes),
                         item.source ? String(item.source).replace(/_/g, ' ') : '',
+                        getTradeJournalMediaLayerSummary(item),
                     ].filter(Boolean).join(' · ');
                     const path = item.file_path || item.relative_path || '';
                     return '<div class="journal-media-card">' +
@@ -31510,6 +31526,9 @@ def index():
                         const end = getTradeJournalDate(lastExit.created_at);
                         if (start && end && end >= start) group.holdSeconds = Math.round((end - start) / 1000);
                     }
+                    group.screenshotCount = group.events.reduce((sum, event) => sum + getTradeJournalScreenshotMedia(event).length, 0);
+                    group.entryLimit = firstEntry && firstEntry.limit_price ? firstEntry.limit_price : '';
+                    group.exitLimit = lastExit && lastExit.limit_price ? lastExit.limit_price : '';
                     const firstInstruction = group.entryEvents[0] && group.entryEvents[0].instruction;
                     const exitInstruction = group.exitEvents[group.exitEvents.length - 1] && group.exitEvents[group.exitEvents.length - 1].instruction;
                     group.instruction = [firstInstruction, exitInstruction].filter(Boolean).join(' -> ');
@@ -31552,26 +31571,35 @@ def index():
                 return;
             }
             const today = getTradeJournalDateKey(new Date());
-            const sessionEvents = rows.filter(event => getTradeJournalDateKey(event.created_at) === today);
+            const dates = rows.map(event => getTradeJournalDateKey(event.created_at)).filter(date => date && date !== 'Unknown').sort();
+            const latestDate = dates.length ? dates[dates.length - 1] : today;
+            const reviewDate = rows.some(event => getTradeJournalDateKey(event.created_at) === today) ? today : latestDate;
+            const sessionEvents = rows.filter(event => getTradeJournalDateKey(event.created_at) === reviewDate);
             const groups = buildTradeJournalLifecycle(rows);
-            const sessionGroups = groups.filter(group => group.dateKey === today);
+            const sessionGroups = groups.filter(group => group.dateKey === reviewDate);
             const completedGroups = sessionGroups.filter(group => group.entryEvents && group.entryEvents.length && group.exitEvents && group.exitEvents.length);
+            const openGroups = sessionGroups.filter(group => group.entryEvents && group.entryEvents.length && !(group.exitEvents && group.exitEvents.length));
+            const entryCount = sessionGroups.reduce((sum, group) => sum + ((group.entryEvents && group.entryEvents.length) || 0), 0);
+            const exitCount = sessionGroups.reduce((sum, group) => sum + ((group.exitEvents && group.exitEvents.length) || 0), 0);
             const holdValues = completedGroups.map(group => Number(group.holdSeconds)).filter(Number.isFinite);
             const avgHold = holdValues.length ? fmtTradeDuration(Math.round(holdValues.reduce((sum, value) => sum + value, 0) / holdValues.length)) : '—';
             const explicitPnls = sessionEvents.map(event => getTradeJournalPnlInfo(event, { allowPosition: false })).filter(Boolean);
             const pnlTotal = explicitPnls.reduce((sum, item) => sum + Number(item.value || 0), 0);
-            const mediaEvents = sessionEvents.filter(event => getTradeJournalMedia(event).length);
+            const mediaEvents = sessionEvents.filter(event => getTradeJournalScreenshotMedia(event).length);
+            const screenshotGroups = sessionGroups.filter(group => Number(group.screenshotCount || 0) > 0).length;
+            const missingScreenshotGroups = Math.max(0, sessionGroups.length - screenshotGroups);
             const screenshotsNeedNotes = mediaEvents.filter(event => !String(event.journal_notes || '').trim() && !String(event.journal_outcome || '').trim()).length;
             const tagCounts = new Map();
             sessionEvents.forEach(event => getTradeJournalTags(event).forEach(tag => addJournalCount(tagCounts, tag)));
             const topTags = getJournalCountRows(tagCounts, 3).map(([label, count]) => label + ' ' + count).join(' / ') || 'No tags yet';
             const cards = [
-                ['Session Events', sessionEvents.length, today],
+                ['Session Events', sessionEvents.length, reviewDate === today ? 'Today' : 'Latest matching session ' + reviewDate],
                 ['Scalp Groups', sessionGroups.length, completedGroups.length + ' completed'],
+                ['Entries / Exits', entryCount + ' / ' + exitCount, openGroups.length ? openGroups.length + ' open groups' : 'All paired or planned'],
                 ['Average Hold', avgHold, holdValues.length ? holdValues.length + ' paired groups' : 'Need entry and exit events'],
                 ['Known P/L', explicitPnls.length ? fmtTradeSignedMoney(pnlTotal) : 'Not inferred', explicitPnls.length ? explicitPnls.length + ' explicit values' : 'No deterministic values'],
-                ['Screenshots', mediaEvents.length, screenshotsNeedNotes ? screenshotsNeedNotes + ' need notes/outcome' : 'Coverage noted'],
-                ['Top Tags', topTags, 'Current session'],
+                ['Screenshots', screenshotGroups + '/' + sessionGroups.length + ' groups', missingScreenshotGroups ? missingScreenshotGroups + ' missing chart context' : (screenshotsNeedNotes ? screenshotsNeedNotes + ' need notes/outcome' : 'Coverage noted')],
+                ['Top Tags', topTags, reviewDate],
             ];
             target.innerHTML =
                 '<span class="journal-section-title">Session Review</span>' +
@@ -31596,6 +31624,7 @@ def index():
                         group.entryEvents && group.entryEvents.length ? '<span class="journal-badge">Entry ' + _escapeHtml(String(group.entryEvents.length)) + '</span>' : '',
                         group.exitEvents && group.exitEvents.length ? '<span class="journal-badge">Exit ' + _escapeHtml(String(group.exitEvents.length)) + '</span>' : '',
                         Number.isFinite(group.holdSeconds) ? '<span class="journal-badge">Hold ' + _escapeHtml(fmtTradeDuration(group.holdSeconds)) + '</span>' : '',
+                        Number(group.screenshotCount || 0) > 0 ? '<span class="journal-badge">Shots ' + _escapeHtml(String(group.screenshotCount)) + '</span>' : '<span class="journal-badge">No shot</span>',
                     ].filter(Boolean).join('');
                     const badges = lifecycleBadges + getJournalCountRows(typeCounts, 4).map(([label, count]) => (
                         '<span class="journal-badge">' + _escapeHtml(label + ' ' + count) + '</span>'
@@ -31603,7 +31632,8 @@ def index():
                     const first = group.events[0] || {};
                     const last = group.events[group.events.length - 1] || {};
                     const title = [group.ticker, group.instruction, group.contract].filter(Boolean).join(' ') || 'Manual journal lifecycle';
-                    const meta = [fmtTradeOrderTime(first.created_at), 'to', fmtTradeOrderTime(last.created_at), group.status ? 'status ' + group.status : ''].filter(Boolean).join(' ');
+                    const priceTrail = [group.entryLimit ? 'entry ' + group.entryLimit : '', group.exitLimit ? 'exit ' + group.exitLimit : ''].filter(Boolean).join(' / ');
+                    const meta = [fmtTradeOrderTime(first.created_at), 'to', fmtTradeOrderTime(last.created_at), priceTrail, group.status ? 'status ' + group.status : ''].filter(Boolean).join(' ');
                     return '<div class="journal-lifecycle-row">' +
                         '<div><div class="journal-lifecycle-title" title="' + _escapeHtml(title) + '">' + _escapeHtml(title) + '</div><div class="journal-lifecycle-meta">' + _escapeHtml(meta) + '</div></div>' +
                         '<div class="journal-lifecycle-badges">' + badges + '</div>' +
