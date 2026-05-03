@@ -11492,12 +11492,12 @@ def index():
         .trade-active-contract {
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto;
-            gap: 8px;
+            gap: 7px;
             align-items: center;
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-0);
-            padding: 7px;
+            padding: 6px;
             min-width: 0;
         }
         .trade-active-contract-main {
@@ -11511,9 +11511,9 @@ def index():
             font-variant-numeric: tabular-nums;
         }
         .trade-active-contract-sub {
-            margin-top: 2px;
+            margin-top: 1px;
             color: var(--fg-2);
-            font-size: 10px;
+            font-size: 9px;
             line-height: 1.25;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -11546,16 +11546,16 @@ def index():
         .trade-active-actions {
             display: grid;
             grid-template-columns: 1fr 1fr minmax(72px, 0.8fr);
-            gap: 5px;
-            margin-top: 7px;
+            gap: 4px;
+            margin-top: 5px;
         }
         .trade-fast-button {
-            min-height: 32px;
+            min-height: 29px;
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-0);
             color: var(--fg-1);
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 900;
             text-transform: uppercase;
             cursor: pointer;
@@ -11579,16 +11579,16 @@ def index():
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 4px;
-            margin-top: 5px;
+            margin-top: 4px;
         }
         .trade-reprice-row button {
             min-width: 0;
-            min-height: 26px;
+            min-height: 24px;
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-0);
             color: var(--fg-1);
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 800;
             text-transform: uppercase;
             cursor: pointer;
@@ -11604,45 +11604,55 @@ def index():
         .trade-active-setup {
             display: grid;
             grid-template-columns: minmax(0, 1fr);
-            gap: 5px;
-            margin-top: 7px;
+            gap: 4px;
+            margin-top: 5px;
         }
         .trade-active-setup label {
             display: grid;
-            gap: 3px;
+            grid-template-columns: 28px minmax(0, 1fr);
+            gap: 5px;
+            align-items: center;
             min-width: 0;
             color: var(--fg-2);
-            font-size: 10px;
+            font-size: 9px;
+            font-weight: 800;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
+            letter-spacing: 0.05em;
+        }
+        .trade-active-control-label {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            line-height: 1.1;
         }
         .trade-active-qty-line {
             display: grid;
-            grid-template-columns: minmax(44px, 0.72fr) repeat(4, minmax(28px, 1fr));
-            gap: 4px;
-            margin-top: 3px;
+            grid-template-columns: minmax(40px, 0.7fr) repeat(4, minmax(26px, 1fr));
+            gap: 3px;
+            margin-top: 0;
         }
         .trade-active-qty-line input,
         .trade-active-setup select {
             width: 100%;
             min-width: 0;
-            min-height: 28px;
+            min-height: 25px;
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-0);
             color: var(--fg-1);
-            padding: 0 7px;
-            font-size: 11px;
+            padding: 0 6px;
+            font-size: 10px;
             font-variant-numeric: tabular-nums;
         }
         .trade-active-template-plan {
             display: grid;
-            gap: 6px;
-            margin-top: 7px;
+            gap: 5px;
+            margin-top: 5px;
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-0);
-            padding: 6px;
+            padding: 5px;
             min-width: 0;
         }
         .trade-active-template-head {
@@ -11666,7 +11676,7 @@ def index():
             font-size: 10px;
         }
         .trade-active-template-head button {
-            min-height: 22px;
+            min-height: 20px;
             border: 1px solid var(--border);
             border-radius: 999px;
             background: var(--bg-1);
@@ -11696,8 +11706,8 @@ def index():
         .trade-active-offsets input {
             width: 100%;
             min-width: 0;
-            min-height: 26px;
-            margin-top: 3px;
+            min-height: 24px;
+            margin-top: 2px;
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-1);
@@ -11744,13 +11754,13 @@ def index():
         }
         .trade-active-qty-line button {
             min-width: 0;
-            min-height: 28px;
+            min-height: 25px;
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-0);
             color: var(--fg-1);
             padding: 0;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 800;
             cursor: pointer;
         }
@@ -11759,13 +11769,13 @@ def index():
             align-items: center;
             justify-content: space-between;
             gap: 8px;
-            margin-top: 7px;
+            margin-top: 5px;
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-0);
             color: var(--fg-1);
-            padding: 6px 8px;
-            font-size: 11px;
+            padding: 5px 7px;
+            font-size: 10px;
             font-weight: 900;
             line-height: 1.2;
             text-transform: uppercase;
@@ -11784,8 +11794,8 @@ def index():
         .trade-active-context {
             display: grid;
             grid-template-columns: repeat(5, minmax(0, 1fr));
-            gap: 5px;
-            margin-top: 7px;
+            gap: 4px;
+            margin-top: 5px;
         }
         .trade-ticket-freshness {
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -11795,13 +11805,13 @@ def index():
             border: 1px solid var(--border);
             border-radius: 6px;
             background: var(--bg-0);
-            padding: 5px 6px;
+            padding: 4px 5px;
             min-width: 0;
         }
         .trade-active-stat span {
             display: block;
             color: var(--fg-2);
-            font-size: 9px;
+            font-size: 8px;
             line-height: 1.15;
             text-transform: uppercase;
             letter-spacing: 0.05em;
@@ -11809,10 +11819,10 @@ def index():
         }
         .trade-active-stat strong {
             display: block;
-            margin-top: 2px;
+            margin-top: 1px;
             min-width: 0;
             color: var(--fg-0);
-            font-size: 11px;
+            font-size: 10px;
             line-height: 1.2;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -11826,7 +11836,7 @@ def index():
             color: var(--put);
         }
         .trade-active-ladder {
-            margin-top: 7px;
+            margin-top: 5px;
             border: 1px solid var(--border);
             border-radius: 6px;
             overflow: hidden;
@@ -11835,8 +11845,8 @@ def index():
         .trade-active-ladder-head,
         .trade-active-ladder-row {
             display: grid;
-            grid-template-columns: minmax(34px, 0.62fr) minmax(32px, 0.56fr) minmax(42px, 0.66fr) minmax(32px, 0.56fr) minmax(34px, 0.62fr) minmax(50px, 0.78fr);
-            gap: 3px;
+            grid-template-columns: minmax(30px, 0.6fr) minmax(27px, 0.52fr) minmax(42px, 0.72fr) minmax(27px, 0.52fr) minmax(30px, 0.6fr) minmax(42px, 0.7fr);
+            gap: 2px;
             align-items: center;
             min-width: 0;
             font-variant-numeric: tabular-nums;
@@ -11844,11 +11854,12 @@ def index():
         .trade-active-ladder-head {
             background: var(--bg-2);
             color: var(--fg-2);
-            font-size: 9px;
+            font-size: 8px;
             font-weight: 800;
             letter-spacing: 0.04em;
+            line-height: 1.1;
             text-transform: uppercase;
-            padding: 5px 6px;
+            padding: 4px 5px;
         }
         .trade-active-ladder-row {
             width: 100%;
@@ -11856,8 +11867,9 @@ def index():
             border-top: 1px solid var(--border);
             background: transparent;
             color: var(--fg-1);
-            padding: 5px 6px;
-            font-size: 10px;
+            padding: 2px 5px;
+            font-size: 9px;
+            line-height: 1.05;
             text-align: right;
             cursor: pointer;
         }
@@ -11897,18 +11909,18 @@ def index():
         }
         .trade-ladder-order-marker {
             display: inline-grid;
-            grid-template-columns: minmax(0, 1fr) 16px;
+            grid-template-columns: minmax(0, 1fr) 14px;
             align-items: center;
             gap: 3px;
             min-width: 0;
             border: 1px solid var(--border);
             border-radius: 999px;
             background: var(--bg-1);
-            padding: 1px 2px 1px 5px;
+            padding: 1px 2px 1px 4px;
             color: var(--fg-0);
-            font-size: 9px;
+            font-size: 8px;
             font-weight: 900;
-            line-height: 1.3;
+            line-height: 1.1;
             text-align: left;
             text-transform: uppercase;
         }
@@ -11927,15 +11939,15 @@ def index():
             white-space: nowrap;
         }
         .trade-ladder-cancel {
-            width: 16px;
-            height: 16px;
-            min-width: 16px;
+            width: 14px;
+            height: 14px;
+            min-width: 14px;
             border: 1px solid var(--border);
             border-radius: 999px;
             background: var(--bg-0);
             color: var(--fg-1);
             padding: 0;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 900;
             line-height: 1;
             cursor: pointer;
@@ -11951,6 +11963,8 @@ def index():
         .trade-active-price {
             color: var(--fg-0);
             text-align: center;
+            font-size: 10px;
+            line-height: 1;
             font-weight: 900;
         }
         .trade-active-bid {
@@ -11971,9 +11985,9 @@ def index():
         .trade-active-pnl.neg { color: var(--put); }
         .trade-active-message {
             min-height: 18px;
-            margin-top: 7px;
+            margin-top: 5px;
             color: var(--fg-2);
-            font-size: 11px;
+            font-size: 10px;
             line-height: 1.35;
         }
         .trade-active-message.warn {
@@ -18669,7 +18683,8 @@ def index():
                                 <button type="button" data-trade-reprice="mark">Mark</button>
                             </div>
                             <div class="trade-active-setup">
-                                <label>Qty
+                                <label class="trade-active-qty-control">
+                                    <span class="trade-active-control-label">Qty</span>
                                     <div class="trade-active-qty-line">
                                         <input data-trade-fast-qty type="number" min="1" max="100" step="1" value="1">
                                         <button type="button" data-trade-fast-qty-preset="1">1</button>
@@ -18678,7 +18693,8 @@ def index():
                                         <button type="button" data-trade-fast-qty-preset="10">10</button>
                                     </div>
                                 </label>
-                                <label>Template
+                                <label class="trade-active-template-control">
+                                    <span class="trade-active-control-label">Tpl</span>
                                     <select data-trade-fast-template></select>
                                 </label>
                             </div>
@@ -29352,8 +29368,8 @@ def index():
                         '<div class="trade-active-actions"><button type="button" class="trade-fast-button buy" data-trade-fast-action="BUY_TO_OPEN">Buy Ask</button><button type="button" class="trade-fast-button sell" data-trade-fast-action="SELL_TO_CLOSE">Sell Bid</button><button type="button" class="trade-fast-button flatten" data-trade-fast-flatten>Flatten</button></div>' +
                         '<div class="trade-reprice-row" aria-label="Fast reprice"><button type="button" data-trade-reprice="bid">Bid</button><button type="button" data-trade-reprice="mid">Mid</button><button type="button" data-trade-reprice="ask">Ask</button><button type="button" data-trade-reprice="mark">Mark</button></div>' +
                         '<div class="trade-active-setup">' +
-                            '<label>Qty<div class="trade-active-qty-line"><input data-trade-fast-qty type="number" min="1" max="100" step="1" value="1"><button type="button" data-trade-fast-qty-preset="1">1</button><button type="button" data-trade-fast-qty-preset="2">2</button><button type="button" data-trade-fast-qty-preset="5">5</button><button type="button" data-trade-fast-qty-preset="10">10</button></div></label>' +
-                            '<label>Template<select data-trade-fast-template></select></label>' +
+                            '<label class="trade-active-qty-control"><span class="trade-active-control-label">Qty</span><div class="trade-active-qty-line"><input data-trade-fast-qty type="number" min="1" max="100" step="1" value="1"><button type="button" data-trade-fast-qty-preset="1">1</button><button type="button" data-trade-fast-qty-preset="2">2</button><button type="button" data-trade-fast-qty-preset="5">5</button><button type="button" data-trade-fast-qty-preset="10">10</button></div></label>' +
+                            '<label class="trade-active-template-control"><span class="trade-active-control-label">Tpl</span><select data-trade-fast-template></select></label>' +
                         '</div>' +
                         '<div class="trade-active-template-plan" data-trade-fast-bracket-plan><div class="trade-active-template-head"><strong data-trade-fast-bracket-title>TRG template</strong><span data-trade-fast-bracket-summary>Planning only</span><button type="button" data-trade-fast-bracket-toggle aria-expanded="false">Plan</button></div><div class="trade-active-offsets"><label>Limit +<input data-trade-fast-target-offset type="number" min="0.01" max="99" step="0.01" value="1"></label><label>Stop -<input data-trade-fast-stop-offset type="number" min="0.01" max="99" step="0.01" value="1"></label></div><div class="trade-active-bracket-rows" data-trade-fast-bracket-rows><div class="trade-empty">Select a contract to plan exits.</div></div></div>' +
                         '<label class="trade-active-arm" data-trade-fast-arm-wrap><span>Auto-send</span><input data-trade-fast-arm type="checkbox"></label>' +
@@ -31044,16 +31060,18 @@ def index():
             const orderPrices = workingOrders.map(order => Number(order.price)).filter(v => Number.isFinite(v) && v > 0);
             const values = [bid, ask, mid, mark, last, limit].concat(orderPrices).filter(v => Number.isFinite(v) && v > 0);
             if (!values.length) return '<div class="trade-empty">No valid quote ladder for the selected contract.</div>';
-            const center = Number.isFinite(limit) && limit > 0 ? limit : (Number.isFinite(mid) && mid > 0 ? mid : values[0]);
+            const center = [mid, mark, last, limit, values[0]].find(v => Number.isFinite(v) && v > 0) || values[0];
             const tick = center >= 5 ? 0.05 : 0.01;
-            const high = Math.max(...values, center) + tick * 5;
-            let start = Math.max(tick, Math.round(high / tick) * tick);
+            const visibleRows = 19;
+            const centerPrice = normalizeTradeLadderPrice(center, tick) || center;
+            const rowsAbove = Math.floor((visibleRows - 1) / 2);
+            const start = Math.max(tick, Math.round((centerPrice + tick * rowsAbove) * 100) / 100);
             const rowMap = new Map();
-            for (let i = 0; i < 13; i += 1) {
+            for (let i = 0; i < visibleRows; i += 1) {
                 const price = Math.max(0.01, Math.round((start - tick * i) * 100) / 100);
                 rowMap.set(price.toFixed(2), price);
             }
-            orderPrices.forEach(price => {
+            orderPrices.concat(Number.isFinite(limit) && limit > 0 ? [limit] : []).forEach(price => {
                 const normalized = normalizeTradeLadderPrice(price, tick);
                 if (normalized != null) rowMap.set(normalized.toFixed(2), normalized);
             });
@@ -31225,7 +31243,7 @@ def index():
                 modeEl.classList.toggle('ready', mode.cls === 'ready');
                 modeEl.classList.toggle('armed', mode.cls === 'armed');
             }
-            if (qtyInput && String(qtyInput.value) !== String(tradeRailState.quantity)) qtyInput.value = tradeRailState.quantity;
+            if (qtyInput && document.activeElement !== qtyInput && String(qtyInput.value) !== String(tradeRailState.quantity)) qtyInput.value = tradeRailState.quantity;
             if (template) {
                 const options = getTradeTemplateOptionsHtml(tradeRailState.bracketTemplate);
                 if (template.innerHTML !== options) template.innerHTML = options;
@@ -34236,6 +34254,11 @@ def index():
                 renderTradeScalpTargets();
             }
         }, 5000);
+        setInterval(() => {
+            const panel = document.querySelector('[data-trade-active-panel]');
+            if (!panel || tradeRailState.activeTraderCollapsed || isTradeRailCollapsed() || !getSelectedTradeContract()) return;
+            renderTradeActiveTrader();
+        }, 1000);
 
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
