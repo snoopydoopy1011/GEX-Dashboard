@@ -4638,6 +4638,17 @@ def build_trading_chain_payload(ticker, calls, puts, S, selected_expiries=None, 
             return None
         return round(float(value), places)
 
+    et_tz = pytz.timezone('US/Eastern')
+
+    def _expiry_time_ms(expiry_iso):
+        try:
+            expiry_date = datetime.strptime(str(expiry_iso), "%Y-%m-%d").date()
+            expiry_dt = datetime.combine(expiry_date, datetime.min.time()) + timedelta(hours=16)
+            expiry_dt = et_tz.localize(expiry_dt)
+            return int(expiry_dt.timestamp() * 1000)
+        except Exception:
+            return None
+
     now_ms = int(time.time() * 1000)
     contracts = []
     for frame in frames:
@@ -4674,6 +4685,8 @@ def build_trading_chain_payload(ticker, calls, puts, S, selected_expiries=None, 
                 dte = (datetime.fromisoformat(str(expiry_iso)).date() - datetime.now(pytz.timezone('US/Eastern')).date()).days
             except Exception:
                 dte = None
+            expiry_ms = _expiry_time_ms(expiry_iso)
+            time_to_expiry_seconds = ((expiry_ms - now_ms) / 1000.0) if expiry_ms else None
             row_warnings = []
             if quote_age_seconds is None or quote_age_seconds > 15 * 60:
                 row_warnings.append('stale_quote')
@@ -4686,6 +4699,8 @@ def build_trading_chain_payload(ticker, calls, puts, S, selected_expiries=None, 
                 'instruction_open': 'BUY_TO_OPEN',
                 'instruction_close': 'SELL_TO_CLOSE',
                 'expiry': expiry_iso,
+                'expiry_time': expiry_ms,
+                'time_to_expiry_seconds': _round(max(0.0, time_to_expiry_seconds), 1) if time_to_expiry_seconds is not None else None,
                 'dte': dte,
                 'strike': _round(_num(row, 'strike'), 3),
                 'bid': _round(bid, 4),
@@ -11318,6 +11333,11 @@ def index():
             border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
             background: color-mix(in srgb, var(--accent) 4%, var(--bg-1));
         }
+        .trade-scalp-target-panel {
+            order: 8;
+            border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+            background: color-mix(in srgb, var(--accent) 3%, var(--bg-1));
+        }
         .trade-helper-panel { order: 20; }
         .trade-position-panel { order: 30; }
         .trade-selected-panel { order: 40; }
@@ -11329,6 +11349,132 @@ def index():
         .trade-journal-panel { order: 100; }
         .trade-active-panel.collapsed .trade-active-body {
             display: none;
+        }
+        .trade-scalp-target-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 7px;
+            min-width: 0;
+        }
+        .trade-scalp-target-input {
+            display: grid;
+            grid-template-columns: auto minmax(54px, 66px);
+            align-items: center;
+            gap: 5px;
+            color: var(--fg-2);
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .trade-scalp-target-input input {
+            width: 100%;
+            min-width: 0;
+            min-height: 24px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            color: var(--fg-0);
+            padding: 0 6px;
+            font-size: 11px;
+            font-weight: 800;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-scalp-target-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+            min-width: 0;
+        }
+        .trade-scalp-target-cell {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-0);
+            padding: 6px;
+            min-width: 0;
+        }
+        .trade-scalp-target-label {
+            display: block;
+            color: var(--fg-2);
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            line-height: 1.1;
+            text-transform: uppercase;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-scalp-target-value {
+            display: block;
+            margin-top: 3px;
+            color: var(--fg-0);
+            font-family: var(--font-mono);
+            font-size: 16px;
+            font-weight: 900;
+            line-height: 1.05;
+            font-variant-numeric: tabular-nums;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-scalp-target-move {
+            display: block;
+            margin-top: 3px;
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.2;
+            font-variant-numeric: tabular-nums;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-scalp-target-move.pos { color: var(--call); }
+        .trade-scalp-target-move.neg { color: var(--put); }
+        .trade-scalp-target-foot {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+            margin-top: 6px;
+            min-width: 0;
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.25;
+        }
+        .trade-scalp-target-foot span {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-scalp-target-method {
+            flex: 0 0 auto;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+            padding: 2px 6px;
+            color: var(--fg-2);
+            font-size: 9px;
+            font-weight: 900;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .trade-scalp-target-method.iv {
+            border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+            color: var(--accent);
+        }
+        .trade-scalp-target-method.fallback {
+            border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+            color: var(--warn);
+        }
+        .trade-scalp-target-method.unavailable {
+            color: var(--fg-2);
         }
         .trade-active-toggle {
             min-height: 22px;
@@ -11689,8 +11835,8 @@ def index():
         .trade-active-ladder-head,
         .trade-active-ladder-row {
             display: grid;
-            grid-template-columns: minmax(44px, 0.8fr) minmax(44px, 0.8fr) minmax(50px, 0.72fr) minmax(44px, 0.8fr) minmax(44px, 0.8fr);
-            gap: 4px;
+            grid-template-columns: minmax(34px, 0.62fr) minmax(32px, 0.56fr) minmax(42px, 0.66fr) minmax(32px, 0.56fr) minmax(34px, 0.62fr) minmax(50px, 0.78fr);
+            gap: 3px;
             align-items: center;
             min-width: 0;
             font-variant-numeric: tabular-nums;
@@ -11815,6 +11961,15 @@ def index():
             color: var(--put);
             font-weight: 800;
         }
+        .trade-active-pnl {
+            color: var(--fg-2);
+            font-weight: 900;
+            text-align: right;
+            pointer-events: none;
+        }
+        .trade-active-pnl.pos { color: var(--call); }
+        .trade-active-pnl.neg { color: var(--put); }
+        .trade-active-pnl.plan { opacity: 0.78; }
         .trade-active-message {
             min-height: 18px;
             margin-top: 7px;
@@ -18465,6 +18620,28 @@ def index():
                         <span data-trade-account-status>Read only</span>
                         <span data-trade-account-warnings></span>
                     </div>
+                    <section class="trade-panel trade-scalp-target-panel" data-trade-scalp-target-panel>
+                        <div class="trade-scalp-target-head">
+                            <div class="trade-panel-title">Scalp Targets</div>
+                            <label class="trade-scalp-target-input"><span>Target / Ct</span><input data-trade-scalp-target-profit type="number" min="1" max="5000" step="25" value="100" inputmode="decimal"></label>
+                        </div>
+                        <div class="trade-scalp-target-grid">
+                            <div class="trade-scalp-target-cell">
+                                <span class="trade-scalp-target-label">B/E SPY</span>
+                                <strong class="trade-scalp-target-value" data-trade-scalp-breakeven>—</strong>
+                                <span class="trade-scalp-target-move" data-trade-scalp-breakeven-move>—</span>
+                            </div>
+                            <div class="trade-scalp-target-cell">
+                                <span class="trade-scalp-target-label" data-trade-scalp-profit-label>+$100/Ct SPY</span>
+                                <strong class="trade-scalp-target-value" data-trade-scalp-profit>—</strong>
+                                <span class="trade-scalp-target-move" data-trade-scalp-profit-move>—</span>
+                            </div>
+                        </div>
+                        <div class="trade-scalp-target-foot">
+                            <span data-trade-scalp-basis>Basis —</span>
+                            <span class="trade-scalp-target-method unavailable" data-trade-scalp-method>Unavailable</span>
+                        </div>
+                    </section>
                     <section class="trade-panel trade-active-panel" data-trade-active-panel>
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Active Trader</div>
@@ -18536,7 +18713,7 @@ def index():
                                 <div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div>
                             </div>
                             <div class="trade-active-ladder">
-                                <div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span></div>
+                                <div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span><span>P/L</span></div>
                                 <div data-trade-fast-ladder><div class="trade-empty">Select a contract to show the price ladder.</div></div>
                             </div>
                             <div class="trade-active-message" data-trade-fast-message>Auto-send starts off. Live sends still require a successful preview.</div>
@@ -29151,6 +29328,22 @@ def index():
             );
         }
 
+        function buildTradeScalpTargetsPanelHtml() {
+            return (
+                '<section class="trade-panel trade-scalp-target-panel" data-trade-scalp-target-panel>' +
+                    '<div class="trade-scalp-target-head">' +
+                        '<div class="trade-panel-title">Scalp Targets</div>' +
+                        '<label class="trade-scalp-target-input"><span>Target / Ct</span><input data-trade-scalp-target-profit type="number" min="1" max="5000" step="25" value="100" inputmode="decimal"></label>' +
+                    '</div>' +
+                    '<div class="trade-scalp-target-grid">' +
+                        '<div class="trade-scalp-target-cell"><span class="trade-scalp-target-label">B/E SPY</span><strong class="trade-scalp-target-value" data-trade-scalp-breakeven>—</strong><span class="trade-scalp-target-move" data-trade-scalp-breakeven-move>—</span></div>' +
+                        '<div class="trade-scalp-target-cell"><span class="trade-scalp-target-label" data-trade-scalp-profit-label>+$100/Ct SPY</span><strong class="trade-scalp-target-value" data-trade-scalp-profit>—</strong><span class="trade-scalp-target-move" data-trade-scalp-profit-move>—</span></div>' +
+                    '</div>' +
+                    '<div class="trade-scalp-target-foot"><span data-trade-scalp-basis>Basis —</span><span class="trade-scalp-target-method unavailable" data-trade-scalp-method>Unavailable</span></div>' +
+                '</section>'
+            );
+        }
+
         function buildTradeActiveTraderPanelHtml() {
             return (
                 '<section class="trade-panel trade-active-panel" data-trade-active-panel>' +
@@ -29166,7 +29359,7 @@ def index():
                         '<div class="trade-active-template-plan" data-trade-fast-bracket-plan><div class="trade-active-template-head"><strong data-trade-fast-bracket-title>TRG template</strong><span data-trade-fast-bracket-summary>Planning only</span><button type="button" data-trade-fast-bracket-toggle aria-expanded="false">Plan</button></div><div class="trade-active-offsets"><label>Limit +<input data-trade-fast-target-offset type="number" min="0.01" max="99" step="0.01" value="1"></label><label>Stop -<input data-trade-fast-stop-offset type="number" min="0.01" max="99" step="0.01" value="1"></label></div><div class="trade-active-bracket-rows" data-trade-fast-bracket-rows><div class="trade-empty">Select a contract to plan exits.</div></div></div>' +
                         '<label class="trade-active-arm" data-trade-fast-arm-wrap><span>Auto-send</span><input data-trade-fast-arm type="checkbox"></label>' +
                         '<div class="trade-active-context"><div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div><div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div><div class="trade-active-stat" data-trade-fast-quote-age-wrap><span>Quote Age</span><strong data-trade-fast-quote-age>—</strong></div><div class="trade-active-stat" data-trade-fast-preview-ttl-wrap><span>Preview TTL</span><strong data-trade-fast-preview-ttl>5:00</strong></div><div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div></div>' +
-                        '<div class="trade-active-ladder"><div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span></div><div data-trade-fast-ladder><div class="trade-empty">Select a contract to show the price ladder.</div></div></div>' +
+                        '<div class="trade-active-ladder"><div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span><span>P/L</span></div><div data-trade-fast-ladder><div class="trade-empty">Select a contract to show the price ladder.</div></div></div>' +
                         '<div class="trade-active-message" data-trade-fast-message>Auto-send starts off. Live sends still require a successful preview.</div>' +
                     '</div>' +
                 '</section>'
@@ -29204,6 +29397,7 @@ def index():
             return (
                 '<div class="trade-rail-shell">' +
                     '<div class="trade-account-context" data-trade-account-context><span data-trade-account-status>Read only</span><span data-trade-account-warnings></span></div>' +
+                    buildTradeScalpTargetsPanelHtml() +
                     buildTradeActiveTraderPanelHtml() +
                     buildTradeHelperPanelHtml() +
                     '<section class="trade-panel trade-position-panel">' +
@@ -29355,7 +29549,7 @@ def index():
                 rail.setAttribute('aria-label', 'Options trading rail');
                 rail.innerHTML = buildTradeRailHtml();
                 grid.appendChild(rail);
-            } else if (!rail.querySelector('.trade-rail-shell') || !rail.querySelector('[data-trade-active-panel]') || !rail.querySelector('[data-trade-quick-contracts]')) {
+            } else if (!rail.querySelector('.trade-rail-shell') || !rail.querySelector('[data-trade-scalp-target-panel]') || !rail.querySelector('[data-trade-active-panel]') || !rail.querySelector('[data-trade-quick-contracts]')) {
                 rail.innerHTML = buildTradeRailHtml();
                 rail.__tradePickerWired = false;
             }
@@ -29911,6 +30105,7 @@ def index():
         const TRADE_POSITION_COLLAPSE_KEY = 'gex.tradePositionCollapsed';
         const TRADE_HELPER_COMPACT_KEY = 'gex.tradeHelperCompact';
         const TRADE_ACTIVE_TRADER_COLLAPSE_KEY = 'gex.tradeActiveTraderCollapsed';
+        const TRADE_SCALP_TARGET_PROFIT_KEY = 'gex.trade.scalpTargetProfit';
         const TRADE_RAIL_DEFAULT_WIDTH = 400;
         const TRADE_PREVIEW_TTL_SECONDS = 300;
         const TRADE_BUILTIN_BRACKET_TEMPLATES = {
@@ -29950,6 +30145,7 @@ def index():
             cancelLoadingId: '',
             action: 'BUY_TO_OPEN',
             quantity: 1,
+            scalpTargetProfitPerContract: getTradeStoredNumber(TRADE_SCALP_TARGET_PROFIT_KEY, 100),
             limitPrice: '',
             limitQuoteSignature: '',
             limitSetAt: 0,
@@ -30006,6 +30202,13 @@ def index():
             } catch (e) {}
             return !!fallback;
         }
+        function getTradeStoredNumber(key, fallback) {
+            try {
+                const saved = Number(localStorage.getItem(key));
+                if (Number.isFinite(saved)) return saved;
+            } catch (e) {}
+            return fallback;
+        }
 
         function fmtTradePrice(value) {
             const n = Number(value);
@@ -30040,6 +30243,13 @@ def index():
         function fmtTradeMoney(value) {
             const n = Number(value);
             return Number.isFinite(n) ? '$' + n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—';
+        }
+        function fmtTradeSignedMoney(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '—';
+            const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+            const abs = Math.abs(n);
+            return sign + '$' + abs.toLocaleString(undefined, { maximumFractionDigits: abs >= 100 ? 0 : 2 });
         }
         function fmtTradeTimestamp(ms) {
             const n = Number(ms);
@@ -30433,6 +30643,261 @@ def index():
             const qty = Number(pos && pos.quantity);
             return Number.isFinite(qty) ? Math.max(0, Math.floor(qty)) : 0;
         }
+        function normalizeTradePositionAveragePrice(avg, selected) {
+            const n = Number(avg);
+            const ref = Number(selected && (selected.mid || selected.mark || selected.ask || selected.bid));
+            if (!Number.isFinite(n) || n <= 0) return null;
+            if (Number.isFinite(ref) && ref > 0 && n > ref * 20 && Math.abs((n / 100) - ref) < Math.max(2, ref * 3)) {
+                return { premium: n / 100, normalized: true };
+            }
+            return { premium: n, normalized: false };
+        }
+        function getTradePositiveNumber(value) {
+            const n = Number(value);
+            return Number.isFinite(n) && n > 0 ? n : null;
+        }
+        function getTradeOptionReferencePremium(contract) {
+            if (!contract) return null;
+            const mid = getTradePositiveNumber(contract.mid);
+            const mark = getTradePositiveNumber(contract.mark);
+            const bid = getTradePositiveNumber(contract.bid);
+            const ask = getTradePositiveNumber(contract.ask);
+            const last = getTradePositiveNumber(contract.last);
+            if (mid != null) return mid;
+            if (mark != null) return mark;
+            if (bid != null && ask != null && ask >= bid) return (bid + ask) / 2;
+            if (last != null) return last;
+            if (bid != null) return bid;
+            if (ask != null) return ask;
+            return null;
+        }
+        function getTradeEntryBasis(selected, options = {}) {
+            if (!selected) return null;
+            const position = getSelectedTradePosition();
+            const positionQty = getSelectedTradePositionQuantity();
+            if (position && positionQty > 0) {
+                const avg = normalizeTradePositionAveragePrice(position.average_price, selected);
+                if (avg && Number.isFinite(avg.premium) && avg.premium > 0) {
+                    return {
+                        premium: avg.premium,
+                        source: avg.normalized ? 'pos avg /100' : 'pos avg',
+                        quantity: positionQty,
+                        livePosition: true,
+                        planned: false,
+                    };
+                }
+            }
+            const plannedQty = Math.max(1, Math.floor(Number(tradeRailState.quantity) || 1));
+            const limit = getTradePositiveNumber(tradeRailState.limitPrice);
+            if (limit != null) {
+                return { premium: limit, source: 'limit', quantity: plannedQty, livePosition: false, planned: true };
+            }
+            if (options.includeQuoteFallback === false) return null;
+            const ask = getTradePositiveNumber(selected.ask);
+            if (ask != null) return { premium: ask, source: 'ask', quantity: plannedQty, livePosition: false, planned: true };
+            const ref = getTradeOptionReferencePremium(selected);
+            if (ref != null) return { premium: ref, source: selected.mark ? 'mark' : 'mid', quantity: plannedQty, livePosition: false, planned: true };
+            return null;
+        }
+        function getTradeCurrentUnderlyingSpot() {
+            const spot = Number(tradeRailState.payload && tradeRailState.payload.underlying_price);
+            return Number.isFinite(spot) && spot > 0 ? spot : null;
+        }
+        function getTradeNormalizedIv(contract) {
+            let iv = Number(contract && contract.iv);
+            if (!Number.isFinite(iv) || iv <= 0) return null;
+            if (iv > 3 && iv <= 500) iv = iv / 100;
+            return Number.isFinite(iv) && iv > 0 && iv < 5 ? iv : null;
+        }
+        function normalCdf(x) {
+            const n = Number(x);
+            if (!Number.isFinite(n)) return NaN;
+            const sign = n < 0 ? -1 : 1;
+            const ax = Math.abs(n);
+            const t = 1 / (1 + 0.2316419 * ax);
+            const d = 0.3989422804014327 * Math.exp(-0.5 * ax * ax);
+            const prob = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+            return sign === 1 ? 1 - prob : prob;
+        }
+        function priceTradeOptionBlackScholes(optionType, spot, strike, years, iv, r = 0.02, q = 0) {
+            const S = Number(spot);
+            const K = Number(strike);
+            const T = Number(years);
+            const sigma = Number(iv);
+            if (!Number.isFinite(S) || !Number.isFinite(K) || !Number.isFinite(T) || !Number.isFinite(sigma) || S <= 0 || K <= 0 || T <= 0 || sigma <= 0) return null;
+            const sqrtT = Math.sqrt(T);
+            const d1 = (Math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
+            const d2 = d1 - sigma * sqrtT;
+            const dfR = Math.exp(-r * T);
+            const dfQ = Math.exp(-q * T);
+            const isPut = optionType === 'PUT';
+            const price = isPut
+                ? K * dfR * normalCdf(-d2) - S * dfQ * normalCdf(-d1)
+                : S * dfQ * normalCdf(d1) - K * dfR * normalCdf(d2);
+            return Number.isFinite(price) ? Math.max(0, price) : null;
+        }
+        function getTradeYearsToExpiry(selected) {
+            let seconds = null;
+            const expiryTime = Number(selected && selected.expiry_time);
+            if (Number.isFinite(expiryTime) && expiryTime > 0) {
+                seconds = (expiryTime - Date.now()) / 1000;
+            } else {
+                const rawSeconds = Number(selected && selected.time_to_expiry_seconds);
+                if (Number.isFinite(rawSeconds)) seconds = rawSeconds;
+            }
+            if (!Number.isFinite(seconds)) return null;
+            const expiredFloor = seconds <= 0;
+            const flooredSeconds = Math.max(60, seconds);
+            return {
+                years: flooredSeconds / (365 * 24 * 3600),
+                expiredFloor,
+            };
+        }
+        function estimateTradeExitBidAtUnderlying(selected, candidateSpot) {
+            const currentSpot = getTradeCurrentUnderlyingSpot();
+            const spot = Number(candidateSpot);
+            const strike = Number(selected && selected.strike);
+            const iv = getTradeNormalizedIv(selected);
+            const yearsInfo = getTradeYearsToExpiry(selected);
+            const liveRef = getTradeOptionReferencePremium(selected);
+            if (!selected || !Number.isFinite(currentSpot) || !Number.isFinite(spot) || !Number.isFinite(strike) || !yearsInfo || !Number.isFinite(yearsInfo.years) || iv == null || liveRef == null) return null;
+            const modelAtSpot = priceTradeOptionBlackScholes(selected.option_type, currentSpot, strike, yearsInfo.years, iv);
+            const modelAtCandidate = priceTradeOptionBlackScholes(selected.option_type, spot, strike, yearsInfo.years, iv);
+            if (modelAtSpot == null || modelAtCandidate == null) return null;
+            const bid = getTradePositiveNumber(selected.bid);
+            const ask = getTradePositiveNumber(selected.ask);
+            const halfSpread = bid != null && ask != null && ask >= bid ? Math.max(0, (ask - bid) / 2) : 0;
+            const anchor = liveRef - modelAtSpot;
+            const estimatedMid = Math.max(0.01, modelAtCandidate + anchor);
+            const warnings = Array.isArray(selected.warnings) ? selected.warnings : [];
+            return {
+                premium: Math.max(0.01, estimatedMid - halfSpread),
+                method: 'iv_model',
+                confidence: yearsInfo.expiredFloor ? 'low' : 'high',
+                stale: warnings.includes('stale_quote') || yearsInfo.expiredFloor,
+            };
+        }
+        function getTradeFallbackExitPremium(selected) {
+            const bid = getTradePositiveNumber(selected && selected.bid);
+            if (bid != null) return bid;
+            return getTradeOptionReferencePremium(selected);
+        }
+        function solveTradeUnderlyingForExitPremiumDeltaGamma(selected, targetPremium, currentSpot) {
+            const spot = Number(currentSpot);
+            const target = Number(targetPremium);
+            const currentExit = getTradeFallbackExitPremium(selected);
+            const delta = Number(selected && selected.delta);
+            if (!Number.isFinite(spot) || spot <= 0 || !Number.isFinite(target) || target <= 0 || currentExit == null || !Number.isFinite(delta) || Math.abs(delta) < 0.001) return null;
+            const premiumDelta = target - currentExit;
+            let dS = premiumDelta / delta;
+            const gamma = Number(selected && selected.gamma);
+            if (Number.isFinite(gamma) && Math.abs(gamma) > 0.000001) {
+                const discriminant = delta * delta + 2 * gamma * premiumDelta;
+                if (discriminant >= 0) {
+                    const sqrtDisc = Math.sqrt(discriminant);
+                    const roots = [(-delta + sqrtDisc) / gamma, (-delta - sqrtDisc) / gamma].filter(v => Number.isFinite(v));
+                    const expectedDirection = premiumDelta >= 0
+                        ? (selected.option_type === 'PUT' ? -1 : 1)
+                        : (selected.option_type === 'PUT' ? 1 : -1);
+                    const directional = roots.filter(v => Math.sign(v) === expectedDirection || Math.abs(v) < 0.0001);
+                    const candidates = directional.length ? directional : roots;
+                    if (candidates.length) dS = candidates.sort((a, b) => Math.abs(a) - Math.abs(b))[0];
+                }
+            }
+            const solvedSpot = spot + dS;
+            if (!Number.isFinite(solvedSpot) || solvedSpot <= 0) return null;
+            return {
+                spot: solvedSpot,
+                move: dS,
+                targetPremium: target,
+                method: 'delta_gamma',
+                confidence: 'low',
+                stale: Array.isArray(selected && selected.warnings) && selected.warnings.includes('stale_quote'),
+            };
+        }
+        function solveTradeUnderlyingForExitPremium(selected, targetPremium) {
+            const currentSpot = getTradeCurrentUnderlyingSpot();
+            const target = Number(targetPremium);
+            if (!selected || !Number.isFinite(currentSpot) || currentSpot <= 0 || !Number.isFinite(target) || target <= 0) return null;
+            const currentEstimate = estimateTradeExitBidAtUnderlying(selected, currentSpot);
+            if (!currentEstimate) return solveTradeUnderlyingForExitPremiumDeltaGamma(selected, target, currentSpot);
+            const f0 = currentEstimate.premium - target;
+            if (Math.abs(f0) < 0.0025) {
+                return {
+                    spot: currentSpot,
+                    move: 0,
+                    targetPremium: target,
+                    method: 'iv_model',
+                    confidence: currentEstimate.confidence,
+                    stale: currentEstimate.stale,
+                };
+            }
+            const isPut = selected.option_type === 'PUT';
+            const wantsHigherPremium = target > currentEstimate.premium;
+            const direction = wantsHigherPremium ? (isPut ? -1 : 1) : (isPut ? 1 : -1);
+            const cap = Math.max(10, currentSpot * 0.06);
+            let step = 0.25;
+            let endSpot = null;
+            let endValue = null;
+            while (step <= cap) {
+                const candidate = Math.max(0.01, currentSpot + direction * step);
+                const estimate = estimateTradeExitBidAtUnderlying(selected, candidate);
+                if (!estimate) break;
+                const f1 = estimate.premium - target;
+                if (f0 * f1 <= 0) {
+                    endSpot = candidate;
+                    endValue = f1;
+                    break;
+                }
+                step *= 1.6;
+            }
+            if (endSpot == null || endValue == null) return null;
+            let a = currentSpot;
+            let b = endSpot;
+            let fa = f0;
+            for (let i = 0; i < 42; i += 1) {
+                const mid = (a + b) / 2;
+                const estimate = estimateTradeExitBidAtUnderlying(selected, mid);
+                if (!estimate) return null;
+                const fm = estimate.premium - target;
+                if (Math.abs(fm) < 0.0001) {
+                    a = mid;
+                    b = mid;
+                    break;
+                }
+                if (fa * fm <= 0) {
+                    b = mid;
+                } else {
+                    a = mid;
+                    fa = fm;
+                }
+            }
+            const solvedSpot = (a + b) / 2;
+            return {
+                spot: solvedSpot,
+                move: solvedSpot - currentSpot,
+                targetPremium: target,
+                method: 'iv_model',
+                confidence: currentEstimate.confidence,
+                stale: currentEstimate.stale,
+            };
+        }
+        function getTradeScalpTargets(selected) {
+            const basis = getTradeEntryBasis(selected, { includeQuoteFallback: true });
+            const targetProfit = Math.max(1, Math.min(5000, Number(tradeRailState.scalpTargetProfitPerContract) || 100));
+            if (!selected || !basis || !Number.isFinite(basis.premium) || basis.premium <= 0) {
+                return { basis: null, targetProfit, breakeven: null, profit: null };
+            }
+            const profitPremiumOffset = targetProfit / 100;
+            const breakevenPremium = basis.premium;
+            const profitPremium = basis.premium + profitPremiumOffset;
+            return {
+                basis,
+                targetProfit,
+                breakeven: solveTradeUnderlyingForExitPremium(selected, breakevenPremium),
+                profit: solveTradeUnderlyingForExitPremium(selected, profitPremium),
+            };
+        }
         function renderTradeModeBadge() {
             const badge = document.querySelector('[data-trade-rail-badge]') || document.querySelector('.trade-rail-badge');
             if (!badge) return;
@@ -30603,6 +31068,10 @@ def index():
                 if (normalized != null) rowMap.set(normalized.toFixed(2), normalized);
             });
             const rows = Array.from(rowMap.values()).sort((a, b) => b - a);
+            const basis = getTradeEntryBasis(selected, { includeQuoteFallback: false });
+            const basisQty = basis && Number.isFinite(basis.quantity)
+                ? Math.max(1, Math.floor(basis.quantity))
+                : Math.max(1, Math.floor(Number(tradeRailState.quantity) || 1));
             return rows.map(price => {
                 const nearBid = Number.isFinite(bid) && Math.abs(price - bid) < tick / 2 + 0.0001;
                 const nearAsk = Number.isFinite(ask) && Math.abs(price - ask) < tick / 2 + 0.0001;
@@ -30628,18 +31097,99 @@ def index():
                     Number.isFinite(bid) && price <= bid ? 'bid-zone' : '',
                     Number.isFinite(ask) && price >= ask ? 'ask-zone' : '',
                 ].filter(Boolean).join(' ');
+                const pnl = basis && Number.isFinite(basis.premium)
+                    ? (price - basis.premium) * 100 * basisQty
+                    : null;
+                const pnlClasses = [
+                    'trade-active-ladder-cell',
+                    'trade-active-pnl',
+                    Number.isFinite(pnl) && pnl > 0.004 ? 'pos' : '',
+                    Number.isFinite(pnl) && pnl < -0.004 ? 'neg' : '',
+                    basis && basis.planned ? 'plan' : '',
+                ].filter(Boolean).join(' ');
+                const pnlTitle = basis
+                    ? ('P/L from ' + basis.source + ' ' + fmtTradePrice(basis.premium) + ' x' + basisQty)
+                    : 'Stage a limit or select a matching long position for P/L.';
                 return '<div role="button" tabindex="0" class="' + classes + '" data-trade-fast-price="' + _escapeHtml(price.toFixed(2)) + '">' +
                     '<span class="trade-active-ladder-cell trade-active-marker-cell">' + buyMarkers + '</span>' +
                     '<span class="trade-active-ladder-cell trade-active-bid">' + (nearBid ? 'BID' : '') + '</span>' +
                     '<span class="trade-active-ladder-cell trade-active-price">' + _escapeHtml(fmtTradePrice(price)) + '</span>' +
                     '<span class="trade-active-ladder-cell trade-active-ask">' + (nearAsk ? 'ASK' : '') + '</span>' +
                     '<span class="trade-active-ladder-cell trade-active-marker-cell">' + sellMarkers + '</span>' +
+                    '<span class="' + pnlClasses + '" title="' + _escapeHtml(pnlTitle) + '">' + _escapeHtml(Number.isFinite(pnl) ? fmtTradeSignedMoney(pnl) : '—') + '</span>' +
                 '</div>';
             }).join('');
         }
+        function fmtTradeScalpTargetDollars(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '$100';
+            return '$' + n.toLocaleString(undefined, { maximumFractionDigits: n >= 100 ? 0 : 2 });
+        }
+        function fmtTradeScalpMove(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '—';
+            const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+            return sign + Math.abs(n).toFixed(2) + ' vs spot';
+        }
+        function renderTradeScalpTargetSlot(valueEl, moveEl, result) {
+            if (valueEl) valueEl.textContent = result && Number.isFinite(result.spot) ? fmtTradePrice(result.spot) : '—';
+            if (moveEl) {
+                const move = result && Number(result.move);
+                const hasMove = Number.isFinite(move);
+                moveEl.textContent = hasMove ? fmtTradeScalpMove(move) : '—';
+                moveEl.classList.toggle('pos', hasMove && move > 0.004);
+                moveEl.classList.toggle('neg', hasMove && move < -0.004);
+            }
+        }
+        function renderTradeScalpTargets() {
+            const panel = document.querySelector('[data-trade-scalp-target-panel]');
+            if (!panel) return;
+            const selected = getSelectedTradeContract();
+            const targets = getTradeScalpTargets(selected);
+            const input = panel.querySelector('[data-trade-scalp-target-profit]');
+            const label = panel.querySelector('[data-trade-scalp-profit-label]');
+            const breakevenValue = panel.querySelector('[data-trade-scalp-breakeven]');
+            const breakevenMove = panel.querySelector('[data-trade-scalp-breakeven-move]');
+            const profitValue = panel.querySelector('[data-trade-scalp-profit]');
+            const profitMove = panel.querySelector('[data-trade-scalp-profit-move]');
+            const basisEl = panel.querySelector('[data-trade-scalp-basis]');
+            const methodEl = panel.querySelector('[data-trade-scalp-method]');
+            const targetProfit = Math.max(1, Math.min(5000, Number(targets.targetProfit) || 100));
+            if (input && document.activeElement !== input) input.value = String(targetProfit);
+            if (label) label.textContent = '+' + fmtTradeScalpTargetDollars(targetProfit) + '/Ct SPY';
+            renderTradeScalpTargetSlot(breakevenValue, breakevenMove, targets.breakeven);
+            renderTradeScalpTargetSlot(profitValue, profitMove, targets.profit);
+            if (basisEl) {
+                basisEl.textContent = targets.basis
+                    ? ('Basis ' + fmtTradePrice(targets.basis.premium) + ' ' + targets.basis.source)
+                    : 'Basis —';
+            }
+            const methodResults = [targets.breakeven, targets.profit].filter(Boolean);
+            let methodClass = 'unavailable';
+            let methodText = 'Unavailable';
+            if (methodResults.some(result => result.method === 'iv_model')) {
+                methodClass = 'iv';
+                methodText = methodResults.some(result => result.stale) ? 'IV model | stale' : 'IV model | exit bid';
+            } else if (methodResults.some(result => result.method === 'delta_gamma')) {
+                methodClass = 'fallback';
+                methodText = methodResults.some(result => result.stale) ? 'Delta/gamma | stale' : 'Delta/gamma | exit bid';
+            }
+            if (methodEl) {
+                methodEl.textContent = methodText;
+                methodEl.classList.toggle('iv', methodClass === 'iv');
+                methodEl.classList.toggle('fallback', methodClass === 'fallback');
+                methodEl.classList.toggle('unavailable', methodClass === 'unavailable');
+                methodEl.title = methodText === 'Unavailable'
+                    ? 'Need selected contract, basis, spot, and IV or delta.'
+                    : 'Planning estimate only; Schwab order payloads are unchanged.';
+            }
+        }
         function renderTradeActiveTrader() {
             const panel = document.querySelector('[data-trade-active-panel]');
-            if (!panel) return;
+            if (!panel) {
+                renderTradeScalpTargets();
+                return;
+            }
             const selected = getSelectedTradeContract();
             const position = getSelectedTradePosition();
             const mode = getTradeFastModeState(selected);
@@ -30753,6 +31303,7 @@ def index():
                 message.classList.toggle('warn', !!(quoteMove.any || (tradeRailState.activeTraderArmed && (mode.detail || '').toLowerCase().includes('preview'))));
             }
             renderTradeModeBadge();
+            renderTradeScalpTargets();
         }
         function renderTradeBracketTemplateOptions() {
             const input = document.querySelector('[data-trade-bracket-template]');
@@ -33263,6 +33814,24 @@ def index():
             root.querySelectorAll('[data-trade-quick-type][data-trade-quick-offset]').forEach(btn => {
                 btn.addEventListener('click', () => handleTradeQuickContractSelection(btn));
             });
+            const scalpTargetProfit = root.querySelector('[data-trade-scalp-target-profit]');
+            if (scalpTargetProfit) {
+                const applyScalpTargetProfit = (commitValue = false) => {
+                    const raw = Number(scalpTargetProfit.value);
+                    if (!Number.isFinite(raw)) {
+                        if (commitValue) scalpTargetProfit.value = String(tradeRailState.scalpTargetProfitPerContract || 100);
+                        return;
+                    }
+                    const clamped = Math.max(1, Math.min(5000, raw));
+                    tradeRailState.scalpTargetProfitPerContract = clamped;
+                    try { localStorage.setItem(TRADE_SCALP_TARGET_PROFIT_KEY, String(clamped)); } catch (e) {}
+                    if (commitValue && String(scalpTargetProfit.value) !== String(clamped)) scalpTargetProfit.value = String(clamped);
+                    renderTradeScalpTargets();
+                };
+                scalpTargetProfit.addEventListener('input', () => applyScalpTargetProfit(false));
+                scalpTargetProfit.addEventListener('change', () => applyScalpTargetProfit(true));
+                scalpTargetProfit.addEventListener('blur', () => applyScalpTargetProfit(true));
+            }
             const activeToggle = root.querySelector('[data-trade-active-toggle]');
             if (activeToggle) {
                 activeToggle.addEventListener('click', () => {
@@ -33673,6 +34242,11 @@ def index():
             if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', restore);
             else restore();
         })();
+        setInterval(() => {
+            if (document.querySelector('[data-trade-scalp-target-panel]') && getSelectedTradeContract()) {
+                renderTradeScalpTargets();
+            }
+        }, 5000);
 
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
