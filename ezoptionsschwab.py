@@ -11969,7 +11969,6 @@ def index():
         }
         .trade-active-pnl.pos { color: var(--call); }
         .trade-active-pnl.neg { color: var(--put); }
-        .trade-active-pnl.plan { opacity: 0.78; }
         .trade-active-message {
             min-height: 18px;
             margin-top: 7px;
@@ -30628,18 +30627,21 @@ def index():
             const templates = getTradeBracketTemplates();
             return templates[tradeRailState.bracketTemplate] || TRADE_BUILTIN_BRACKET_TEMPLATES.trg_1;
         }
-        function getSelectedTradePosition() {
-            const selectedSymbol = String(tradeRailState.selectedSymbol || '');
+        function normalizeTradeContractSymbolForMatch(symbol) {
+            return String(symbol || '').toUpperCase().replace(/\s+/g, '');
+        }
+        function getSelectedTradePosition(selected = getSelectedTradeContract()) {
+            const selectedSymbol = normalizeTradeContractSymbolForMatch((selected && selected.contract_symbol) || tradeRailState.selectedSymbol || '');
             const positions = Array.isArray(tradeRailState.accountDetails && tradeRailState.accountDetails.positions)
                 ? tradeRailState.accountDetails.positions
                 : [];
-            if (!positions.length) return null;
+            if (!selectedSymbol || !positions.length) return null;
             return positions.find(pos => pos && pos.selected_contract_match)
-                || positions.find(pos => String((pos && pos.symbol) || '') === selectedSymbol)
+                || positions.find(pos => normalizeTradeContractSymbolForMatch((pos && pos.symbol) || '') === selectedSymbol)
                 || null;
         }
-        function getSelectedTradePositionQuantity() {
-            const pos = getSelectedTradePosition();
+        function getSelectedTradePositionQuantity(selected = getSelectedTradeContract()) {
+            const pos = getSelectedTradePosition(selected);
             const qty = Number(pos && pos.quantity);
             return Number.isFinite(qty) ? Math.max(0, Math.floor(qty)) : 0;
         }
@@ -30671,32 +30673,20 @@ def index():
             if (ask != null) return ask;
             return null;
         }
-        function getTradeEntryBasis(selected, options = {}) {
+        function getTradeEntryBasis(selected) {
             if (!selected) return null;
-            const position = getSelectedTradePosition();
-            const positionQty = getSelectedTradePositionQuantity();
-            if (position && positionQty > 0) {
-                const avg = normalizeTradePositionAveragePrice(position.average_price, selected);
-                if (avg && Number.isFinite(avg.premium) && avg.premium > 0) {
-                    return {
-                        premium: avg.premium,
-                        source: avg.normalized ? 'pos avg /100' : 'pos avg',
-                        quantity: positionQty,
-                        livePosition: true,
-                        planned: false,
-                    };
-                }
+            const position = getSelectedTradePosition(selected);
+            const positionQty = getSelectedTradePositionQuantity(selected);
+            if (!position || positionQty <= 0) return null;
+            const avg = normalizeTradePositionAveragePrice(position.average_price, selected);
+            if (avg && Number.isFinite(avg.premium) && avg.premium > 0) {
+                return {
+                    premium: avg.premium,
+                    source: avg.normalized ? 'Schwab avg /100' : 'Schwab avg',
+                    quantity: positionQty,
+                    livePosition: true,
+                };
             }
-            const plannedQty = Math.max(1, Math.floor(Number(tradeRailState.quantity) || 1));
-            const limit = getTradePositiveNumber(tradeRailState.limitPrice);
-            if (limit != null) {
-                return { premium: limit, source: 'limit', quantity: plannedQty, livePosition: false, planned: true };
-            }
-            if (options.includeQuoteFallback === false) return null;
-            const ask = getTradePositiveNumber(selected.ask);
-            if (ask != null) return { premium: ask, source: 'ask', quantity: plannedQty, livePosition: false, planned: true };
-            const ref = getTradeOptionReferencePremium(selected);
-            if (ref != null) return { premium: ref, source: selected.mark ? 'mark' : 'mid', quantity: plannedQty, livePosition: false, planned: true };
             return null;
         }
         function getTradeCurrentUnderlyingSpot() {
@@ -30883,7 +30873,7 @@ def index():
             };
         }
         function getTradeScalpTargets(selected) {
-            const basis = getTradeEntryBasis(selected, { includeQuoteFallback: true });
+            const basis = getTradeEntryBasis(selected);
             const targetProfit = Math.max(1, Math.min(5000, Number(tradeRailState.scalpTargetProfitPerContract) || 100));
             if (!selected || !basis || !Number.isFinite(basis.premium) || basis.premium <= 0) {
                 return { basis: null, targetProfit, breakeven: null, profit: null };
@@ -31068,10 +31058,10 @@ def index():
                 if (normalized != null) rowMap.set(normalized.toFixed(2), normalized);
             });
             const rows = Array.from(rowMap.values()).sort((a, b) => b - a);
-            const basis = getTradeEntryBasis(selected, { includeQuoteFallback: false });
+            const basis = getTradeEntryBasis(selected);
             const basisQty = basis && Number.isFinite(basis.quantity)
                 ? Math.max(1, Math.floor(basis.quantity))
-                : Math.max(1, Math.floor(Number(tradeRailState.quantity) || 1));
+                : 0;
             return rows.map(price => {
                 const nearBid = Number.isFinite(bid) && Math.abs(price - bid) < tick / 2 + 0.0001;
                 const nearAsk = Number.isFinite(ask) && Math.abs(price - ask) < tick / 2 + 0.0001;
@@ -31097,7 +31087,7 @@ def index():
                     Number.isFinite(bid) && price <= bid ? 'bid-zone' : '',
                     Number.isFinite(ask) && price >= ask ? 'ask-zone' : '',
                 ].filter(Boolean).join(' ');
-                const pnl = basis && Number.isFinite(basis.premium)
+                const pnl = basis && basisQty > 0 && Number.isFinite(basis.premium)
                     ? (price - basis.premium) * 100 * basisQty
                     : null;
                 const pnlClasses = [
@@ -31105,11 +31095,10 @@ def index():
                     'trade-active-pnl',
                     Number.isFinite(pnl) && pnl > 0.004 ? 'pos' : '',
                     Number.isFinite(pnl) && pnl < -0.004 ? 'neg' : '',
-                    basis && basis.planned ? 'plan' : '',
                 ].filter(Boolean).join(' ');
                 const pnlTitle = basis
                     ? ('P/L from ' + basis.source + ' ' + fmtTradePrice(basis.premium) + ' x' + basisQty)
-                    : 'Stage a limit or select a matching long position for P/L.';
+                    : 'P/L unavailable without an active long selected-contract position.';
                 return '<div role="button" tabindex="0" class="' + classes + '" data-trade-fast-price="' + _escapeHtml(price.toFixed(2)) + '">' +
                     '<span class="trade-active-ladder-cell trade-active-marker-cell">' + buyMarkers + '</span>' +
                     '<span class="trade-active-ladder-cell trade-active-bid">' + (nearBid ? 'BID' : '') + '</span>' +
@@ -31180,7 +31169,7 @@ def index():
                 methodEl.classList.toggle('fallback', methodClass === 'fallback');
                 methodEl.classList.toggle('unavailable', methodClass === 'unavailable');
                 methodEl.title = methodText === 'Unavailable'
-                    ? 'Need selected contract, basis, spot, and IV or delta.'
+                    ? 'Need an active long selected-contract position with Schwab average price.'
                     : 'Planning estimate only; Schwab order payloads are unchanged.';
             }
         }
