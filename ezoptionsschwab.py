@@ -98,6 +98,8 @@ def init_db():
                     net_vanna REAL NOT NULL,
                     net_charm REAL,
                     net_volume REAL,
+                    call_volume REAL,
+                    put_volume REAL,
                     net_speed REAL,
                     net_vomma REAL,
                     net_color REAL,
@@ -112,6 +114,14 @@ def init_db():
                 pass 
             try:
                 cursor.execute('ALTER TABLE interval_data ADD COLUMN net_volume REAL')
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute('ALTER TABLE interval_data ADD COLUMN call_volume REAL')
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute('ALTER TABLE interval_data ADD COLUMN put_volume REAL')
             except sqlite3.OperationalError:
                 pass
             # Add abs_gex_total column if it's missing
@@ -739,6 +749,8 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
             'vanna': 0,
             'charm': 0,
             'volume': 0,
+            'call_volume': 0,
+            'put_volume': 0,
             'speed': 0,
             'vomma': 0,
             'color': 0,
@@ -750,6 +762,7 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
         cur['vanna'] = cur.get('vanna',0) + vanna
         cur['charm'] = cur.get('charm',0) + charm
         cur['volume'] = cur.get('volume',0) + row['volume']
+        cur['call_volume'] = cur.get('call_volume',0) + row['volume']
         cur['speed'] = cur.get('speed',0) + speed
         cur['vomma'] = cur.get('vomma',0) + vomma
         cur['color'] = cur.get('color',0) + color
@@ -771,6 +784,8 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
             'vanna': 0,
             'charm': 0,
             'volume': 0,
+            'call_volume': 0,
+            'put_volume': 0,
             'speed': 0,
             'vomma': 0,
             'color': 0,
@@ -782,6 +797,7 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
         cur['vanna'] = cur.get('vanna',0) + vanna
         cur['charm'] = cur.get('charm',0) + charm
         cur['volume'] = cur.get('volume',0) - row['volume']
+        cur['put_volume'] = cur.get('put_volume',0) + row['volume']
         cur['speed'] = cur.get('speed',0) + speed
         cur['vomma'] = cur.get('vomma',0) + vomma
         cur['color'] = cur.get('color',0) + color
@@ -798,9 +814,10 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
                 cursor.execute('''
                     INSERT INTO interval_data (
                         ticker, timestamp, price, strike, net_gamma, net_delta, net_vanna,
-                        net_charm, net_volume, net_speed, net_vomma, net_color, abs_gex_total, date
+                        net_charm, net_volume, call_volume, put_volume, net_speed, net_vomma,
+                        net_color, abs_gex_total, date
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     ticker,
                     interval_timestamp,
@@ -811,6 +828,8 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
                     exposure['vanna'],
                     exposure['charm'],
                     exposure['volume'],
+                    exposure.get('call_volume', 0),
+                    exposure.get('put_volume', 0),
                     exposure['speed'],
                     exposure['vomma'],
                     exposure['color'],
@@ -7243,7 +7262,12 @@ def _stable_alert_id(ticker, scope_id, alert):
 
 
 def _fetch_vol_spike_data(ticker, S, strike_range):
-    """Batch-load last-20-min per-strike volume from interval_data, cached 30 s."""
+    """Batch-load last-20-min per-strike volume from interval_data, cached 30 s.
+
+    Newer databases store call_volume and put_volume separately. Older rows only
+    have signed net_volume, so callers keep a net fallback until enough
+    side-aware samples build up.
+    """
     now_ts = time.time()
     cutoff_ts = int(now_ts) - 20 * 60
     today = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
@@ -7257,7 +7281,7 @@ def _fetch_vol_spike_data(ticker, S, strike_range):
         with closing(sqlite_connect()) as conn:
             with closing(conn.cursor()) as cursor:
                 cursor.execute('''
-                    SELECT strike, timestamp, net_volume
+                    SELECT strike, timestamp, net_volume, call_volume, put_volume
                     FROM interval_data
                     WHERE ticker = ? AND date = ? AND timestamp >= ?
                       AND strike >= ? AND strike <= ?
@@ -7267,17 +7291,38 @@ def _fetch_vol_spike_data(ticker, S, strike_range):
     except Exception:
         rows = []
     by_strike = {}
-    for s_raw, _ts, nvol in rows:
-        by_strike.setdefault(float(s_raw), []).append(float(nvol) if nvol is not None else 0.0)
+    for s_raw, _ts, nvol, cvol, pvol in rows:
+        by_strike.setdefault(float(s_raw), {'net': [], 'call': [], 'put': []})
+        bucket = by_strike[float(s_raw)]
+        bucket['net'].append(float(nvol) if nvol is not None else 0.0)
+        bucket['call'].append(float(cvol) if cvol is not None else None)
+        bucket['put'].append(float(pvol) if pvol is not None else None)
     result = {}
-    for strike, vols in by_strike.items():
-        if len(vols) < 2:
-            continue
-        interval_deltas = [float(curr - prev) for prev, curr in zip(vols[:-1], vols[1:])]
-        abs_deltas = [abs(delta) for delta in interval_deltas]
-        curr = abs_deltas[-1]
-        avg20 = (sum(abs_deltas[:-1]) / len(abs_deltas[:-1])) if len(abs_deltas) > 1 else 0.0
-        result[strike] = {'avg20': avg20, 'curr': curr}
+    def _delta_stats(values, absolute=False):
+        clean = [v for v in values if v is not None]
+        if len(clean) < 2:
+            return None
+        deltas = [float(curr - prev) for prev, curr in zip(clean[:-1], clean[1:])]
+        if absolute:
+            deltas = [abs(v) for v in deltas]
+        else:
+            deltas = [max(0.0, v) for v in deltas]
+        if not deltas:
+            return None
+        curr = deltas[-1]
+        avg = (sum(deltas[:-1]) / len(deltas[:-1])) if len(deltas) > 1 else 0.0
+        return {'avg20': avg, 'curr': curr}
+
+    for strike, series in by_strike.items():
+        side_stats = {
+            'call': _delta_stats(series.get('call') or []),
+            'put': _delta_stats(series.get('put') or []),
+        }
+        if not any(side_stats.values()):
+            side_stats['net'] = _delta_stats(series.get('net') or [], absolute=True)
+        side_stats = {k: v for k, v in side_stats.items() if v is not None}
+        if side_stats:
+            result[strike] = side_stats
     _VOL_SPIKE_CACHE[cache_key] = {'ts': now_ts, 'data': result}
     return result
 
@@ -7353,17 +7398,21 @@ def compute_flow_alerts(ticker, calls, puts, now_iso, S, strike_range=0.02,
     # 2. Volume spike (SQLite rolling 20-min baseline)
     try:
         vol_data = _fetch_vol_spike_data(ticker, S, strike_range)
-        for strike, d in vol_data.items():
-            curr_v, avg20 = d['curr'], d['avg20']
-            if curr_v >= max(500.0, 3.0 * avg20):
-                aid = f'vol_spike:{strike:.0f}'
+        for strike, stats_by_side in vol_data.items():
+            for side_key, d in (stats_by_side or {}).items():
+                curr_v, avg20 = d['curr'], d['avg20']
+                if curr_v < max(500.0, 3.0 * avg20):
+                    continue
+                aid = f'vol_spike:{side_key}:{strike:.0f}'
                 ratio = (curr_v / avg20) if avg20 > 0 else 99.0
                 if _passes_key_level_gate('vol_spike', strike) and _alert_cooldown_ok(ticker, aid, 300, scope_id=scope_id):
+                    side_label = {'call': 'Call', 'put': 'Put'}.get(side_key, 'Net')
                     alerts.append({
                         'id': aid, 'level': 'flow',
-                        'text': f'Vol spike @ {strike:.0f} ({ratio:.1f}× avg)',
+                        'text': f'{side_label} vol spike @ {strike:.0f} ({ratio:.1f}× avg)',
                         'strike': float(strike), 'ts': now_iso, 'detail': None,
                         'alert_type': 'vol_spike',
+                        'option_type': side_key if side_key in ('call', 'put') else None,
                         'direction_classifiable': False,
                     })
     except Exception as e:
@@ -10491,7 +10540,7 @@ def index():
             text-align: center;
         }
         .chart-grid {
-            --gex-col-w: 352px;
+            --gex-col-w: 292px;
             --rail-col-w: clamp(360px, 24vw, 430px);
             --trade-rail-w: clamp(360px, 24vw, 460px);
             --workspace-top-reclaim: 36px;
@@ -13412,6 +13461,47 @@ def index():
             border-color: color-mix(in srgb, var(--put) 42%, var(--border));
             color: var(--put);
         }
+        .journal-session-review {
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+        .journal-session-review-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .journal-session-review-card {
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-1);
+            padding: 8px;
+        }
+        .journal-session-review-card span {
+            display: block;
+            color: var(--fg-2);
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+        .journal-session-review-card strong {
+            display: block;
+            margin-top: 4px;
+            color: var(--fg-0);
+            font-size: 16px;
+            line-height: 1.15;
+            font-variant-numeric: tabular-nums;
+        }
+        .journal-session-review-card em {
+            display: block;
+            margin-top: 3px;
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.3;
+            font-style: normal;
+        }
         .journal-table-wrap {
             min-width: 0;
             overflow: hidden;
@@ -15387,7 +15477,7 @@ def index():
             min-height: 0;
         }
 
-        /* Strike rail (always-on, collapsible) — lives between chart and rail */
+        /* Strike Inspect (collapsible) — lives between chart and overview rail */
         .gex-col-header {
             position: relative;
             display: flex;
@@ -15409,6 +15499,13 @@ def index():
             align-items: center;
             gap: 8px;
         }
+        .strike-inspect-title-wrap {
+            flex: 0 0 auto;
+            min-width: 72px;
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+        }
         .gex-col-header .gex-col-title {
             font-size: 10px;
             font-weight: 600;
@@ -15419,6 +15516,16 @@ def index():
             overflow: hidden;
             text-overflow: ellipsis;
             flex: 0 0 auto;
+        }
+        .strike-inspect-context {
+            max-width: 112px;
+            color: var(--fg-2);
+            font-size: 9px;
+            line-height: 1.1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-variant-numeric: tabular-nums;
         }
         .strike-rail-tabs {
             display: flex;
@@ -15514,7 +15621,7 @@ def index():
             font-size: 12px;
             line-height: 1.45;
         }
-        .chart-grid.gex-collapsed .gex-col-header .gex-col-title,
+        .chart-grid.gex-collapsed .gex-col-header .strike-inspect-title-wrap,
         .chart-grid.gex-collapsed .gex-col-header .strike-rail-tabs,
         .chart-grid.gex-collapsed .gex-column > .gex-side-panel-wrap {
             display: none;
@@ -16670,6 +16777,14 @@ def index():
         .drawer-section {
             border-bottom: 1px solid var(--border);
         }
+        .drawer-task-label {
+            padding: 12px 16px 4px;
+            color: var(--accent);
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
         .drawer-section > summary {
             cursor: pointer;
             padding: 10px 16px;
@@ -17053,6 +17168,7 @@ def index():
                 grid-template-columns: minmax(0, 1fr);
             }
             .journal-workspace-grid,
+            .journal-session-review-grid,
             .journal-summary-grid {
                 grid-template-columns: minmax(0, 1fr);
             }
@@ -17272,6 +17388,7 @@ def index():
                 <button id="drawerClose" class="btn-icon" title="Close" aria-label="Close drawer">&times;</button>
             </div>
             <div class="drawer-body">
+                <div class="drawer-task-label">Workspace</div>
                 <details class="drawer-section" open>
                     <summary>Workspace</summary>
                     <div class="drawer-content">
@@ -17335,8 +17452,9 @@ def index():
                         </div>
                     </div>
                 </details>
+                <div class="drawer-task-label">Scalp Chart</div>
                 <details class="drawer-section">
-                    <summary>Chart History</summary>
+                    <summary>Chart Data Window</summary>
                     <div class="drawer-content">
                         <p class="chart-history-help">Days of historical candles to load per timeframe. Higher values pull more from Schwab and slow chart load. Defaults are tuned for snappy rendering. Values above the soft cap will show a warning. Hard caps protect against API limits and oversize payloads.</p>
                         <div class="chart-history-grid" id="chart-history-grid"><!-- populated by renderChartHistorySection() --></div>
@@ -17358,7 +17476,7 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section">
-                    <summary>Volume Coloring (RVOL)</summary>
+                    <summary>Volume / RVOL Read</summary>
                     <div class="drawer-content">
                         <p class="chart-history-help">Compare each bar's volume to a robust average for that time-of-day across prior RTH sessions (half-days excluded). Volume bars keep up/down direction; stronger RVOL increases opacity and the dotted line shows expected volume.</p>
                         <div class="control-group">
@@ -17424,13 +17542,14 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section" open>
-                    <summary>Sections</summary>
+                    <summary>Chart Surfaces &amp; Overlays</summary>
                     <div class="drawer-content">
                         <div class="visibility-grid" id="chart-visibility-list"><!-- populated by renderChartVisibilitySection() --></div>
                     </div>
                 </details>
+                <div class="drawer-task-label">Dealer Levels</div>
                 <details class="drawer-section" open>
-                    <summary>Strike Range</summary>
+                    <summary>Dealer Level Scope</summary>
                     <div class="drawer-content">
                         <div class="control-group">
                             <label for="strike_range">Strike Range (%):</label>
@@ -17441,11 +17560,11 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section" open>
-                    <summary>Exposure</summary>
+                    <summary>Exposure Weighting</summary>
                     <div class="drawer-content">
                         <div class="control-group">
                             <label for="exposure_metric">Exposure Weighting Metric:</label>
-                            <select id="exposure_metric" title="Selects the option-chain weighting input for exposure charts/formulas; it does not change the Strike Rail metric selector.">
+                            <select id="exposure_metric" title="Selects the option-chain weighting input for exposure charts/formulas; it does not change the Strike Inspect metric selector.">
                                 <option value="Open Interest" selected>Open Interest</option>
                                 <option value="Volume">Volume</option>
                                 <option value="Max OI vs Volume">Max OI vs Volume</option>
@@ -17467,7 +17586,7 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section" open>
-                    <summary>Series</summary>
+                    <summary>Exposure Series</summary>
                     <div class="drawer-content">
                         <div class="control-group">
                             <input type="checkbox" id="show_calls">
@@ -17483,29 +17602,8 @@ def index():
                         </div>
                     </div>
                 </details>
-                <details class="drawer-section" open>
-                    <summary>Options Volume</summary>
-                    <div class="drawer-content">
-                        <div class="control-group">
-                            <input type="checkbox" id="ov_show_calls" checked>
-                            <label for="ov_show_calls">Show call profile</label>
-                        </div>
-                        <div class="control-group">
-                            <input type="checkbox" id="ov_show_puts" checked>
-                            <label for="ov_show_puts">Show put profile</label>
-                        </div>
-                        <div class="control-group">
-                            <input type="checkbox" id="ov_show_net">
-                            <label for="ov_show_net">Show net overlay</label>
-                        </div>
-                        <div class="control-group">
-                            <input type="checkbox" id="ov_show_totals" checked>
-                            <label for="ov_show_totals">Show bar labels</label>
-                        </div>
-                    </div>
-                </details>
                 <details class="drawer-section">
-                    <summary>Price Levels</summary>
+                    <summary>Dealer Lines</summary>
                     <div class="drawer-content">
                         <div class="control-group">
                             <label>Price Levels:</label>
@@ -17542,7 +17640,7 @@ def index():
                     </div>
                 </details>
                 <details class="drawer-section">
-                    <summary>Absolute GEX</summary>
+                    <summary>Absolute GEX Context</summary>
                     <div class="drawer-content">
                         <div class="control-group">
                             <input type="checkbox" id="show_abs_gex">
@@ -17639,6 +17737,42 @@ def index():
                         </div>
                     </div>
                 </details>
+                <div class="drawer-task-label">Flow Alerts</div>
+                <details class="drawer-section" open>
+                    <summary>Options Volume Profile</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="ov_show_calls" checked>
+                            <label for="ov_show_calls">Show call profile</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="ov_show_puts" checked>
+                            <label for="ov_show_puts">Show put profile</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="ov_show_net">
+                            <label for="ov_show_net">Show net overlay</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="ov_show_totals" checked>
+                            <label for="ov_show_totals">Show bar labels</label>
+                        </div>
+                    </div>
+                </details>
+                <details class="drawer-section" open>
+                    <summary>Flow Alert Gates</summary>
+                    <div class="drawer-content">
+                        <div class="control-group">
+                            <input type="checkbox" id="gate_alerts" checked>
+                            <label for="gate_alerts">Only alert near key levels</label>
+                        </div>
+                        <div class="control-group">
+                            <input type="checkbox" id="dealer_impact_verbose">
+                            <label for="dealer_impact_verbose">Verbose dealer cues</label>
+                        </div>
+                    </div>
+                </details>
+                <div class="drawer-task-label">Advanced Analytics</div>
                 <details class="drawer-section" open>
                     <summary>Volume / Market Profile</summary>
                     <div class="drawer-content">
@@ -17809,21 +17943,8 @@ def index():
                         </div>
                     </div>
                 </details>
-                <details class="drawer-section" open>
-                    <summary>Alerts</summary>
-                    <div class="drawer-content">
-                        <div class="control-group">
-                            <input type="checkbox" id="gate_alerts" checked>
-                            <label for="gate_alerts">Only alert near key levels</label>
-                        </div>
-                        <div class="control-group">
-                            <input type="checkbox" id="dealer_impact_verbose">
-                            <label for="dealer_impact_verbose">Verbose dealer cues</label>
-                        </div>
-                    </div>
-                </details>
                 <details class="drawer-section">
-                    <summary>Max Level</summary>
+                    <summary>Max-Level Highlighting</summary>
                     <div class="drawer-content">
                         <div class="control-group">
                             <input type="checkbox" id="highlight_max_level">
@@ -17923,12 +18044,15 @@ def index():
             </div>
             <div class="gex-col-header" id="gex-col-header">
                 <div class="strike-rail-header-main">
-                    <div class="gex-col-title">Strike Rail</div>
+                    <div class="strike-inspect-title-wrap">
+                        <div class="gex-col-title">Strike Inspect</div>
+                        <div class="strike-inspect-context" id="strike-inspect-context">Context loads</div>
+                    </div>
                     <div class="strike-rail-tabs" id="strike-rail-tabs"></div>
                 </div>
                 <button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>
             </div>
-            <div class="gex-resize-handle" id="gex-resize-handle" role="separator" aria-label="Resize strike rail" aria-orientation="vertical"></div>
+            <div class="gex-resize-handle" id="gex-resize-handle" role="separator" aria-label="Resize strike inspect" aria-orientation="vertical"></div>
             <div class="right-rail-tabs" id="right-rail-tabs">
                 <button type="button" class="right-rail-tab active" data-rail-tab="overview">Overview<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
@@ -18688,11 +18812,15 @@ def index():
                     <button type="button" data-trade-journal-workspace-clear>Clear</button>
                 </div>
                 <div class="journal-workspace-grid">
-                    <div class="journal-workspace-main">
-                        <div class="journal-stat-grid" data-trade-journal-workspace-stats></div>
-                        <div class="journal-panel" data-trade-journal-workspace-lifecycle>
-                            <span class="journal-section-title">Lifecycle</span>
-                            <div class="journal-empty">Previewed, placed, canceled, closed, reviewed, and manual entries will group here.</div>
+                        <div class="journal-workspace-main">
+                            <div class="journal-stat-grid" data-trade-journal-workspace-stats></div>
+                            <div class="journal-panel journal-session-review" data-trade-journal-session-review>
+                                <span class="journal-section-title">Session Review</span>
+                                <div class="journal-empty">Session analytics load with local journal events.</div>
+                            </div>
+                            <div class="journal-panel" data-trade-journal-workspace-lifecycle>
+                                <span class="journal-section-title">Lifecycle</span>
+                                <div class="journal-empty">Previewed, placed, canceled, closed, reviewed, and manual entries will group here.</div>
                         </div>
                         <div class="journal-panel journal-table-wrap">
                             <div class="journal-table-head">
@@ -19107,7 +19235,12 @@ def index():
         let _lastSessionLevels = null;
         let _lastSessionLevelsMeta = null;
         let _lastKeyLevels0dte = null;
+        let _lastStats = null;
         let _lastStats0dte     = null;
+        let _lastPriceInfo = null;
+        let _lastPromotedAlert = null;
+        let _lastNearestLevelRow = null;
+        let _lastOptionsUpdateAt = 0;
         let tvKeyLevelPrices = [];
         let tvSessionLevelPrices = [];
         let tvTopOIPrices = [];
@@ -20476,9 +20609,11 @@ def index():
     function drawHistoricalBubbles(){var o=ensureHistOverlay(),t=ensureHistTip();if(!o||!tvChart||!tvCandle)return;tvHistoricalRenderedPoints=[];if(!tvHistoricalPoints.length){o.replaceChildren();o.style.display='none';if(t)t.style.display='none';return;}var points=getVisibleHistoricalBubblePoints();if(!points.length){o.replaceChildren();o.style.display='none';if(t)t.style.display='none';return;}var frag=document.createDocumentFragment(),visible=0;points.forEach(function(p){var x=tvChart.timeScale().timeToCoordinate(p.time),y=tvCandle.priceToCoordinate(p.price);if(x==null||y==null||Number.isNaN(x)||Number.isNaN(y))return;var b=document.createElement('div');b.className='tv-historical-bubble';b.style.left=x+'px';b.style.top=y+'px';b.style.width=(p.size||8)+'px';b.style.height=(p.size||8)+'px';b.style.background=p.color||'rgba(255,255,255,0.6)';b.style.border=(p.border_width||1)+'px solid '+(p.border_color||p.color||'#fff');frag.appendChild(b);tvHistoricalRenderedPoints.push(Object.assign({},p,{x:x,y:y}));visible++;});o.replaceChildren(frag);o.style.display=visible>0?'block':'none';}
     function scheduleHistoricalBubbleDraw(){if(historicalBubbleDrawPending)return;historicalBubbleDrawPending=true;requestAnimationFrame(function(){historicalBubbleDrawPending=false;drawHistoricalBubbles();});}
 
-  // ── Main renderer ──────────────────────────────────────────────────────────
+  // ── Popout-only renderer ───────────────────────────────────────────────────
+  // The main dashboard uses renderTVPriceChart in the parent window. This
+  // isolated renderer exists only inside the separate price popout document.
   var isFirstRender=true;
-  function renderPriceChart(priceData){
+  function renderPopoutPriceChart(priceData){
     var candles=priceData.candles||[];
     var upColor=priceData.call_color||'#10B981',downColor=priceData.put_color||'#EF4444';
     popoutUpColor=upColor; popoutDownColor=downColor;
@@ -20626,7 +20761,7 @@ def index():
       .then(function(r){return r.json();})
       .then(function(data){
         if(!data.error&&data.price){
-          renderPriceChart(typeof data.price==='string'?JSON.parse(data.price):data.price);
+          renderPopoutPriceChart(typeof data.price==='string'?JSON.parse(data.price):data.price);
         }
         // Connect SSE after we have the initial candle history
         connectPopoutStream(settings.ticker);
@@ -20682,7 +20817,7 @@ def index():
 
   // Entry point kept for compatibility with pushDataToPopout
   window.updatePopoutChart=function(priceDataJSON){
-    try{var priceData=typeof priceDataJSON==='string'?JSON.parse(priceDataJSON):priceDataJSON;if(!priceData||priceData.error)return;renderPriceChart(priceData);}catch(e){console.error('Popout price chart error:',e);}
+    try{var priceData=typeof priceDataJSON==='string'?JSON.parse(priceDataJSON):priceDataJSON;if(!priceData||priceData.error)return;renderPopoutPriceChart(priceData);}catch(e){console.error('Popout price chart error:',e);}
   };
   window.addEventListener('resize',function(){if(tvChart&&tvAutoRange){try{tvChart.timeScale().fitContent();}catch(e){}}});
   window.addEventListener('beforeunload',function(){if(popoutEvtSource){try{popoutEvtSource.close();}catch(e){}}});
@@ -28806,6 +28941,7 @@ def index():
                     '<div class="journal-workspace-grid">' +
                         '<div class="journal-workspace-main">' +
                             '<div class="journal-stat-grid" data-trade-journal-workspace-stats></div>' +
+                            '<div class="journal-panel journal-session-review" data-trade-journal-session-review><span class="journal-section-title">Session Review</span><div class="journal-empty">Session analytics load with local journal events.</div></div>' +
                             '<div class="journal-panel" data-trade-journal-workspace-lifecycle><span class="journal-section-title">Lifecycle</span><div class="journal-empty">Previewed, placed, canceled, closed, reviewed, and manual entries will group here.</div></div>' +
                             '<div class="journal-panel journal-table-wrap">' +
                                 '<div class="journal-table-head"><div>Time</div><div>Event</div><div>Ticker</div><div>Contract</div><div>Status</div><div>Setup / Tags</div><div>P/L</div></div>' +
@@ -29224,7 +29360,10 @@ def index():
                 gexHeader.id = 'gex-col-header';
                 gexHeader.innerHTML =
                     '<div class="strike-rail-header-main">' +
-                        '<div class="gex-col-title">Strike Rail</div>' +
+                        '<div class="strike-inspect-title-wrap">' +
+                            '<div class="gex-col-title">Strike Inspect</div>' +
+                            '<div class="strike-inspect-context" id="strike-inspect-context">Context loads</div>' +
+                        '</div>' +
                         '<div class="strike-rail-tabs" id="strike-rail-tabs"></div>' +
                     '</div>' +
                     '<button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>';
@@ -29337,15 +29476,16 @@ def index():
 
         // ── GEX column collapse state ────────────────────────────────────
         const GEX_COL_COLLAPSE_KEY = 'gex.sidePanelCollapsed';
+        const GEX_COL_DEFAULT_WIDTH = 292;
         let _gexResizeRefreshScheduled = false;
         function getGexColWidthConstraints() {
             const grid = document.getElementById('chart-grid');
-            if (!grid) return { min: 280, max: 640 };
+            if (!grid) return { min: 220, max: 520 };
             const styles = getComputedStyle(grid);
             const railWidth = parseFloat(styles.getPropertyValue('--rail-col-w')) || 272;
             const tradeRailWidth = parseFloat(styles.getPropertyValue('--trade-rail-w')) || 0;
-            const min = 280;
-            const max = Math.max(min, Math.min(640, grid.clientWidth - railWidth - tradeRailWidth - 360));
+            const min = 220;
+            const max = Math.max(min, Math.min(520, grid.clientWidth - railWidth - tradeRailWidth - 360));
             return { min, max };
         }
         function clampGexColWidth(width) {
@@ -29382,7 +29522,7 @@ def index():
                 handle.className = 'gex-resize-handle';
                 handle.id = 'gex-resize-handle';
                 handle.setAttribute('role', 'separator');
-                handle.setAttribute('aria-label', 'Resize strike rail');
+                handle.setAttribute('aria-label', 'Resize strike inspect');
                 handle.setAttribute('aria-orientation', 'vertical');
                 grid.appendChild(handle);
             }
@@ -29401,7 +29541,7 @@ def index():
             if (collapsed) {
                 grid.style.setProperty('--gex-col-w', '0px');
             } else {
-                let savedWidth = 352;
+                let savedWidth = GEX_COL_DEFAULT_WIDTH;
                 try {
                     const raw = parseFloat(localStorage.getItem(GEX_COL_WIDTH_KEY));
                     if (Number.isFinite(raw)) savedWidth = raw;
@@ -29410,7 +29550,7 @@ def index():
             }
             if (btn) {
                 btn.textContent = collapsed ? '›' : '‹';
-                btn.title = collapsed ? 'Expand Strike Rail' : 'Collapse Strike Rail';
+                btn.title = collapsed ? 'Expand Strike Inspect' : 'Collapse Strike Inspect';
             }
             if (!collapsed) {
                 // Re-render the active strike rail after expanding.
@@ -29448,7 +29588,7 @@ def index():
                 if (!grid) return;
                 event.preventDefault();
                 const startX = event.clientX;
-                const startWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w')) || 352;
+                const startWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w')) || GEX_COL_DEFAULT_WIDTH;
                 handle.classList.add('dragging');
                 document.body.classList.add('gex-resize-active');
                 try { handle.setPointerCapture(event.pointerId); } catch (e) {}
@@ -29488,7 +29628,7 @@ def index():
             }
         })();
         (function restoreGexColumnWidth() {
-            let savedWidth = 352;
+            let savedWidth = GEX_COL_DEFAULT_WIDTH;
             try {
                 const raw = parseFloat(localStorage.getItem(GEX_COL_WIDTH_KEY));
                 if (Number.isFinite(raw)) savedWidth = raw;
@@ -31403,6 +31543,42 @@ def index():
                 '<div class="journal-stat"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(String(value)) + '</strong><em>' + _escapeHtml(note) + '</em></div>'
             )).join('');
         }
+        function renderTradeJournalSessionReview(events) {
+            const target = document.querySelector('[data-trade-journal-session-review]');
+            if (!target) return;
+            const rows = Array.isArray(events) ? events : [];
+            if (!rows.length) {
+                target.innerHTML = '<span class="journal-section-title">Session Review</span><div class="journal-empty">No session events match the current filters.</div>';
+                return;
+            }
+            const today = getTradeJournalDateKey(new Date());
+            const sessionEvents = rows.filter(event => getTradeJournalDateKey(event.created_at) === today);
+            const groups = buildTradeJournalLifecycle(rows);
+            const sessionGroups = groups.filter(group => group.dateKey === today);
+            const completedGroups = sessionGroups.filter(group => group.entryEvents && group.entryEvents.length && group.exitEvents && group.exitEvents.length);
+            const holdValues = completedGroups.map(group => Number(group.holdSeconds)).filter(Number.isFinite);
+            const avgHold = holdValues.length ? fmtTradeDuration(Math.round(holdValues.reduce((sum, value) => sum + value, 0) / holdValues.length)) : '—';
+            const explicitPnls = sessionEvents.map(event => getTradeJournalPnlInfo(event, { allowPosition: false })).filter(Boolean);
+            const pnlTotal = explicitPnls.reduce((sum, item) => sum + Number(item.value || 0), 0);
+            const mediaEvents = sessionEvents.filter(event => getTradeJournalMedia(event).length);
+            const screenshotsNeedNotes = mediaEvents.filter(event => !String(event.journal_notes || '').trim() && !String(event.journal_outcome || '').trim()).length;
+            const tagCounts = new Map();
+            sessionEvents.forEach(event => getTradeJournalTags(event).forEach(tag => addJournalCount(tagCounts, tag)));
+            const topTags = getJournalCountRows(tagCounts, 3).map(([label, count]) => label + ' ' + count).join(' / ') || 'No tags yet';
+            const cards = [
+                ['Session Events', sessionEvents.length, today],
+                ['Scalp Groups', sessionGroups.length, completedGroups.length + ' completed'],
+                ['Average Hold', avgHold, holdValues.length ? holdValues.length + ' paired groups' : 'Need entry and exit events'],
+                ['Known P/L', explicitPnls.length ? fmtTradeSignedMoney(pnlTotal) : 'Not inferred', explicitPnls.length ? explicitPnls.length + ' explicit values' : 'No deterministic values'],
+                ['Screenshots', mediaEvents.length, screenshotsNeedNotes ? screenshotsNeedNotes + ' need notes/outcome' : 'Coverage noted'],
+                ['Top Tags', topTags, 'Current session'],
+            ];
+            target.innerHTML =
+                '<span class="journal-section-title">Session Review</span>' +
+                '<div class="journal-session-review-grid">' + cards.map(([label, value, note]) => (
+                    '<div class="journal-session-review-card"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(String(value)) + '</strong><em>' + _escapeHtml(note) + '</em></div>'
+                )).join('') + '</div>';
+        }
         function renderTradeJournalLifecycle(events) {
             const target = document.querySelector('[data-trade-journal-workspace-lifecycle]');
             if (!target) return;
@@ -31539,6 +31715,7 @@ def index():
                 if (note) note.textContent = 'Loading local journal events';
                 if (table) table.innerHTML = '<div class="journal-empty">Loading local journal events...</div>';
                 renderTradeJournalStats([], []);
+                renderTradeJournalSessionReview([]);
                 renderTradeJournalLifecycle([]);
                 renderTradeJournalSummaries([]);
                 renderTradeJournalWorkspaceDetail(null);
@@ -31548,6 +31725,7 @@ def index():
                 if (note) note.textContent = 'Journal unavailable';
                 if (table) table.innerHTML = '<div class="journal-empty">' + _escapeHtml(tradeRailState.journalError) + '</div>';
                 renderTradeJournalStats([], []);
+                renderTradeJournalSessionReview([]);
                 renderTradeJournalLifecycle([]);
                 renderTradeJournalSummaries([]);
                 renderTradeJournalWorkspaceDetail(null);
@@ -31561,6 +31739,7 @@ def index():
                     : 'No local journal events yet';
             }
             renderTradeJournalStats(events, filtered);
+            renderTradeJournalSessionReview(filtered);
             renderTradeJournalLifecycle(filtered);
             renderTradeJournalSummaries(filtered);
             const selectedStillVisible = filtered.some(event => String(event.id) === String(tradeRailState.journalWorkspaceSelectedId));
@@ -32394,8 +32573,145 @@ def index():
                 ].filter(Boolean).join(' | '),
             };
         }
+        function drawTradeCaptureRoundedRect(ctx, x, y, w, h, r) {
+            const radius = Math.max(0, Math.min(r || 0, Math.min(w, h) / 2));
+            ctx.beginPath();
+            ctx.moveTo(x + radius, y);
+            ctx.lineTo(x + w - radius, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+            ctx.lineTo(x + w, y + h - radius);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+            ctx.lineTo(x + radius, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+            ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y);
+            ctx.closePath();
+        }
+        function tradeCaptureVisibleRect(el, bounds) {
+            if (!el) return null;
+            const cs = getComputedStyle(el);
+            if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0) return null;
+            const rect = el.getBoundingClientRect();
+            if (!rect.width || !rect.height) return null;
+            if (rect.right < bounds.left || rect.left > bounds.right || rect.bottom < bounds.top || rect.top > bounds.bottom) return null;
+            return { rect, cs, x: rect.left - bounds.left, y: rect.top - bounds.top };
+        }
+        function inlineTradeCaptureSvgStyles(sourceSvg, cloneSvg) {
+            const props = [
+                'fill', 'stroke', 'stroke-width', 'stroke-dasharray', 'stroke-linecap',
+                'stroke-linejoin', 'opacity', 'fill-opacity', 'stroke-opacity',
+                'font-family', 'font-size', 'font-weight', 'text-anchor',
+            ];
+            const srcNodes = [sourceSvg].concat(Array.from(sourceSvg.querySelectorAll('*')));
+            const cloneNodes = [cloneSvg].concat(Array.from(cloneSvg.querySelectorAll('*')));
+            srcNodes.forEach((src, i) => {
+                const dst = cloneNodes[i];
+                if (!src || !dst) return;
+                const cs = getComputedStyle(src);
+                const existing = dst.getAttribute('style') || '';
+                const styles = props.map(prop => {
+                    const value = cs.getPropertyValue(prop);
+                    return value ? prop + ':' + value : '';
+                }).filter(Boolean).join(';');
+                if (styles) dst.setAttribute('style', existing ? existing + ';' + styles : styles);
+            });
+            cloneSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        }
+        function loadTradeCaptureImage(src) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error('Overlay image failed to load.'));
+                img.src = src;
+            });
+        }
+        async function drawTradeCaptureSvgOverlays(ctx, container, bounds) {
+            const svgs = Array.from(container.querySelectorAll(
+                '.tv-session-cloud-overlay svg, .tv-profile-overlay svg, .tv-drawing-overlay svg'
+            ));
+            let drawn = 0;
+            for (const svg of svgs) {
+                const visible = tradeCaptureVisibleRect(svg, bounds);
+                if (!visible) continue;
+                try {
+                    const clone = svg.cloneNode(true);
+                    inlineTradeCaptureSvgStyles(svg, clone);
+                    const xml = new XMLSerializer().serializeToString(clone);
+                    const src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+                    const img = await loadTradeCaptureImage(src);
+                    ctx.drawImage(img, visible.x, visible.y, visible.rect.width, visible.rect.height);
+                    drawn += 1;
+                } catch (e) {
+                    console.warn('Screenshot SVG overlay skipped', e);
+                }
+            }
+            return drawn;
+        }
+        function drawTradeCaptureDomOverlay(ctx, el, bounds) {
+            const visible = tradeCaptureVisibleRect(el, bounds);
+            if (!visible) return 0;
+            const { rect, cs, x, y } = visible;
+            const opacity = Number(cs.opacity);
+            ctx.save();
+            ctx.globalAlpha = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+            if (el.classList.contains('tv-historical-bubble')) {
+                const r = Math.max(2, Math.min(rect.width, rect.height) / 2);
+                ctx.fillStyle = cs.backgroundColor || 'rgba(255,255,255,0.55)';
+                ctx.beginPath();
+                ctx.arc(x + rect.width / 2, y + rect.height / 2, r, 0, Math.PI * 2);
+                ctx.fill();
+                if (cs.borderTopColor && parseFloat(cs.borderTopWidth) > 0) {
+                    ctx.strokeStyle = cs.borderTopColor;
+                    ctx.lineWidth = parseFloat(cs.borderTopWidth) || 1;
+                    ctx.stroke();
+                }
+                ctx.restore();
+                return 1;
+            }
+            if (el.classList.contains('tv-strike-overlay-bar')) {
+                ctx.fillStyle = cs.backgroundColor || 'rgba(255,255,255,0.35)';
+                ctx.fillRect(x, y, rect.width, rect.height);
+                ctx.restore();
+                return 1;
+            }
+            const bg = cs.backgroundColor;
+            if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+                ctx.fillStyle = bg;
+                drawTradeCaptureRoundedRect(ctx, x, y, rect.width, rect.height, parseFloat(cs.borderTopLeftRadius) || 4);
+                ctx.fill();
+            }
+            if (cs.borderTopColor && parseFloat(cs.borderTopWidth) > 0) {
+                ctx.strokeStyle = cs.borderTopColor;
+                ctx.lineWidth = parseFloat(cs.borderTopWidth) || 1;
+                drawTradeCaptureRoundedRect(ctx, x, y, rect.width, rect.height, parseFloat(cs.borderTopLeftRadius) || 4);
+                ctx.stroke();
+            }
+            const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text) {
+                ctx.fillStyle = cs.color || '#E5E7EB';
+                ctx.font = `${cs.fontWeight || 600} ${cs.fontSize || '11px'} ${cs.fontFamily || 'system-ui'}`;
+                drawTradeCaptureText(ctx, text, x + 6, y + Math.min(rect.height - 5, 16), Math.max(20, rect.width - 12));
+            }
+            ctx.restore();
+            return 1;
+        }
+        function drawTradeCaptureDomOverlays(ctx, container, bounds) {
+            const selectors = [
+                '.tv-historical-bubble',
+                '.tv-strike-overlay-bar',
+                '.tv-axis-countdown',
+                '.tv-cum-rvol-badge',
+                '.tv-profile-summary',
+            ].join(',');
+            let drawn = 0;
+            Array.from(container.querySelectorAll(selectors)).forEach(el => {
+                try { drawn += drawTradeCaptureDomOverlay(ctx, el, bounds); } catch (e) {}
+            });
+            return drawn;
+        }
         function captureTradeChartScreenshotDataUrl(result, selected) {
             return new Promise((resolve, reject) => {
+                (async () => {
                 const container = document.getElementById('price-chart');
                 if (!container) {
                     reject(new Error('Price chart is not available for screenshot capture.'));
@@ -32459,6 +32775,8 @@ def index():
                 ctx.fillStyle = bg;
                 ctx.fillRect(0, 0, bounds.width, bounds.height);
                 let drawn = 0;
+                let svgDrawn = 0;
+                let domDrawn = 0;
                 try {
                     layers.forEach(layer => {
                         const rect = layer.getBoundingClientRect();
@@ -32475,6 +32793,8 @@ def index():
                         );
                         drawn += 1;
                     });
+                    svgDrawn = await drawTradeCaptureSvgOverlays(ctx, container, bounds);
+                    domDrawn = drawTradeCaptureDomOverlays(ctx, container, bounds);
                 } catch (e) {
                     ctx.restore();
                     reject(e);
@@ -32494,13 +32814,14 @@ def index():
                 ctx.stroke();
                 ctx.fillStyle = muted;
                 ctx.font = '10px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
-                drawTradeCaptureText(ctx, 'Captured locally after successful live sidebar placement', 14, headerHeight + chartHeight + 18, cssWidth - 28);
+                drawTradeCaptureText(ctx, `Captured locally with ${drawn} canvas, ${svgDrawn} SVG, ${domDrawn} DOM layers`, 14, headerHeight + chartHeight + 18, cssWidth - 28);
                 try {
                     const dataUrl = canvas.toDataURL('image/png');
-                    resolve({ dataUrl, width: canvas.width, height: canvas.height });
+                    resolve({ dataUrl, width: canvas.width, height: canvas.height, layers: { canvas: drawn, svg: svgDrawn, dom: domDrawn } });
                 } catch (e) {
                     reject(e);
                 }
+                })().catch(reject);
             });
         }
         function uploadTradePlacementScreenshot(result, selected) {
@@ -32524,6 +32845,7 @@ def index():
                                 limit_price: result.limit_price || '',
                                 order_hash: result.order_hash || '',
                                 schwab_status: result.schwab_status || '',
+                                capture_layers: capture.layers || {},
                             },
                         }),
                     }))
@@ -33309,7 +33631,7 @@ def index():
                 ).join('');
                 tabsEl.innerHTML =
                     '<div class="strike-rail-tab-list">' + buttonHtml + '</div>' +
-                    '<label class="strike-rail-select-wrap" aria-label="Strike rail view">' +
+                    '<label class="strike-rail-select-wrap" aria-label="Strike Inspect view">' +
                         '<span class="strike-rail-select-icon" aria-hidden="true">&#9776;</span>' +
                         '<select class="strike-rail-select" id="strike-rail-select">' + optionHtml + '</select>' +
                     '</label>';
@@ -33324,6 +33646,7 @@ def index():
                     select.value = activeStrikeRailTab;
                 }
             }
+            updateStrikeInspectContext();
         }
 
         function wireStrikeRailTabs() {
@@ -33371,12 +33694,54 @@ def index():
             target.__strikeRailState = null;
             const empty = document.createElement('div');
             empty.className = 'strike-rail-empty';
-            empty.textContent = message || 'Strike rail data loads with chart updates.';
+            empty.textContent = message || 'Strike Inspect data loads with chart updates.';
             target.appendChild(empty);
+            updateStrikeInspectContext();
         }
 
         let _strikeRailLastPayloadByTab = Object.create(null);
         let _strikeRailRenderToken = 0;
+        function getStrikeInspectRowsForActiveTab() {
+            const metric = activeStrikeRailTab === 'gex' ? 'gex' : activeStrikeRailTab;
+            const profiles = (lastData && lastData.strike_profiles) || tvStrikeOverlayProfiles || {};
+            const rows = profiles && profiles[metric];
+            return Array.isArray(rows) ? rows : [];
+        }
+        function updateStrikeInspectContext() {
+            const el = document.getElementById('strike-inspect-context');
+            if (!el) return;
+            const stats = (typeof getScopedStats === 'function') ? getScopedStats() : null;
+            const spot = Number(
+                (stats && stats.spot != null ? stats.spot : null) ??
+                (_lastPriceInfo && _lastPriceInfo.current_price != null ? _lastPriceInfo.current_price : null) ??
+                livePrice
+            );
+            const label = STRIKE_RAIL_LABELS[activeStrikeRailTab] || activeStrikeRailTab || 'GEX';
+            const rows = getStrikeInspectRowsForActiveTab();
+            const syncSpec = getStrikeRailSyncSpec();
+            const visibleRows = syncSpec
+                ? rows.filter(row => {
+                    const strike = Number(row && row.strike);
+                    return Number.isFinite(strike) && strike >= syncSpec.lo && strike <= syncSpec.hi;
+                })
+                : rows;
+            let nearestText = '';
+            if (Number.isFinite(spot) && rows.length) {
+                const nearest = rows.reduce((best, row) => {
+                    const strike = Number(row && row.strike);
+                    if (!Number.isFinite(strike)) return best;
+                    const dist = Math.abs(strike - spot);
+                    return !best || dist < best.dist ? { strike, dist } : best;
+                }, null);
+                if (nearest) nearestText = 'near ' + nearest.strike.toFixed(0);
+            }
+            const parts = [
+                Number.isFinite(spot) ? ('$' + spot.toFixed(2)) : '',
+                label,
+                nearestText || (visibleRows.length ? visibleRows.length + ' strikes' : 'waiting'),
+            ].filter(Boolean);
+            el.textContent = parts.join(' · ');
+        }
         function getStrikeRailPayloadKey(payload) {
             if (payload == null) return '';
             return typeof payload === 'string' ? payload : JSON.stringify(payload);
@@ -33466,7 +33831,7 @@ def index():
             if (!payload) {
                 payload = _strikeRailLastPayloadByTab[activeStrikeRailTab] || null;
                 if (!payload) {
-                    renderStrikeRailEmpty((STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike rail') + ' data loads with the next refresh.');
+                    renderStrikeRailEmpty((STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike Inspect') + ' data loads with the next refresh.');
                     return;
                 }
             }
@@ -33485,6 +33850,7 @@ def index():
                     if (syncKey && currentState.syncKey !== syncKey) {
                         scheduleGexPanelSync();
                     }
+                    updateStrikeInspectContext();
                     return;
                 }
                 const fig = activeStrikeRailTab === 'gex' ? (typeof payload === 'string' ? JSON.parse(payload) : payload)
@@ -33516,11 +33882,12 @@ def index():
                             syncKey,
                         };
                         try { Plotly.Plots.resize(target); } catch (e) {}
+                        updateStrikeInspectContext();
                         syncGexPanelYAxisToTV();
                     });
             } catch (e) {
-                console.warn('strike rail render failed', activeStrikeRailTab, e);
-                renderStrikeRailEmpty('Could not render ' + (STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'strike rail') + '.');
+                console.warn('Strike Inspect render failed', activeStrikeRailTab, e);
+                renderStrikeRailEmpty('Could not render ' + (STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike Inspect') + '.');
             }
         }
 
@@ -33653,11 +34020,6 @@ def index():
         function fmtPrice(n) {
             return (n == null || !isFinite(n)) ? '—' : ('$' + n.toFixed(2));
         }
-        let _lastStats = null;
-        let _lastPriceInfo = null;
-        let _lastPromotedAlert = null;
-        let _lastNearestLevelRow = null;
-        let _lastOptionsUpdateAt = 0;
         function renderTraderStats(stats) {
             _lastStats = stats || null;
             if (!stats) {
