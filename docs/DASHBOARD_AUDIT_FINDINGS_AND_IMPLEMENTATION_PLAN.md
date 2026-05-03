@@ -601,11 +601,47 @@ Tricky parts / implementation notes:
 
 Still left / follow-up:
 
-- Re-run the blocked market-hours verification on 5014: press/focus `Today`, then confirm chart, Strike Rail, Overview spot, and selected contract context align.
-- Re-test Levels and Scenarios when `update_price` can return current-session candles; Scenarios should still render seven rows and `Current` should match Overview Net GEX within rounding.
 - Re-test manual trade-rail expiry persistence in a session with at least two available expiries.
 - Decide whether Phase 2 should begin with the chart-context strip, the Scalp overlay preset, Overview reordering, or top active alert promotion.
 - Keep Plotly CDN pinning as a separate optional cleanup unless it becomes a rendering blocker.
+
+2026-05-02 CDT / 2026-05-03 UTC verification pass on `codex/dashboard-audit-findings-plan`:
+
+- Restarted port `5014`, opened `http://127.0.0.1:5014/` in the in-app browser, and pressed `Today` before judging chart sync. The first browser view briefly showed stale chart state after early `update_price` failures; after a browser reload and a fresh `Today` focus, the chart, Strike Rail, Levels/Overview spot, and selected 720C context aligned around SPY `$720.00`.
+- `/update_price` was internally consistent during the pass: last candle close `$720.00`, `current_price` `$720.00`, trader stats spot `$720.00`, and Scenarios `Current` Net GEX matched Overview Net GEX within rounding.
+- Overview Chain Activity rendered OI, VOL, and V/OI rows with visible C/P ratios and split labels.
+- Levels rendered secondary walls, HVL, max +/- GEX, and +/-2σ expected-move levels when present.
+- Scenarios rendered seven rows; `Current` Net GEX matched the Overview Net GEX display within rounding.
+- Flow rendered a populated Flow Blotter (`58 shown`) while Flow Pulse showed the clarified same-contract pulse-history gating copy.
+- Active Trader and Order Ticket both displayed Quote Age and Preview TTL.
+- Browser console errors remained limited to the known Plotly CDN warning. The reload also emitted transient non-error `No expiry selected, skipping update` warnings while settings/expiry state initialized.
+- Manual trade-rail expiry persistence could not be fully visually re-tested because this run exposed only `2026-05-04` in both the dashboard expiry control and trade picker.
+- Phase 2 was not started; wait for explicit user confirmation before implementation.
+
+Weekend handoff note:
+
+- The market is closed for the weekend, so SPY is expected to remain at `$720.00` until the next regular session. Do not spend the next session repeatedly proving that the chart/Overview/Strike Rail/order-entry spot is still `$720.00`. Treat the 2026-05-02 CDT / 2026-05-03 UTC verification above as sufficient unless a visible regression appears, the selected ticker/expiry changes, or new market data moves the price.
+- The next session should start Phase 2 directly after a quick startup sanity check: app loads on `5014`, no new console errors beyond the known Plotly CDN warning, right rail/order rail are visible, and the current branch/worktree are confirmed.
+
+2026-05-03 Phase 2 implementation pass:
+
+- Added a chart-context strip in `workspace-toolbar-shell` with symbol, expiry scope, timeframe, stream state, options-chain age, nearest level, and promoted top alert. The strip initializes on page load and refreshes age text periodically instead of waiting for the first data tick.
+- Added a `Scalp` chart preset in the chart toolbar. It keeps VWAP, EMA9/EMA21, RVOL markers, current-session levels, and manual drawings while turning off heavier dealer/historical overlays for the fast scalp read. Existing saved preferences are not overwritten unless the user presses the preset.
+- Reordered Overview by adding a `Scalp Read` card directly after Market State, showing the nearest actionable levels plus the top active alert while keeping the full Live Alerts feed in the bottom lane.
+- Added Active Trader reprice buttons for bid/mid/ask/mark and quote-moved warnings tied to the limit and preview quote snapshots. Live placement remains blocked when the preview quote has moved or the five-minute preview TTL has expired.
+- Collapsed the Active Trader bracket template and the lower Exit Planner by default, relabeling them as planning-only exit tools rather than Schwab-sent bracket orders.
+- Added journal quick tags and lifecycle grouping by account, contract, ticker, and session date so entry/exit/preview events can be reviewed as scalp groups with hold-time badges when possible.
+- De-emphasized the empty bottom Flow Pulse panel and prevented the empty state from consuming horizontal scroll space when no actionable pulse exists.
+
+5014 Phase 2 smoke notes:
+
+- `python3 -m py_compile ezoptionsschwab.py` passed with only the existing template-string invalid-escape warning.
+- Restarted port `5014`, reloaded the in-app browser, and confirmed the chart, Strike Rail, Overview rail, Flow rail, Order Entry rail, bottom Live Alerts/Flow Pulse lane, and Journal workspace mount without a new runtime error.
+- The context strip populated with `SPY`, `05-04`, `5`, stream `Live`, options age, nearest level, and promoted top alert after the first data refresh.
+- Overview showed the `Scalp Read` card above deeper Dealer / Skew / Centroid content, with nearest levels and the promoted top alert while the full Live Alerts lane remained available below the chart.
+- Active Trader showed four reprice buttons, quote age, Preview TTL, and an `EXIT PLAN HIDDEN` bracket state. The lower Exit Planner was collapsed.
+- Flow Pulse empty state rendered de-emphasized without the previous horizontal-scroll affordance.
+- Browser console after the final reload showed only the known Plotly CDN warning. A `Failed to fetch` entry appeared during the intentional server restart and was not reproduced after reload.
 
 ## 13. Copy/Paste Prompt for Next Codex Session
 
@@ -622,20 +658,13 @@ Confirm branch/worktree with:
 - git status --short
 
 Phase 1 is implemented. Do not reimplement it unless verification finds a regression.
+The 2026-05-02 CDT / 2026-05-03 UTC weekend verification already confirmed the closed-market SPY `$720.00` state. Because the market is closed, do not spend time repeatedly confirming that chart/Overview/Strike Rail/order-entry still read `$720.00`; assume it is correct unless a visible regression appears, ticker/expiry changes, or new market data moves price.
 
 Before editing:
 1. Kill any existing process listening on 5014, then start the app cleanly on port 5014.
 2. Open the in-app browser to http://127.0.0.1:5014/.
-3. Press/focus `Today` before judging chart/spot sync.
-4. Re-run the Phase 1 verification that was blocked after-hours:
-   - chart, Strike Rail, Overview spot, and selected contract context align;
-   - Overview Chain Activity shows OI, VOL, and V/OI rows;
-   - Levels includes secondary walls, HVL, max +/- GEX, and +/-2σ EM when present;
-   - Scenarios renders seven rows and `Current` matches Overview Net GEX within rounding;
-   - Flow Blotter can be populated while Flow Pulse explains pulse-history gating;
-   - trade rail expiry does not reset during normal refresh when multiple expiries are available;
-   - quote age and preview TTL are visible in Active Trader and Order Ticket;
-   - no new browser console errors except the known Plotly CDN warning.
+3. Do only a quick startup sanity check: page loads, chart/right rail/order rail are visible, and browser console has no new errors except the known Plotly CDN warning.
+4. Press `Today` only if the chart is visibly stale or off-session. Do not re-run the full Phase 1 verification checklist before starting Phase 2.
 
 Constraints:
 - Do not change analytical formulas unless you find a clear bug and document it first.
@@ -647,7 +676,7 @@ Constraints:
 - Keep docs/DASHBOARD_AUDIT_FINDINGS_AND_IMPLEMENTATION_PLAN.md updated with implementation notes as work progresses.
 
 Goal:
-After the Phase 1 verification pass, implement Phase 2 from docs/DASHBOARD_AUDIT_FINDINGS_AND_IMPLEMENTATION_PLAN.md only if the user confirms continuing into Phase 2.
+Proceed with Phase 2 from docs/DASHBOARD_AUDIT_FINDINGS_AND_IMPLEMENTATION_PLAN.md. The user explicitly wants to continue with the phases next session.
 
 Recommended Phase 2 order:
 1. Build the chart-context strip in or near `workspace-toolbar-shell`.
