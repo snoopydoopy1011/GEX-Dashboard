@@ -11592,65 +11592,47 @@ def index():
             min-width: 24px;
             padding: 0 6px;
         }
-        .trade-active-contract {
+        .trade-active-head {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            gap: 7px;
+            grid-template-columns: auto minmax(52px, 1fr) auto;
             align-items: center;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            background: var(--bg-0);
-            padding: 6px;
+            gap: 4px;
+            margin-bottom: 5px;
             min-width: 0;
         }
-        .trade-active-contract-main {
+        .trade-active-head .trade-panel-tools {
+            gap: 3px;
             min-width: 0;
+        }
+        .trade-active-head .trade-panel-note {
+            max-width: 58px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 9px;
+            line-height: 1.15;
+        }
+        .trade-active-header-contract {
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
             color: var(--fg-0);
-            font-size: 12px;
-            font-weight: 800;
+            padding: 3px 7px;
+            font-size: 10px;
+            font-weight: 750;
+            line-height: 1.1;
+            text-align: center;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
             font-variant-numeric: tabular-nums;
         }
-        .trade-active-contract-sub {
-            margin-top: 1px;
-            color: var(--fg-2);
-            font-size: 9px;
-            line-height: 1.25;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .trade-active-mode {
-            justify-self: end;
-            border: 1px solid var(--border);
-            border-radius: 999px;
-            background: var(--bg-1);
-            color: var(--fg-1);
-            padding: 3px 7px;
-            font-size: 9px;
-            font-weight: 900;
-            letter-spacing: 0.06em;
-            line-height: 1;
-            text-transform: uppercase;
-            white-space: nowrap;
-        }
-        .trade-active-mode.ready {
-            border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
-            color: var(--accent);
-            background: color-mix(in srgb, var(--accent) 9%, var(--bg-0));
-        }
-        .trade-active-mode.armed {
-            border-color: color-mix(in srgb, var(--warn) 58%, var(--border));
-            color: var(--warn);
-            background: color-mix(in srgb, var(--warn) 10%, var(--bg-0));
-        }
         .trade-active-actions {
             display: grid;
             grid-template-columns: 1fr 1fr minmax(72px, 0.8fr);
             gap: 4px;
-            margin-top: 5px;
+            margin-top: 0;
         }
         .trade-fast-button {
             min-height: 29px;
@@ -11678,42 +11660,16 @@ def index():
             cursor: not-allowed;
             opacity: 0.48;
         }
-        .trade-reprice-row {
-            display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 4px;
-            margin-top: 4px;
-        }
-        .trade-reprice-row button {
-            min-width: 0;
-            min-height: 24px;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            background: var(--bg-0);
-            color: var(--fg-1);
-            font-size: 9px;
-            font-weight: 800;
-            text-transform: uppercase;
-            cursor: pointer;
-        }
-        .trade-reprice-row button:hover:not(:disabled) {
-            border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-            color: var(--accent);
-        }
-        .trade-reprice-row button:disabled {
-            cursor: not-allowed;
-            opacity: 0.5;
-        }
         .trade-active-setup {
             display: grid;
-            grid-template-columns: minmax(0, 1fr);
-            gap: 4px;
+            grid-template-columns: minmax(0, 1fr) minmax(82px, 0.42fr);
+            gap: 5px;
             margin-top: 5px;
         }
         .trade-active-setup label {
             display: grid;
-            grid-template-columns: 28px minmax(0, 1fr);
-            gap: 5px;
+            grid-template-columns: auto minmax(0, 1fr);
+            gap: 4px;
             align-items: center;
             min-width: 0;
             color: var(--fg-2);
@@ -11731,22 +11687,26 @@ def index():
         }
         .trade-active-qty-line {
             display: grid;
-            grid-template-columns: minmax(40px, 0.7fr) repeat(4, minmax(26px, 1fr));
-            gap: 3px;
+            grid-template-columns: minmax(34px, 0.78fr) repeat(6, minmax(22px, 24px));
+            justify-content: start;
+            gap: 2px;
             margin-top: 0;
         }
         .trade-active-qty-line input,
         .trade-active-setup select {
             width: 100%;
             min-width: 0;
-            min-height: 25px;
+            min-height: 22px;
             border: 1px solid var(--border);
-            border-radius: 6px;
+            border-radius: 4px;
             background: var(--bg-0);
             color: var(--fg-1);
-            padding: 0 6px;
-            font-size: 10px;
+            padding: 0 4px;
+            font-size: 9px;
             font-variant-numeric: tabular-nums;
+        }
+        .trade-active-qty-line input {
+            text-align: center;
         }
         .trade-active-template-plan {
             display: grid;
@@ -11857,13 +11817,14 @@ def index():
         }
         .trade-active-qty-line button {
             min-width: 0;
-            min-height: 25px;
+            width: 22px;
+            min-height: 22px;
             border: 1px solid var(--border);
-            border-radius: 6px;
+            border-radius: 4px;
             background: var(--bg-0);
             color: var(--fg-1);
             padding: 0;
-            font-size: 9px;
+            font-size: 8px;
             font-weight: 800;
             cursor: pointer;
         }
@@ -11893,6 +11854,18 @@ def index():
             border-color: color-mix(in srgb, var(--warn) 58%, var(--border));
             color: var(--warn);
             background: color-mix(in srgb, var(--warn) 9%, var(--bg-0));
+        }
+        .trade-active-head .trade-active-arm {
+            margin-top: 0;
+            padding: 2px 4px;
+            gap: 3px;
+            border-radius: 999px;
+            font-size: 8px;
+            line-height: 1;
+        }
+        .trade-active-head .trade-active-arm input {
+            width: 12px;
+            height: 12px;
         }
         .trade-active-context {
             display: grid;
@@ -11939,7 +11912,7 @@ def index():
             color: var(--put);
         }
         .trade-active-ladder {
-            margin-top: 5px;
+            margin-top: 4px;
             border: 1px solid var(--border);
             border-radius: 6px;
             overflow: hidden;
@@ -11948,7 +11921,7 @@ def index():
         .trade-active-ladder-head,
         .trade-active-ladder-row {
             display: grid;
-            grid-template-columns: minmax(30px, 0.6fr) minmax(27px, 0.52fr) minmax(42px, 0.72fr) minmax(27px, 0.52fr) minmax(30px, 0.6fr) minmax(42px, 0.7fr);
+            grid-template-columns: minmax(28px, 0.56fr) minmax(24px, 0.48fr) minmax(38px, 0.68fr) minmax(24px, 0.48fr) minmax(28px, 0.56fr) minmax(38px, 0.68fr);
             gap: 2px;
             align-items: center;
             min-width: 0;
@@ -11957,12 +11930,12 @@ def index():
         .trade-active-ladder-head {
             background: var(--bg-2);
             color: var(--fg-2);
-            font-size: 8px;
+            font-size: 7.5px;
             font-weight: 800;
-            letter-spacing: 0.04em;
+            letter-spacing: 0;
             line-height: 1.1;
             text-transform: uppercase;
-            padding: 4px 5px;
+            padding: 3px 4px;
         }
         .trade-active-ladder-row {
             width: 100%;
@@ -11970,9 +11943,9 @@ def index():
             border-top: 1px solid var(--border);
             background: transparent;
             color: var(--fg-1);
-            padding: 2px 5px;
-            font-size: 9px;
-            line-height: 1.05;
+            padding: 1px 4px;
+            font-size: 8px;
+            line-height: 1;
             text-align: right;
             cursor: pointer;
         }
@@ -12066,21 +12039,21 @@ def index():
         .trade-active-price {
             color: var(--fg-0);
             text-align: center;
-            font-size: 10px;
+            font-size: 9px;
             line-height: 1;
-            font-weight: 900;
+            font-weight: 750;
         }
         .trade-active-bid {
             color: var(--call);
-            font-weight: 800;
+            font-weight: 700;
         }
         .trade-active-ask {
             color: var(--put);
-            font-weight: 800;
+            font-weight: 700;
         }
         .trade-active-pnl {
             color: var(--fg-2);
-            font-weight: 900;
+            font-weight: 750;
             text-align: right;
             pointer-events: none;
         }
@@ -18832,31 +18805,23 @@ def index():
                         </div>
                     </section>
                     <section class="trade-panel trade-active-panel" data-trade-active-panel>
-                        <div class="trade-panel-head">
+                        <div class="trade-panel-head trade-active-head">
                             <div class="trade-panel-title">Active Trader</div>
+                            <div class="trade-active-header-contract" data-trade-fast-contract>Choose a contract</div>
                             <div class="trade-panel-tools">
+                                <label class="trade-active-arm" data-trade-fast-arm-wrap>
+                                    <span>Auto</span>
+                                    <input data-trade-fast-arm type="checkbox">
+                                </label>
                                 <div class="trade-panel-note" data-trade-active-note>Fast scalps</div>
                                 <button type="button" class="trade-active-toggle" data-trade-active-toggle title="Collapse active trader" aria-label="Collapse active trader" aria-expanded="true">⌃</button>
                             </div>
                         </div>
                         <div class="trade-active-body">
-                            <div class="trade-active-contract">
-                                <div>
-                                    <div class="trade-active-contract-main" data-trade-fast-contract>Choose a contract</div>
-                                    <div class="trade-active-contract-sub" data-trade-fast-quote>Bid / Ask unavailable</div>
-                                </div>
-                                <div class="trade-active-mode" data-trade-fast-mode>Preview</div>
-                            </div>
                             <div class="trade-active-actions">
                                 <button type="button" class="trade-fast-button buy" data-trade-fast-action="BUY_TO_OPEN">Buy Ask</button>
                                 <button type="button" class="trade-fast-button sell" data-trade-fast-action="SELL_TO_CLOSE">Sell Bid</button>
                                 <button type="button" class="trade-fast-button flatten" data-trade-fast-flatten>Flatten</button>
-                            </div>
-                            <div class="trade-reprice-row" aria-label="Fast reprice">
-                                <button type="button" data-trade-reprice="bid">Bid</button>
-                                <button type="button" data-trade-reprice="mid">Mid</button>
-                                <button type="button" data-trade-reprice="ask">Ask</button>
-                                <button type="button" data-trade-reprice="mark">Mark</button>
                             </div>
                             <div class="trade-active-setup">
                                 <label class="trade-active-qty-control">
@@ -18865,8 +18830,10 @@ def index():
                                         <input data-trade-fast-qty type="number" min="1" max="100" step="1" value="1">
                                         <button type="button" data-trade-fast-qty-preset="1">1</button>
                                         <button type="button" data-trade-fast-qty-preset="2">2</button>
+                                        <button type="button" data-trade-fast-qty-preset="3">3</button>
                                         <button type="button" data-trade-fast-qty-preset="5">5</button>
                                         <button type="button" data-trade-fast-qty-preset="10">10</button>
+                                        <button type="button" data-trade-fast-qty-preset="20">20</button>
                                     </div>
                                 </label>
                                 <label class="trade-active-template-control">
@@ -18892,10 +18859,6 @@ def index():
                                     <div class="trade-empty">Select a contract to plan exits.</div>
                                 </div>
                             </div>
-                            <label class="trade-active-arm" data-trade-fast-arm-wrap>
-                                <span>Auto-send</span>
-                                <input data-trade-fast-arm type="checkbox">
-                            </label>
                             <div class="trade-active-context">
                                 <div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div>
                                 <div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div>
@@ -29767,17 +29730,14 @@ def index():
         function buildTradeActiveTraderPanelHtml() {
             return (
                 '<section class="trade-panel trade-active-panel" data-trade-active-panel>' +
-                    '<div class="trade-panel-head"><div class="trade-panel-title">Active Trader</div><div class="trade-panel-tools"><div class="trade-panel-note" data-trade-active-note>Fast scalps</div><button type="button" class="trade-active-toggle" data-trade-active-toggle title="Collapse active trader" aria-label="Collapse active trader" aria-expanded="true">⌃</button></div></div>' +
+                    '<div class="trade-panel-head trade-active-head"><div class="trade-panel-title">Active Trader</div><div class="trade-active-header-contract" data-trade-fast-contract>Choose a contract</div><div class="trade-panel-tools"><label class="trade-active-arm" data-trade-fast-arm-wrap><span>Auto</span><input data-trade-fast-arm type="checkbox"></label><div class="trade-panel-note" data-trade-active-note>Fast scalps</div><button type="button" class="trade-active-toggle" data-trade-active-toggle title="Collapse active trader" aria-label="Collapse active trader" aria-expanded="true">⌃</button></div></div>' +
                     '<div class="trade-active-body">' +
-                        '<div class="trade-active-contract"><div><div class="trade-active-contract-main" data-trade-fast-contract>Choose a contract</div><div class="trade-active-contract-sub" data-trade-fast-quote>Bid / Ask unavailable</div></div><div class="trade-active-mode" data-trade-fast-mode>Preview</div></div>' +
                         '<div class="trade-active-actions"><button type="button" class="trade-fast-button buy" data-trade-fast-action="BUY_TO_OPEN">Buy Ask</button><button type="button" class="trade-fast-button sell" data-trade-fast-action="SELL_TO_CLOSE">Sell Bid</button><button type="button" class="trade-fast-button flatten" data-trade-fast-flatten>Flatten</button></div>' +
-                        '<div class="trade-reprice-row" aria-label="Fast reprice"><button type="button" data-trade-reprice="bid">Bid</button><button type="button" data-trade-reprice="mid">Mid</button><button type="button" data-trade-reprice="ask">Ask</button><button type="button" data-trade-reprice="mark">Mark</button></div>' +
                         '<div class="trade-active-setup">' +
-                            '<label class="trade-active-qty-control"><span class="trade-active-control-label">Qty</span><div class="trade-active-qty-line"><input data-trade-fast-qty type="number" min="1" max="100" step="1" value="1"><button type="button" data-trade-fast-qty-preset="1">1</button><button type="button" data-trade-fast-qty-preset="2">2</button><button type="button" data-trade-fast-qty-preset="5">5</button><button type="button" data-trade-fast-qty-preset="10">10</button></div></label>' +
+                            '<label class="trade-active-qty-control"><span class="trade-active-control-label">Qty</span><div class="trade-active-qty-line"><input data-trade-fast-qty type="number" min="1" max="100" step="1" value="1"><button type="button" data-trade-fast-qty-preset="1">1</button><button type="button" data-trade-fast-qty-preset="2">2</button><button type="button" data-trade-fast-qty-preset="3">3</button><button type="button" data-trade-fast-qty-preset="5">5</button><button type="button" data-trade-fast-qty-preset="10">10</button><button type="button" data-trade-fast-qty-preset="20">20</button></div></label>' +
                             '<label class="trade-active-template-control"><span class="trade-active-control-label">Tpl</span><select data-trade-fast-template></select></label>' +
                         '</div>' +
                         '<div class="trade-active-template-plan" data-trade-fast-bracket-plan><div class="trade-active-template-head"><strong data-trade-fast-bracket-title>TRG template</strong><span data-trade-fast-bracket-summary>Planning only</span><button type="button" data-trade-fast-bracket-toggle aria-expanded="false">Plan</button></div><div class="trade-active-offsets"><label>Limit +<input data-trade-fast-target-offset type="number" min="0.01" max="99" step="0.01" value="1"></label><label>Stop -<input data-trade-fast-stop-offset type="number" min="0.01" max="99" step="0.01" value="1"></label></div><div class="trade-active-bracket-rows" data-trade-fast-bracket-rows><div class="trade-empty">Select a contract to plan exits.</div></div></div>' +
-                        '<label class="trade-active-arm" data-trade-fast-arm-wrap><span>Auto-send</span><input data-trade-fast-arm type="checkbox"></label>' +
                         '<div class="trade-active-context"><div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div><div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div><div class="trade-active-stat" data-trade-fast-quote-age-wrap><span>Quote Age</span><strong data-trade-fast-quote-age>—</strong></div><div class="trade-active-stat" data-trade-fast-preview-ttl-wrap><span>Preview TTL</span><strong data-trade-fast-preview-ttl>5:00</strong></div><div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div></div>' +
                         '<div class="trade-active-ladder"><div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span><span>P/L</span></div><div data-trade-fast-ladder><div class="trade-empty">Select a contract to show the price ladder.</div></div></div>' +
                         '<div class="trade-active-message" data-trade-fast-message>Auto-send starts off. Live sends still require a successful preview.</div>' +
@@ -31819,7 +31779,7 @@ def index():
             if (!values.length) return '<div class="trade-empty">No valid quote ladder for the selected contract.</div>';
             const center = [mid, mark, last, limit, values[0]].find(v => Number.isFinite(v) && v > 0) || values[0];
             const tick = center >= 5 ? 0.05 : 0.01;
-            const visibleRows = 19;
+            const visibleRows = 25;
             const centerPrice = normalizeTradeLadderPrice(center, tick) || center;
             const rowsAbove = Math.floor((visibleRows - 1) / 2);
             const start = Math.max(tick, Math.round((centerPrice + tick * rowsAbove) * 100) / 100);
@@ -31961,7 +31921,6 @@ def index():
             const note = panel.querySelector('[data-trade-active-note]');
             const contractEl = panel.querySelector('[data-trade-fast-contract]');
             const quoteEl = panel.querySelector('[data-trade-fast-quote]');
-            const modeEl = panel.querySelector('[data-trade-fast-mode]');
             const qtyInput = panel.querySelector('[data-trade-fast-qty]');
             const template = panel.querySelector('[data-trade-fast-template]');
             const arm = panel.querySelector('[data-trade-fast-arm]');
@@ -31985,20 +31944,16 @@ def index():
                 toggle.setAttribute('aria-expanded', tradeRailState.activeTraderCollapsed ? 'false' : 'true');
             }
             if (note) note.textContent = tradeRailState.activeTraderCollapsed ? 'Collapsed' : (tradeRailState.activeTraderArmed ? 'Auto-send armed' : 'Fast scalps');
+            const quoteText = selected
+                ? 'B ' + fmtTradePrice(selected.bid) + ' / M ' + fmtTradePrice(selected.mid == null ? selected.mark : selected.mid) + ' / A ' + fmtTradePrice(selected.ask) + ' · Limit ' + (tradeRailState.limitPrice ? fmtTradePrice(tradeRailState.limitPrice) : '—')
+                : 'Bid / Ask unavailable';
             if (contractEl) {
                 const side = selected && selected.option_type === 'PUT' ? 'P' : 'C';
                 contractEl.textContent = selected ? ((selected.underlying || tradeRailState.ticker || '') + ' ' + fmtTradePrice(selected.strike) + side + ' · ' + fmtTradeDte(selected.dte)) : 'Choose a contract';
-                contractEl.title = selected && selected.contract_symbol ? selected.contract_symbol : '';
+                contractEl.title = selected && selected.contract_symbol ? (selected.contract_symbol + '\n' + quoteText) : quoteText;
             }
             if (quoteEl) {
-                quoteEl.textContent = selected
-                    ? 'B ' + fmtTradePrice(selected.bid) + ' / M ' + fmtTradePrice(selected.mid == null ? selected.mark : selected.mid) + ' / A ' + fmtTradePrice(selected.ask) + ' · Limit ' + (tradeRailState.limitPrice ? fmtTradePrice(tradeRailState.limitPrice) : '—')
-                    : 'Bid / Ask unavailable';
-            }
-            if (modeEl) {
-                modeEl.textContent = mode.text;
-                modeEl.classList.toggle('ready', mode.cls === 'ready');
-                modeEl.classList.toggle('armed', mode.cls === 'armed');
+                quoteEl.textContent = quoteText;
             }
             if (qtyInput && document.activeElement !== qtyInput && String(qtyInput.value) !== String(tradeRailState.quantity)) qtyInput.value = tradeRailState.quantity;
             if (template) {
@@ -34614,6 +34569,7 @@ def index():
                         ? 'Auto-send armed. Buy Ask, Sell Bid, or Flatten can live-send only the exact previewed order.'
                         : 'Auto-send off. Fast buttons stage the ticket only.';
                     renderTradeTicket();
+                    renderTradeActiveTrader();
                 });
             }
             const fastQty = root.querySelector('[data-trade-fast-qty]');
