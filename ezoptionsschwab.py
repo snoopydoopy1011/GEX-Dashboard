@@ -29943,8 +29943,7 @@ def index():
             try { renderContractHelper(getScopedStats()); } catch (e) {}
             renderTradeRail();
             applyTradeRailCollapse(isTradeRailCollapsed());
-            restoreTradeRailScroll(scrollTop);
-            requestAnimationFrame(() => restoreTradeRailScroll(scrollTop));
+            scheduleTradeRailScrollRestore(scrollTop);
             return rail;
         }
 
@@ -30726,8 +30725,12 @@ def index():
                     return ai - bi;
                 });
             }
-            const anchor = getReorderEndAnchor(container, mode);
-            cards.forEach(card => container.insertBefore(card, anchor));
+            const currentCards = getReorderableCards(container, mode);
+            const orderMatches = currentCards.length === cards.length && cards.every((card, idx) => currentCards[idx] === card);
+            if (!orderMatches) {
+                const anchor = getReorderEndAnchor(container, mode);
+                cards.forEach(card => container.insertBefore(card, anchor));
+            }
             syncCardOrderStyles(container, mode);
         }
         function persistCardOrder(container, mode, panelKey = 'overview') {
@@ -31115,11 +31118,25 @@ def index():
         }
         function restoreTradeRailScroll(scrollTop = tradeRailState.railScrollTop || 0) {
             const shell = getTradeRailShell();
-            if (!shell) return;
+            if (!shell) return tradeRailState.railScrollTop || 0;
             const maxTop = Math.max(0, shell.scrollHeight - shell.clientHeight);
             const nextTop = Math.max(0, Math.min(Number(scrollTop) || 0, maxTop));
             shell.scrollTop = nextTop;
             tradeRailState.railScrollTop = nextTop;
+            return nextTop;
+        }
+        function scheduleTradeRailScrollRestore(scrollTop = tradeRailState.railScrollTop || 0) {
+            const restoredTop = restoreTradeRailScroll(scrollTop);
+            requestAnimationFrame(() => {
+                const shell = getTradeRailShell();
+                if (!shell) return;
+                const currentTop = Number(shell.scrollTop) || 0;
+                if (Math.abs(currentTop - restoredTop) > 1) {
+                    rememberTradeRailScroll(shell);
+                    return;
+                }
+                restoreTradeRailScroll(scrollTop);
+            });
         }
         function wireTradeRailScrollMemory(rail = document.getElementById('trade-rail')) {
             const shell = rail ? rail.querySelector('.trade-rail-shell') : getTradeRailShell();
@@ -31134,10 +31151,9 @@ def index():
             callback();
             const restore = () => {
                 wireTradeRailScrollMemory();
-                restoreTradeRailScroll(scrollTop);
+                scheduleTradeRailScrollRestore(scrollTop);
             };
             restore();
-            requestAnimationFrame(restore);
         }
         function getSelectedTradeContract() {
             const payload = tradeRailState.payload || {};
