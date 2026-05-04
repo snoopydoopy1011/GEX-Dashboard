@@ -262,6 +262,67 @@ Exit criteria:
 - A user can launch the dashboard from the desktop wrapper and trade/read the dashboard the same way as in the browser.
 - No calculation or trading logic changed.
 
+### Phase 1 Handoff - 2026-05-04
+
+Accomplished:
+
+- Added `desktop_launcher.py` as a separate pywebview desktop launcher. It imports the existing Flask app, starts an in-process Werkzeug server bound to `127.0.0.1`, forces Flask debug and the reloader off, waits for `/` to respond, opens a native `GEX Dashboard` window, and shuts down only the wrapper-owned server when pywebview exits.
+- Added optional desktop dependency handling through `requirements-desktop.txt`, which layers `pywebview` on top of the existing browser/server requirements without changing `requirements.txt`.
+- Kept `ezoptionsschwab.py` directly runnable with `python3 ezoptionsschwab.py`.
+- Did not change analytics formulas, chart calculations, flow/alert logic, Schwab order endpoints, order JSON, preview/place/cancel gates, trading behavior, dashboard UI, or `Trading_from_dashboard.txt`.
+- Verified local browser launch on `http://127.0.0.1:5017/` and wrapper launch on `http://127.0.0.1:5018/`.
+- Verification passed: `python3 -m py_compile ezoptionsschwab.py`, `python3 -m py_compile desktop_launcher.py`, `git diff --check`, and `python3 -m unittest tests.test_session_levels tests.test_trade_preview`.
+
+Tricky parts / findings:
+
+- The first smoke port, `5014`, was already in use, so smoke testing moved to `5017` and `5018`.
+- The sandbox blocked binding a local Flask listener until the smoke command was approved outside the sandbox.
+- Local `pywebview` was not installed at first; installing `requirements-desktop.txt` installed pywebview 6.2.1 and its macOS dependencies.
+- Local smoke testing did not show a need to fall back to a managed subprocess. The in-process Werkzeug model served `/`, `/load_settings`, `/trade/journal`, `/token_health`, `/expirations/SPY`, `/update_price`, `/update`, and `/price_stream/SPY`, then stopped without leaving a listener on the wrapper smoke port after the final pywebview window closed.
+- pywebview 6.2.1 on macOS supports `private_mode=False` and `storage_path`; with those enabled, a two-run same-origin probe showed `localStorage` round-tripped during a run and persisted across wrapper restart.
+- The existing price popout pattern is limited in this Phase 1 wrapper. A probe of `window.open('', 'gex_desktop_probe_popup', ...)` returned no window in pywebview, so the current `window.open` + `window.opener` price popout should be treated as unsupported in the pywebview prototype and addressed by the Phase 2 desktop window route/bridge work. The main dashboard continued to work.
+- `ezoptionsschwab.py` still emits a pre-existing compile-time `SyntaxWarning` at line `10438` for an invalid escape sequence inside a large template string; compilation still succeeds.
+
+Suggested next-session prompt:
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard.
+
+Read AGENTS.md first, then read docs/DESKTOP_APP_WRAPPER_IMPLEMENTATION_PLAN.md.
+
+Continue from the Phase 1 Handoff dated 2026-05-04. Phase 1 added desktop_launcher.py and requirements-desktop.txt, proved the in-process Werkzeug + pywebview wrapper, documented localStorage persistence, and found that pywebview does not support the existing window.open('', ...) + window.opener price-popout pattern.
+
+Goal: start Phase 2 only, Desktop-Aware Window Seams.
+
+Constraints:
+- Wrapper/window-seam work only. Do not change analytics formulas, chart calculations, flow/alert logic, Schwab order endpoints, order JSON, preview/place/cancel safety gates, or trading behavior.
+- Keep ezoptionsschwab.py runnable directly with python3 ezoptionsschwab.py.
+- Do not redesign the UI.
+- No JS framework introduction.
+- Leave Trading_from_dashboard.txt alone unless explicitly asked.
+- Keep existing browser window.open behavior working until a desktop route/bridge is proven.
+
+Start by confirming:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Recommended Phase 2 target:
+- Add a minimal desktop window abstraction, likely openDashboardWindow(kind, params), without making core rendering depend on desktop mode.
+- Add the smallest passive desktop detection needed, such as a query param or server-injected flag from the launcher.
+- Add first-class Flask route(s) for the price chart desktop window, starting with /desktop/window/price or /desktop/window/chart/<chart_id>.
+- Move the critical price-popout state away from window.opener by passing explicit query params and/or a small server-side window-state endpoint.
+- Keep the main dashboard browser behavior unchanged.
+- Smoke test normal browser launch and wrapper launch.
+
+Verification:
+python3 -m py_compile ezoptionsschwab.py
+python3 -m py_compile desktop_launcher.py
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview if tests exist
+Smoke normal browser launch and wrapper launch.
+```
+
 ### Phase 2: Desktop-Aware Window Seams
 
 Purpose: make multi-window behavior deliberate instead of relying on browser `window.open` and `window.opener`.
