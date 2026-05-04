@@ -11662,6 +11662,35 @@ def index():
             text-align: right;
             font-variant-numeric: tabular-nums;
         }
+        .trade-scalp-target-lines {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            min-height: 22px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 0 6px;
+            font-size: 8px;
+            font-weight: 900;
+            line-height: 1;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            white-space: nowrap;
+            cursor: pointer;
+        }
+        .trade-scalp-target-lines input {
+            margin: 0;
+            width: 12px;
+            height: 12px;
+            accent-color: var(--accent);
+        }
+        .trade-scalp-target-lines.active {
+            border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+            color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 9%, var(--bg-0));
+        }
         .trade-scalp-target-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -12558,8 +12587,7 @@ def index():
         }
         .trade-helper-toggle,
         .trade-account-info-toggle,
-        .trade-position-toggle,
-        .trade-position-select {
+        .trade-position-toggle {
             min-height: 22px;
             border: 1px solid var(--border);
             border-radius: 999px;
@@ -12575,12 +12603,6 @@ def index():
         .trade-position-toggle {
             min-width: 24px;
             padding: 0 6px;
-        }
-        .trade-position-select {
-            padding: 0 8px;
-            color: var(--accent);
-            border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
-            background: color-mix(in srgb, var(--accent) 8%, var(--bg-0));
         }
         .trade-position-tools {
             display: flex;
@@ -12883,48 +12905,61 @@ def index():
         .trade-order-row {
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto;
-            gap: 8px;
-            padding-top: 7px;
+            gap: 6px;
+            padding-top: 6px;
             border-top: 1px solid var(--border);
         }
         .trade-position-row {
             align-items: center;
             grid-template-columns: minmax(0, 1fr);
+            font-size: 9px;
+            line-height: 1.15;
         }
         .trade-position-row.match {
             border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
             background: color-mix(in srgb, var(--accent) 7%, transparent);
             border-radius: 6px;
-            padding: 7px;
+            padding: 6px;
+        }
+        .trade-position-row[data-trade-position-symbol] {
+            cursor: pointer;
+        }
+        .trade-position-row[data-trade-position-symbol]:hover,
+        .trade-position-row[data-trade-position-symbol]:focus-visible {
+            border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+            background: color-mix(in srgb, var(--accent) 8%, transparent);
+            outline: none;
         }
         .trade-position-main {
             display: flex;
             min-width: 0;
             align-items: center;
             justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 8px;
+            flex-wrap: nowrap;
+            gap: 5px;
         }
         .trade-position-id {
             display: flex;
             min-width: 0;
-            flex: 1 1 108px;
+            flex: 1 1 auto;
             align-items: center;
-            gap: 7px;
+            gap: 4px;
+            overflow: hidden;
         }
         .trade-position-pill {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            min-width: 48px;
-            max-width: 74px;
-            min-height: 24px;
-            padding: 0 8px;
+            flex: 0 0 auto;
+            min-width: 36px;
+            max-width: 52px;
+            min-height: 18px;
+            padding: 0 5px;
             border: 1px solid var(--border);
             border-radius: 999px;
             background: var(--bg-0);
             color: var(--fg-0);
-            font-size: 11px;
+            font-size: 9px;
             font-weight: 800;
             line-height: 1;
             overflow: hidden;
@@ -12944,6 +12979,7 @@ def index():
         }
         .trade-position-copy {
             min-width: 0;
+            flex: 1 1 auto;
         }
         .trade-position-symbol,
         .trade-order-symbol {
@@ -12962,8 +12998,8 @@ def index():
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            font-size: 10px;
-            line-height: 1.25;
+            font-size: 9px;
+            line-height: 1.1;
         }
         .trade-position-values,
         .trade-order-values {
@@ -12972,10 +13008,11 @@ def index():
         .trade-position-values {
             display: flex;
             min-width: 0;
-            flex: 0 1 auto;
-            flex-wrap: wrap;
+            flex: 0 0 auto;
+            flex-wrap: nowrap;
             justify-content: flex-end;
-            gap: 4px;
+            gap: 3px;
+            overflow: visible;
         }
         .trade-position-collapsed [data-trade-position-list] {
             display: none;
@@ -12983,13 +13020,20 @@ def index():
         .trade-position-metric {
             display: inline-flex;
             align-items: center;
-            gap: 4px;
-            min-height: 22px;
-            padding: 0 7px;
-            border: 1px solid var(--border);
-            border-radius: 999px;
-            background: var(--bg-0);
+            flex: 0 0 auto;
+            gap: 2px;
+            min-height: 16px;
+            padding: 0 2px;
+            border: 1px solid transparent;
+            border-radius: 4px;
+            background: transparent;
+            font-size: 8.5px;
             line-height: 1;
+            white-space: nowrap;
+        }
+        .trade-position-metric.pnl {
+            padding: 0 4px;
+            border-radius: 999px;
         }
         .trade-position-metric span {
             color: var(--fg-2);
@@ -19066,6 +19110,7 @@ def index():
                         <div class="trade-scalp-target-head">
                             <div class="trade-panel-title">Scalp Targets</div>
                             <label class="trade-scalp-target-input"><span>Target / Ct</span><input data-trade-scalp-target-profit type="number" min="1" max="5000" step="25" value="100" inputmode="decimal"></label>
+                            <label class="trade-scalp-target-lines" title="Show scalp target levels on the price chart"><input data-trade-scalp-target-lines type="checkbox"><span>Lines</span></label>
                         </div>
                         <div class="trade-scalp-target-grid">
                             <div class="trade-scalp-target-cell">
@@ -19952,6 +19997,7 @@ def index():
         let tvKeyLevelLines = [];
         let tvSessionLevelLines = [];
         let tvTopOILines   = [];
+        let tvScalpTargetLines = [];
         let tvUserHLinePriceLines = new Map();
         let tvUserDrawingAxisLabelLines = new Map();
         let _lastTopOI     = null;
@@ -19969,6 +20015,7 @@ def index():
         let tvKeyLevelPrices = [];
         let tvSessionLevelPrices = [];
         let tvTopOIPrices = [];
+        let tvScalpTargetPrices = [];
         let gexScope = (() => { try { return localStorage.getItem('gexScope') || 'all'; } catch(e) { return 'all'; } })();
         const NETEX_SPARK_ANCHOR_KEY = 'netexSparkAnchor';
         let netexSparkAnchorMode = (() => {
@@ -29830,6 +29877,7 @@ def index():
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             renderKeyLevels(getScopedKeyLevels());
             renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+            syncTradeScalpTargetLines();
             tvRefreshOverlayLevelPrices();
             // Re-sync GEX side panel after candles + autoscale settle
             scheduleGexPanelSync();
@@ -30061,6 +30109,7 @@ def index():
                     '<div class="trade-scalp-target-head">' +
                         '<div class="trade-panel-title">Scalp Targets</div>' +
                         '<label class="trade-scalp-target-input"><span>Target / Ct</span><input data-trade-scalp-target-profit type="number" min="1" max="5000" step="25" value="100" inputmode="decimal"></label>' +
+                        '<label class="trade-scalp-target-lines" title="Show scalp target levels on the price chart"><input data-trade-scalp-target-lines type="checkbox"><span>Lines</span></label>' +
                     '</div>' +
                     '<div class="trade-scalp-target-grid">' +
                         '<div class="trade-scalp-target-cell"><span class="trade-scalp-target-label">B/E SPY</span><strong class="trade-scalp-target-value" data-trade-scalp-breakeven>—</strong><span class="trade-scalp-target-move" data-trade-scalp-breakeven-move>—</span></div>' +
@@ -30860,6 +30909,7 @@ def index():
         const TRADE_HELPER_COMPACT_KEY = 'gex.tradeHelperCompact';
         const TRADE_ACTIVE_TRADER_COLLAPSE_KEY = 'gex.tradeActiveTraderCollapsed';
         const TRADE_SCALP_TARGET_PROFIT_KEY = 'gex.trade.scalpTargetProfit';
+        const TRADE_SCALP_TARGET_LINES_KEY = 'gex.trade.scalpTargetLines';
         const TRADE_RAIL_DEFAULT_WIDTH = 400;
         const TRADE_PREVIEW_TTL_SECONDS = 300;
         const TRADE_BUILTIN_BRACKET_TEMPLATES = {
@@ -30906,6 +30956,7 @@ def index():
             action: 'BUY_TO_OPEN',
             quantity: 1,
             scalpTargetProfitPerContract: getTradeStoredNumber(TRADE_SCALP_TARGET_PROFIT_KEY, 100),
+            scalpTargetLinesVisible: getTradeStoredBool(TRADE_SCALP_TARGET_LINES_KEY, false),
             limitPrice: '',
             limitQuoteSignature: '',
             limitSetAt: 0,
@@ -32801,12 +32852,69 @@ def index():
                 moveEl.classList.toggle('neg', hasMove && move < -0.004);
             }
         }
+        function clearTradeScalpTargetLines(refreshOverlay = true) {
+            tvScalpTargetPrices = [];
+            if (tvCandleSeries) {
+                tvScalpTargetLines.forEach(line => {
+                    try { tvCandleSeries.removePriceLine(line); } catch (e) {}
+                });
+            }
+            tvScalpTargetLines = [];
+            if (refreshOverlay) tvRefreshOverlayLevelPrices();
+        }
+        function syncTradeScalpTargetLines(targets = null) {
+            clearTradeScalpTargetLines(false);
+            if (!tradeRailState.scalpTargetLinesVisible || !tvCandleSeries || !window.LightweightCharts) {
+                tvRefreshOverlayLevelPrices();
+                return;
+            }
+            const resolvedTargets = targets || getTradeScalpTargets(getSelectedTradeContract());
+            const targetProfit = Math.max(1, Math.min(5000, Number(resolvedTargets && resolvedTargets.targetProfit) || 100));
+            const defs = [
+                {
+                    key: 'breakeven',
+                    result: resolvedTargets && resolvedTargets.breakeven,
+                    label: 'Scalp B/E',
+                    color: resolveCssColor('var(--warn)') || '#F59E0B',
+                },
+                {
+                    key: 'profit',
+                    result: resolvedTargets && resolvedTargets.profit,
+                    label: 'Scalp +' + fmtTradeScalpTargetDollars(targetProfit),
+                    color: resolveCssColor('var(--accent)') || '#3B82F6',
+                },
+            ];
+            const seenPrices = [];
+            defs.forEach(def => {
+                const price = Number(def.result && def.result.spot);
+                if (!Number.isFinite(price)) return;
+                if (seenPrices.some(existing => Math.abs(existing - price) <= 0.01)) return;
+                try {
+                    const line = tvCandleSeries.createPriceLine({
+                        price,
+                        color: def.color,
+                        lineWidth: def.key === 'profit' ? 2 : 1,
+                        lineStyle: LightweightCharts.LineStyle.Dashed,
+                        lineVisible: true,
+                        axisLabelVisible: true,
+                        title: def.label + ' ' + fmtTradePrice(price),
+                    });
+                    tvScalpTargetLines.push(line);
+                    tvScalpTargetPrices.push(price);
+                    seenPrices.push(price);
+                } catch (e) {
+                    console.warn('createPriceLine failed for scalp target', def.key, e);
+                }
+            });
+            tvRefreshOverlayLevelPrices();
+        }
         function renderTradeScalpTargets() {
             const panel = document.querySelector('[data-trade-scalp-target-panel]');
             if (!panel) return;
             const selected = getSelectedTradeContract();
             const targets = getTradeScalpTargets(selected);
             const input = panel.querySelector('[data-trade-scalp-target-profit]');
+            const lineToggle = panel.querySelector('[data-trade-scalp-target-lines]');
             const label = panel.querySelector('[data-trade-scalp-profit-label]');
             const breakevenValue = panel.querySelector('[data-trade-scalp-breakeven]');
             const breakevenMove = panel.querySelector('[data-trade-scalp-breakeven-move]');
@@ -32816,6 +32924,11 @@ def index():
             const methodEl = panel.querySelector('[data-trade-scalp-method]');
             const targetProfit = Math.max(1, Math.min(5000, Number(targets.targetProfit) || 100));
             if (input && document.activeElement !== input) input.value = String(targetProfit);
+            if (lineToggle) {
+                lineToggle.checked = !!tradeRailState.scalpTargetLinesVisible;
+                const wrap = lineToggle.closest('.trade-scalp-target-lines');
+                if (wrap) wrap.classList.toggle('active', !!tradeRailState.scalpTargetLinesVisible);
+            }
             if (label) label.textContent = '+' + fmtTradeScalpTargetDollars(targetProfit) + '/Ct SPY';
             renderTradeScalpTargetSlot(breakevenValue, breakevenMove, targets.breakeven);
             renderTradeScalpTargetSlot(profitValue, profitMove, targets.profit);
@@ -32843,6 +32956,7 @@ def index():
                     ? 'Need an active long selected-contract position with Schwab average price.'
                     : 'Planning estimate only; Schwab order payloads are unchanged.';
             }
+            syncTradeScalpTargetLines(targets);
         }
         function renderTradeActiveTrader() {
             const panel = document.querySelector('[data-trade-active-panel]');
@@ -33533,10 +33647,10 @@ def index():
                 const matchLabel = pos.selected_contract_match ? ' · Selected' : '';
                 const sideClass = display.sideClass ? ' ' + display.sideClass : '';
                 const symbolTitle = display.symbol ? ' title="' + _escapeHtml(display.symbol) + '"' : '';
-                const selectButton = display.symbol
-                    ? '<button type="button" class="trade-position-select" data-trade-position-symbol="' + _escapeHtml(display.symbol) + '">Use</button>'
+                const symbolAttr = display.symbol
+                    ? ' data-trade-position-symbol="' + _escapeHtml(display.symbol) + '" role="button" tabindex="0" aria-label="Use ' + _escapeHtml(display.title + ' ' + display.meta) + '"'
                     : '';
-                return '<div class="trade-position-row' + matchClass + '"' + symbolTitle + '>' +
+                return '<div class="trade-position-row' + matchClass + '"' + symbolTitle + symbolAttr + '>' +
                     '<div class="trade-position-main">' +
                         '<div class="trade-position-id">' +
                             '<span class="trade-position-pill' + sideClass + '">' + _escapeHtml(display.title) + '</span>' +
@@ -33549,18 +33663,21 @@ def index():
                             '<div class="trade-position-metric"><span>Liq</span><strong>' + _escapeHtml(mv) + '</strong></div>' +
                             '<div class="trade-position-metric pnl' + openClass + '"><span>Open</span><strong>' + _escapeHtml(openText) + '</strong></div>' +
                             '<div class="trade-position-metric pnl' + dayClass + '"><span>Day</span><strong>' + _escapeHtml(day) + '</strong></div>' +
-                            selectButton +
                         '</div>' +
                     '</div>' +
                 '</div>';
             }).join('');
-            list.querySelectorAll('[data-trade-position-symbol]').forEach(btn => {
-                if (btn.__tradePositionSelectBound) return;
-                btn.__tradePositionSelectBound = true;
-                btn.addEventListener('click', event => {
+            list.querySelectorAll('.trade-position-row[data-trade-position-symbol]').forEach(row => {
+                if (row.__tradePositionSelectBound) return;
+                row.__tradePositionSelectBound = true;
+                const usePositionContract = event => {
                     event.preventDefault();
                     event.stopPropagation();
-                    selectTradeContractSymbol(btn.dataset.tradePositionSymbol || '', 'Position contract selected. Preview again.');
+                    selectTradeContractSymbol(row.dataset.tradePositionSymbol || '', 'Position contract selected. Preview again.');
+                };
+                row.addEventListener('click', usePositionContract);
+                row.addEventListener('keydown', event => {
+                    if (event.key === 'Enter' || event.key === ' ') usePositionContract(event);
                 });
             });
             renderTradeActiveTrader();
@@ -35965,6 +36082,14 @@ def index():
                 scalpTargetProfit.addEventListener('change', () => applyScalpTargetProfit(true));
                 scalpTargetProfit.addEventListener('blur', () => applyScalpTargetProfit(true));
             }
+            const scalpTargetLines = root.querySelector('[data-trade-scalp-target-lines]');
+            if (scalpTargetLines) {
+                scalpTargetLines.addEventListener('change', () => {
+                    tradeRailState.scalpTargetLinesVisible = !!scalpTargetLines.checked;
+                    try { localStorage.setItem(TRADE_SCALP_TARGET_LINES_KEY, tradeRailState.scalpTargetLinesVisible ? '1' : '0'); } catch (e) {}
+                    renderTradeScalpTargets();
+                });
+            }
             const activeToggle = root.querySelector('[data-trade-active-toggle]');
             if (activeToggle) {
                 activeToggle.addEventListener('click', () => {
@@ -38275,7 +38400,7 @@ def index():
 
         function tvRefreshOverlayLevelPrices() {
             tvAllLevelPrices = (tvHistoricalPoints || []).map(point => point.price);
-            tvAllLevelPrices.push(...tvKeyLevelPrices, ...tvSessionLevelPrices, ...tvTopOIPrices);
+            tvAllLevelPrices.push(...tvKeyLevelPrices, ...tvSessionLevelPrices, ...tvTopOIPrices, ...tvScalpTargetPrices);
             tvDrawingDefs.forEach(def => {
                 if (!def) return;
                 if (def.hidden) return;
@@ -38621,9 +38746,11 @@ def index():
                     tvKeyLevelLines = [];
                     tvSessionLevelLines = [];
                     tvTopOILines = [];
+                    tvScalpTargetLines = [];
                     tvKeyLevelPrices = [];
                     tvSessionLevelPrices = [];
                     tvTopOIPrices = [];
+                    tvScalpTargetPrices = [];
                 }
                 if (tvResizeObserver) {
                     tvResizeObserver.disconnect();
