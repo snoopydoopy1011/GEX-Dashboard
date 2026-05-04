@@ -11329,7 +11329,7 @@ def index():
             line-height: 1.35;
         }
         .trade-active-panel {
-            order: 10;
+            order: 12;
             border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
             background: color-mix(in srgb, var(--accent) 4%, var(--bg-1));
         }
@@ -11338,8 +11338,11 @@ def index():
             border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
             background: color-mix(in srgb, var(--accent) 3%, var(--bg-1));
         }
+        .trade-position-panel {
+            order: 9;
+            border-color: color-mix(in srgb, var(--accent) 20%, var(--border));
+        }
         .trade-helper-panel { order: 20; }
-        .trade-position-panel { order: 30; }
         .trade-selected-panel { order: 40; }
         .trade-ticket-panel { order: 50; }
         .trade-submit-panel { order: 60; }
@@ -11349,6 +11352,92 @@ def index():
         .trade-journal-panel { order: 100; }
         .trade-active-panel.collapsed .trade-active-body {
             display: none;
+        }
+        .trade-panel.card-collapsed > :not(.trade-panel-head):not(.trade-scalp-target-head) {
+            display: none !important;
+        }
+        .card-collapse-toggle {
+            flex: 0 0 auto;
+            min-width: 24px;
+            min-height: 22px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-0);
+            color: var(--fg-1);
+            padding: 0 6px;
+            font-size: 10px;
+            font-weight: 900;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .card-collapse-toggle:hover {
+            border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+            color: var(--fg-0);
+        }
+        .card-collapse-toggle[aria-expanded="false"] {
+            color: var(--fg-2);
+        }
+        .card-drag-handle {
+            flex: 0 0 auto;
+            min-width: 24px;
+            min-height: 22px;
+            border: 1px solid transparent;
+            border-radius: 999px;
+            background: transparent;
+            color: var(--fg-2);
+            padding: 0 6px;
+            font-size: 12px;
+            font-weight: 900;
+            line-height: 1;
+            cursor: grab;
+            touch-action: none;
+        }
+        .card-drag-handle:hover,
+        .card-drag-handle[aria-grabbed="true"] {
+            border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+            color: var(--fg-0);
+            background: color-mix(in srgb, var(--accent) 8%, transparent);
+        }
+        .card-drag-handle[aria-grabbed="true"] {
+            cursor: grabbing;
+        }
+        body.rail-card-reorder-active,
+        body.rail-card-reorder-active * {
+            cursor: grabbing !important;
+            user-select: none;
+        }
+        .rail-card.reorder-dragging,
+        .trade-panel.reorder-dragging {
+            opacity: 0.72;
+            border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+            box-shadow: 0 12px 24px color-mix(in srgb, var(--bg-0) 72%, transparent);
+        }
+        .trade-panel-head > .card-collapse-toggle,
+        .trade-scalp-target-head > .card-collapse-toggle,
+        .rail-card-header-row > .card-collapse-toggle,
+        .rail-flow-heading > .card-collapse-toggle,
+        .rail-flow-controls > .card-collapse-toggle {
+            margin-left: auto;
+        }
+        .trade-panel-head > .card-drag-handle,
+        .trade-scalp-target-head > .card-drag-handle,
+        .rail-card-header-row > .card-drag-handle,
+        .rail-flow-heading > .card-drag-handle,
+        .rail-flow-controls > .card-drag-handle {
+            margin-left: auto;
+        }
+        .trade-panel-head > .card-drag-handle + .card-collapse-toggle,
+        .trade-scalp-target-head > .card-drag-handle + .card-collapse-toggle,
+        .rail-card-header-row > .card-drag-handle + .card-collapse-toggle,
+        .rail-flow-heading > .card-drag-handle + .card-collapse-toggle,
+        .rail-flow-controls > .card-drag-handle + .card-collapse-toggle {
+            margin-left: 0;
+        }
+        .trade-panel-tools .card-collapse-toggle,
+        .trade-position-tools .card-collapse-toggle,
+        .trade-order-tools .card-collapse-toggle,
+        .trade-journal-panel-actions .card-collapse-toggle {
+            margin-left: 0;
         }
         .trade-scalp-target-head {
             display: flex;
@@ -14000,6 +14089,10 @@ def index():
             padding: 18px 10px;
             text-align: center;
         }
+        .rail-flow-summary-card.card-collapsed > :not(.rail-flow-heading),
+        .rail-flow-blotter.card-collapsed > :not(.rail-flow-controls) {
+            display: none !important;
+        }
 
         /* Dealer Hedge Impact block (lives above the GEX chart inside the GEX rail panel) */
         .dealer-impact {
@@ -14162,6 +14255,12 @@ def index():
         .rail-card:last-child { margin-bottom: 6px; }
         .rail-card.compact-overview {
             padding: 10px 12px;
+        }
+        .rail-card.card-collapsed > :not(.rail-card-header-row) {
+            display: none !important;
+        }
+        .rail-panel-card {
+            margin: 8px;
         }
         .scalp-action-card {
             border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
@@ -18602,16 +18701,28 @@ def index():
                     </div>
                 </div>
                 <div class="right-rail-panel" data-rail-panel="levels">
-                    <div class="rail-levels-table" id="right-rail-levels">
-                        <div class="lvl-empty">Key levels load with stream data.</div>
+                    <div class="rail-card rail-panel-card" id="rail-card-levels">
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Levels</div>
+                            <div class="rail-card-note">Key map</div>
+                        </div>
+                        <div class="rail-levels-table" id="right-rail-levels">
+                            <div class="lvl-empty">Key levels load with stream data.</div>
+                        </div>
                     </div>
                 </div>
                 <div class="right-rail-panel" data-rail-panel="scenarios">
-                    <div class="scenario-table-wrap">
-                        <table class="scenario-table" id="scenario-table">
-                            <thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>
-                            <tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>
-                        </table>
+                    <div class="rail-card rail-panel-card" id="rail-card-scenarios">
+                        <div class="rail-card-header-row">
+                            <div class="rail-card-header">Scenarios</div>
+                            <div class="rail-card-note">Gamma map</div>
+                        </div>
+                        <div class="scenario-table-wrap">
+                            <table class="scenario-table" id="scenario-table">
+                                <thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>
+                                <tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
                 <div class="right-rail-panel" data-rail-panel="flow">
@@ -18653,6 +18764,18 @@ def index():
                         <div class="trade-scalp-target-foot">
                             <span data-trade-scalp-basis>Basis —</span>
                             <span class="trade-scalp-target-method unavailable" data-trade-scalp-method>Unavailable</span>
+                        </div>
+                    </section>
+                    <section class="trade-panel trade-position-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Active Positions</div>
+                            <div class="trade-position-tools">
+                                <div class="trade-panel-note" data-trade-position-note>No account</div>
+                                <button type="button" class="trade-position-toggle" data-trade-position-toggle title="Collapse positions" aria-label="Collapse positions" aria-expanded="true">⌃</button>
+                            </div>
+                        </div>
+                        <div data-trade-position-list>
+                            <div class="trade-empty">Select an account to show relevant positions.</div>
                         </div>
                     </section>
                     <section class="trade-panel trade-active-panel" data-trade-active-panel>
@@ -18782,18 +18905,6 @@ def index():
                             <button type="button" class="trade-quick-contract-button put" data-trade-quick-type="PUT" data-trade-quick-offset="2"><span>+2 OTM Put</span><strong>—</strong></button>
                         </div>
                         <div class="trade-warning-list" data-trade-quick-contract-message></div>
-                    </section>
-                    <section class="trade-panel trade-position-panel">
-                        <div class="trade-panel-head">
-                            <div class="trade-panel-title">Position</div>
-                            <div class="trade-position-tools">
-                                <div class="trade-panel-note" data-trade-position-note>No account</div>
-                                <button type="button" class="trade-position-toggle" data-trade-position-toggle title="Collapse positions" aria-label="Collapse positions" aria-expanded="true">⌃</button>
-                            </div>
-                        </div>
-                        <div data-trade-position-list>
-                            <div class="trade-empty">Select an account to show relevant positions.</div>
-                        </div>
                     </section>
                     <section class="trade-panel trade-picker-panel">
                         <div class="trade-panel-head">
@@ -18937,6 +19048,10 @@ def index():
                         </div>
                     </section>
                     <section class="trade-panel trade-submit-panel">
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Preview / Place</div>
+                            <div class="trade-panel-note">Guarded live send</div>
+                        </div>
                         <button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>
                         <button type="button" class="trade-place-button" data-trade-place disabled>Place Live Order</button>
                         <div class="trade-preview-response" data-trade-preview-response>Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.</div>
@@ -29359,6 +29474,15 @@ def index():
             );
         }
 
+        function buildTradePositionPanelHtml() {
+            return (
+                '<section class="trade-panel trade-position-panel">' +
+                    '<div class="trade-panel-head"><div class="trade-panel-title">Active Positions</div><div class="trade-position-tools"><div class="trade-panel-note" data-trade-position-note>No account</div><button type="button" class="trade-position-toggle" data-trade-position-toggle title="Collapse positions" aria-label="Collapse positions" aria-expanded="true">⌃</button></div></div>' +
+                    '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
+                '</section>'
+            );
+        }
+
         function buildTradeActiveTraderPanelHtml() {
             return (
                 '<section class="trade-panel trade-active-panel" data-trade-active-panel>' +
@@ -29413,12 +29537,9 @@ def index():
                 '<div class="trade-rail-shell">' +
                     '<div class="trade-account-context" data-trade-account-context><span data-trade-account-status>Read only</span><span data-trade-account-warnings></span></div>' +
                     buildTradeScalpTargetsPanelHtml() +
+                    buildTradePositionPanelHtml() +
                     buildTradeActiveTraderPanelHtml() +
                     buildTradeHelperPanelHtml() +
-                    '<section class="trade-panel trade-position-panel">' +
-                        '<div class="trade-panel-head"><div class="trade-panel-title">Position</div><div class="trade-position-tools"><div class="trade-panel-note" data-trade-position-note>No account</div><button type="button" class="trade-position-toggle" data-trade-position-toggle title="Collapse positions" aria-label="Collapse positions" aria-expanded="true">⌃</button></div></div>' +
-                        '<div data-trade-position-list><div class="trade-empty">Select an account to show relevant positions.</div></div>' +
-                    '</section>' +
                     '<section class="trade-panel trade-picker-panel">' +
                         '<div class="trade-panel-head"><div class="trade-panel-title">Contract Picker</div><div class="trade-panel-note" data-trade-chain-meta>Cached chain</div></div>' +
                         '<div class="trade-segment" aria-label="Option type">' +
@@ -29491,6 +29612,7 @@ def index():
                         '</div>' +
                     '</section>' +
                     '<section class="trade-panel trade-submit-panel">' +
+                        '<div class="trade-panel-head"><div class="trade-panel-title">Preview / Place</div><div class="trade-panel-note">Guarded live send</div></div>' +
                         '<button type="button" class="trade-preview-button" data-trade-preview>Preview Order</button>' +
                         '<button type="button" class="trade-place-button" data-trade-place disabled>Place Live Order</button>' +
                         '<div class="trade-preview-response" data-trade-preview-response>Preview required before live placement. Live placement also requires ENABLE_LIVE_TRADING=1 and final confirmation.</div>' +
@@ -29573,6 +29695,8 @@ def index():
                 restoreTradeBracketDefault();
             }
             wireTradeRailPickerControls(rail);
+            ensureRailCardCollapseControls(rail);
+            ensureRailCardCollapseControls(document.getElementById('right-rail-panels') || document);
             try { renderContractHelper(getScopedStats()); } catch (e) {}
             renderTradeRail();
             applyTradeRailCollapse(isTradeRailCollapsed());
@@ -29746,16 +29870,22 @@ def index():
                 railPanels.innerHTML =
                     buildAlertsPanelHtml() +
                     '<div class="right-rail-panel" data-rail-panel="levels">' +
-                        '<div class="rail-levels-table" id="right-rail-levels">' +
-                            '<div class="lvl-empty">Key levels load with stream data.</div>' +
+                        '<div class="rail-card rail-panel-card" id="rail-card-levels">' +
+                            '<div class="rail-card-header-row"><div class="rail-card-header">Levels</div><div class="rail-card-note">Key map</div></div>' +
+                            '<div class="rail-levels-table" id="right-rail-levels">' +
+                                '<div class="lvl-empty">Key levels load with stream data.</div>' +
+                            '</div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="right-rail-panel" data-rail-panel="scenarios">' +
-                        '<div class="scenario-table-wrap">' +
-                            '<table class="scenario-table" id="scenario-table">' +
-                                '<thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>' +
-                                '<tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>' +
-                            '</table>' +
+                        '<div class="rail-card rail-panel-card" id="rail-card-scenarios">' +
+                            '<div class="rail-card-header-row"><div class="rail-card-header">Scenarios</div><div class="rail-card-note">Gamma map</div></div>' +
+                            '<div class="scenario-table-wrap">' +
+                                '<table class="scenario-table" id="scenario-table">' +
+                                    '<thead><tr><th>Scenario</th><th class="num">Net GEX</th><th>Regime</th></tr></thead>' +
+                                    '<tbody><tr><td colspan="3" class="scn-empty">Scenarios load with stream data.</td></tr></tbody>' +
+                                '</table>' +
+                            '</div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="right-rail-panel" data-rail-panel="flow">' +
@@ -30224,6 +30354,324 @@ def index():
             } catch (e) {}
             return fallback;
         }
+        const CARD_ORDER_STATE_KEY = 'gex.railCardOrder.v1';
+        let railCardOrderState = {};
+        try {
+            const savedOrderState = JSON.parse(localStorage.getItem(CARD_ORDER_STATE_KEY) || '{}');
+            railCardOrderState = savedOrderState && typeof savedOrderState === 'object' ? savedOrderState : {};
+        } catch (e) {
+            railCardOrderState = {};
+        }
+        const CARD_COLLAPSE_STATE_KEY = 'gex.railCardCollapse.v1';
+        let railCardCollapseState = {};
+        try {
+            const savedCollapseState = JSON.parse(localStorage.getItem(CARD_COLLAPSE_STATE_KEY) || '{}');
+            railCardCollapseState = savedCollapseState && typeof savedCollapseState === 'object' ? savedCollapseState : {};
+        } catch (e) {
+            railCardCollapseState = {};
+        }
+        const TRADE_CARD_COLLAPSE_SPECS = [
+            { cls: 'trade-scalp-target-panel', key: 'trade:scalp-targets' },
+            { cls: 'trade-helper-panel', key: 'trade:contract-helper' },
+            { cls: 'trade-picker-panel', key: 'trade:contract-picker' },
+            { cls: 'trade-selected-panel', key: 'trade:selected-contract' },
+            { cls: 'trade-ticket-panel', key: 'trade:order-ticket' },
+            { cls: 'trade-submit-panel', key: 'trade:preview-place' },
+            { cls: 'trade-journal-panel', key: 'trade:journal' },
+        ];
+        const TRADE_CARD_REORDER_SPECS = [
+            { cls: 'trade-scalp-target-panel', key: 'trade:scalp-targets' },
+            { cls: 'trade-position-panel', key: 'trade:active-positions' },
+            { cls: 'trade-active-panel', key: 'trade:active-trader' },
+            { cls: 'trade-helper-panel', key: 'trade:contract-helper' },
+            { cls: 'trade-selected-panel', key: 'trade:selected-contract' },
+            { cls: 'trade-ticket-panel', key: 'trade:order-ticket' },
+            { cls: 'trade-submit-panel', key: 'trade:preview-place' },
+            { cls: 'trade-picker-panel', key: 'trade:contract-picker' },
+            { cls: 'trade-orders-panel', key: 'trade:orders' },
+            { cls: 'trade-bracket-panel', key: 'trade:exit-planner' },
+            { cls: 'trade-journal-panel', key: 'trade:journal' },
+        ];
+        let activeCardReorder = null;
+        function persistRailCardOrderState() {
+            try { localStorage.setItem(CARD_ORDER_STATE_KEY, JSON.stringify(railCardOrderState || {})); } catch (e) {}
+        }
+        function collectCardControlTargets(root, selector) {
+            const base = root || document;
+            const out = [];
+            if (base.matches && base.matches(selector)) out.push(base);
+            if (base.querySelectorAll) {
+                base.querySelectorAll(selector).forEach(el => out.push(el));
+            }
+            return out;
+        }
+        function getTradePanelReorderSpec(panel) {
+            return TRADE_CARD_REORDER_SPECS.find(spec => panel && panel.classList.contains(spec.cls)) || null;
+        }
+        function getCardReorderKey(card, mode) {
+            if (!card) return '';
+            if (mode === 'trade') {
+                const spec = getTradePanelReorderSpec(card);
+                return spec ? spec.key : '';
+            }
+            return card.id || '';
+        }
+        function getReorderableCards(container, mode) {
+            if (!container) return [];
+            return Array.from(container.children).filter(card => {
+                if (mode === 'trade') return card.classList.contains('trade-panel') && !!getTradePanelReorderSpec(card);
+                return card.classList.contains('rail-card') && !!card.id;
+            });
+        }
+        function getCardOrderBucket(mode, panelKey = 'overview') {
+            if (!railCardOrderState || typeof railCardOrderState !== 'object') railCardOrderState = {};
+            if (mode === 'trade') {
+                if (!Array.isArray(railCardOrderState.trade)) railCardOrderState.trade = [];
+                return railCardOrderState.trade;
+            }
+            if (!railCardOrderState.right || typeof railCardOrderState.right !== 'object') railCardOrderState.right = {};
+            if (!Array.isArray(railCardOrderState.right[panelKey])) railCardOrderState.right[panelKey] = [];
+            return railCardOrderState.right[panelKey];
+        }
+        function setCardOrderBucket(mode, panelKey, order) {
+            if (!railCardOrderState || typeof railCardOrderState !== 'object') railCardOrderState = {};
+            if (mode === 'trade') {
+                railCardOrderState.trade = order;
+            } else {
+                if (!railCardOrderState.right || typeof railCardOrderState.right !== 'object') railCardOrderState.right = {};
+                railCardOrderState.right[panelKey || 'overview'] = order;
+            }
+            persistRailCardOrderState();
+        }
+        function getCardDefaultOrder(card, fallback) {
+            const n = Number.parseFloat(getComputedStyle(card).order);
+            return Number.isFinite(n) ? n : fallback;
+        }
+        function sortCardsByVisualOrder(container, mode) {
+            const children = Array.from(container.children);
+            return getReorderableCards(container, mode).sort((a, b) => {
+                const ao = getCardDefaultOrder(a, children.indexOf(a));
+                const bo = getCardDefaultOrder(b, children.indexOf(b));
+                if (ao !== bo) return ao - bo;
+                return children.indexOf(a) - children.indexOf(b);
+            });
+        }
+        function getReorderEndAnchor(container, mode) {
+            if (!container || mode !== 'trade') return null;
+            return Array.from(container.children).find(child => child.tagName === 'DIALOG') || null;
+        }
+        function syncCardOrderStyles(container, mode) {
+            getReorderableCards(container, mode).forEach((card, idx) => {
+                card.style.order = String((idx + 1) * 10);
+            });
+        }
+        function applyStoredCardOrder(container, mode, panelKey = 'overview') {
+            if (!container || activeCardReorder) return;
+            let cards = sortCardsByVisualOrder(container, mode);
+            const saved = getCardOrderBucket(mode, panelKey);
+            if (saved && saved.length) {
+                const savedIndex = new Map(saved.map((key, idx) => [key, idx]));
+                const fallbackIndex = new Map(cards.map((card, idx) => [getCardReorderKey(card, mode), idx]));
+                cards = cards.slice().sort((a, b) => {
+                    const ak = getCardReorderKey(a, mode);
+                    const bk = getCardReorderKey(b, mode);
+                    const ai = savedIndex.has(ak) ? savedIndex.get(ak) : Number.MAX_SAFE_INTEGER + (fallbackIndex.get(ak) || 0);
+                    const bi = savedIndex.has(bk) ? savedIndex.get(bk) : Number.MAX_SAFE_INTEGER + (fallbackIndex.get(bk) || 0);
+                    return ai - bi;
+                });
+            }
+            const anchor = getReorderEndAnchor(container, mode);
+            cards.forEach(card => container.insertBefore(card, anchor));
+            syncCardOrderStyles(container, mode);
+        }
+        function persistCardOrder(container, mode, panelKey = 'overview') {
+            const order = getReorderableCards(container, mode)
+                .map(card => getCardReorderKey(card, mode))
+                .filter(Boolean);
+            setCardOrderBucket(mode, panelKey, order);
+        }
+        function moveCardForPointer(state, clientY) {
+            const { container, card, mode } = state || {};
+            if (!container || !card) return;
+            const siblings = getReorderableCards(container, mode).filter(item => item !== card);
+            let placed = false;
+            for (const sibling of siblings) {
+                const rect = sibling.getBoundingClientRect();
+                if (clientY < rect.top + rect.height / 2) {
+                    container.insertBefore(card, sibling);
+                    placed = true;
+                    break;
+                }
+            }
+            if (!placed) {
+                container.insertBefore(card, getReorderEndAnchor(container, mode));
+            }
+            syncCardOrderStyles(container, mode);
+        }
+        function finishCardReorder(event) {
+            const state = activeCardReorder;
+            if (!state) return;
+            document.removeEventListener('pointermove', onCardReorderMove);
+            document.removeEventListener('pointerup', finishCardReorder);
+            document.removeEventListener('pointercancel', finishCardReorder);
+            document.body.classList.remove('rail-card-reorder-active');
+            state.card.classList.remove('reorder-dragging');
+            state.handle.setAttribute('aria-grabbed', 'false');
+            try { state.handle.releasePointerCapture(event.pointerId); } catch (e) {}
+            persistCardOrder(state.container, state.mode, state.panelKey);
+            activeCardReorder = null;
+        }
+        function onCardReorderMove(event) {
+            if (!activeCardReorder) return;
+            event.preventDefault();
+            moveCardForPointer(activeCardReorder, event.clientY);
+        }
+        function startCardReorder(event, card, container, mode, panelKey, handle) {
+            if (!card || !container || !handle || (event.button != null && event.button !== 0)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            applyStoredCardOrder(container, mode, panelKey);
+            activeCardReorder = { card, container, mode, panelKey, handle };
+            document.body.classList.add('rail-card-reorder-active');
+            card.classList.add('reorder-dragging');
+            handle.setAttribute('aria-grabbed', 'true');
+            try { handle.setPointerCapture(event.pointerId); } catch (e) {}
+            document.addEventListener('pointermove', onCardReorderMove);
+            document.addEventListener('pointerup', finishCardReorder);
+            document.addEventListener('pointercancel', finishCardReorder);
+        }
+        function ensureCardReorderControl(card, mode, panelKey, header, container) {
+            if (!card || !header || !container) return;
+            const key = getCardReorderKey(card, mode);
+            if (!key) return;
+            const label = getCardCollapseLabel(card, header);
+            let handle = header.querySelector('[data-card-reorder-handle]');
+            if (!handle) {
+                handle = document.createElement('button');
+                handle.type = 'button';
+                handle.className = 'card-drag-handle';
+                handle.setAttribute('data-card-reorder-handle', '');
+                handle.textContent = '↕';
+                const tools = header.querySelector(':scope > .trade-panel-tools, :scope > .trade-position-tools, :scope > .trade-order-tools, :scope > .trade-journal-panel-actions');
+                const collapse = (tools || header).querySelector('[data-card-collapse-toggle]');
+                (tools || header).insertBefore(handle, collapse || null);
+            }
+            handle.dataset.cardReorderKey = key;
+            handle.title = 'Drag to reorder ' + label;
+            handle.setAttribute('aria-label', handle.title);
+            handle.setAttribute('aria-grabbed', 'false');
+            if (!handle.__cardReorderWired) {
+                handle.__cardReorderWired = true;
+                handle.addEventListener('pointerdown', event => startCardReorder(event, card, container, mode, panelKey, handle));
+                handle.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+            }
+        }
+        function ensureRailCardReorderControls(root = document) {
+            const tradeShells = collectCardControlTargets(root, '.trade-rail-shell');
+            tradeShells.forEach(shell => {
+                applyStoredCardOrder(shell, 'trade', 'trade');
+                const cards = getReorderableCards(shell, 'trade');
+                if (cards.length < 2) return;
+                cards.forEach(panel => {
+                    const header = panel.querySelector(':scope > .trade-panel-head, :scope > .trade-scalp-target-head');
+                    ensureCardReorderControl(panel, 'trade', 'trade', header, shell);
+                });
+            });
+            const panels = collectCardControlTargets(root, '.right-rail-panel');
+            panels.forEach(panel => {
+                const panelKey = panel.dataset.railPanel || 'overview';
+                applyStoredCardOrder(panel, 'right', panelKey);
+                const cards = getReorderableCards(panel, 'right');
+                if (cards.length < 2) return;
+                cards.forEach(card => {
+                    const header = card.querySelector(':scope > .rail-card-header-row');
+                    ensureCardReorderControl(card, 'right', panelKey, header, panel);
+                });
+            });
+        }
+        function isRailCardCollapsed(key) {
+            return !!(key && railCardCollapseState && railCardCollapseState[key]);
+        }
+        function persistRailCardCollapseState() {
+            try { localStorage.setItem(CARD_COLLAPSE_STATE_KEY, JSON.stringify(railCardCollapseState || {})); } catch (e) {}
+        }
+        function setRailCardCollapsed(key, collapsed) {
+            if (!key) return;
+            if (!railCardCollapseState || typeof railCardCollapseState !== 'object') railCardCollapseState = {};
+            if (collapsed) railCardCollapseState[key] = true;
+            else delete railCardCollapseState[key];
+            persistRailCardCollapseState();
+        }
+        function getTradePanelCollapseSpec(panel) {
+            return TRADE_CARD_COLLAPSE_SPECS.find(spec => panel && panel.classList.contains(spec.cls)) || null;
+        }
+        function getCardCollapseLabel(card, header) {
+            const labelEl = header && header.querySelector('.trade-panel-title, .rail-card-header, .rail-flow-title');
+            const label = labelEl ? String(labelEl.textContent || '').trim() : '';
+            return label || (card && card.id ? card.id.replace(/^rail-card-/, '').replace(/-/g, ' ') : 'card');
+        }
+        function syncCardCollapseButton(card, button, key, label) {
+            const collapsed = isRailCardCollapsed(key);
+            if (card) card.classList.toggle('card-collapsed', collapsed);
+            if (!button) return;
+            button.textContent = collapsed ? '⌄' : '⌃';
+            button.title = (collapsed ? 'Show ' : 'Hide ') + label;
+            button.setAttribute('aria-label', button.title);
+            button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        }
+        function ensureCardCollapseControl(card, key, header) {
+            if (!card || !key || !header) return;
+            const label = getCardCollapseLabel(card, header);
+            let button = header.querySelector('[data-card-collapse-toggle]');
+            if (!button) {
+                button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'card-collapse-toggle';
+                button.setAttribute('data-card-collapse-toggle', '');
+                const tools = header.querySelector(':scope > .trade-panel-tools, :scope > .trade-position-tools, :scope > .trade-order-tools, :scope > .trade-journal-panel-actions');
+                (tools || header).appendChild(button);
+            }
+            button.dataset.cardCollapseKey = key;
+            if (!button.__cardCollapseWired) {
+                button.__cardCollapseWired = true;
+                button.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const collapseKey = button.dataset.cardCollapseKey || '';
+                    setRailCardCollapsed(collapseKey, !isRailCardCollapsed(collapseKey));
+                    ensureRailCardCollapseControls();
+                });
+            }
+            syncCardCollapseButton(card, button, key, label);
+        }
+        function ensureRailCardCollapseControls(root = document) {
+            if (!root || !root.querySelectorAll) return;
+            ensureRailCardReorderControls(root);
+            collectCardControlTargets(root, '.trade-panel').forEach(panel => {
+                const spec = getTradePanelCollapseSpec(panel);
+                if (!spec) return;
+                const header = panel.querySelector(':scope > .trade-panel-head, :scope > .trade-scalp-target-head');
+                ensureCardCollapseControl(panel, spec.key, header);
+            });
+            collectCardControlTargets(root, '.rail-card[id]').forEach(card => {
+                if (!card.closest('.right-rail-panel')) return;
+                const header = card.querySelector(':scope > .rail-card-header-row');
+                ensureCardCollapseControl(card, 'right:' + card.id, header);
+            });
+            collectCardControlTargets(root, '.rail-flow-summary-card').forEach((card, idx) => {
+                if (!card.closest('.right-rail-panel')) return;
+                const header = card.querySelector(':scope > .rail-flow-heading');
+                ensureCardCollapseControl(card, 'right:flow-summary-' + idx, header);
+            });
+            collectCardControlTargets(root, '.rail-flow-blotter').forEach((card, idx) => {
+                if (!card.closest('.right-rail-panel')) return;
+                const header = card.querySelector(':scope > .rail-flow-controls');
+                ensureCardCollapseControl(card, 'right:flow-blotter-' + idx, header);
+            });
+        }
 
         function fmtTradePrice(value) {
             const n = Number(value);
@@ -30413,14 +30861,14 @@ def index():
         function preserveTradeRailScroll(callback) {
             const shell = document.querySelector('#trade-rail .trade-rail-shell');
             const scrollTop = shell ? shell.scrollTop : 0;
-            const active = document.activeElement;
-            const preserve = shell && scrollTop > 0 && (!active || !shell.contains(active) || active === shell);
             callback();
-            if (preserve) {
-                requestAnimationFrame(() => {
-                    if (shell) shell.scrollTop = scrollTop;
-                });
-            }
+            if (!shell) return;
+            const restore = () => {
+                const currentShell = document.querySelector('#trade-rail .trade-rail-shell');
+                if (currentShell) currentShell.scrollTop = scrollTop;
+            };
+            restore();
+            requestAnimationFrame(restore);
         }
         function getSelectedTradeContract() {
             const payload = tradeRailState.payload || {};
@@ -34308,6 +34756,7 @@ def index():
             if (activeRailTab === 'flow') {
                 initRailFlowBlotter(document.getElementById('right-rail-flow'));
             }
+            ensureRailCardCollapseControls(document.getElementById('right-rail-panels') || document);
         }
 
         function wireRightRailTabs() {
@@ -35956,6 +36405,7 @@ def index():
                         '<div class="rail-flow-meta" data-rail-flow-summary>Flow rows load with the options chain snapshot.</div>' +
                     '</div>' +
                     '<div class="rail-flow-empty">Flow blotter data loads with the next refresh.</div>';
+                ensureRailCardCollapseControls(host);
                 return;
             }
             const source = document.createElement('div');
@@ -36021,6 +36471,7 @@ def index():
                     '<div class="rail-flow-list" data-rail-flow-list>' + rowsHtml + '</div>' +
                 '</div>';
             initRailFlowBlotter(host);
+            ensureRailCardCollapseControls(host);
         }
 
         function initRailFlowBlotter(container) {
@@ -38368,6 +38819,7 @@ def index():
 
         wireRightRailTabs();
         applyRightRailTab();
+        ensureRailCardCollapseControls();
         ensureFlowEventLane();
         renderChartContextStrip();
         setInterval(renderChartContextStrip, 15000);
