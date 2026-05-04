@@ -31950,7 +31950,7 @@ def index():
             if (contractEl) {
                 const side = selected && selected.option_type === 'PUT' ? 'P' : 'C';
                 contractEl.textContent = selected ? ((selected.underlying || tradeRailState.ticker || '') + ' ' + fmtTradePrice(selected.strike) + side + ' · ' + fmtTradeDte(selected.dte)) : 'Choose a contract';
-                contractEl.title = selected && selected.contract_symbol ? (selected.contract_symbol + '\n' + quoteText) : quoteText;
+                contractEl.title = selected && selected.contract_symbol ? (selected.contract_symbol + ' | ' + quoteText) : quoteText;
             }
             if (quoteEl) {
                 quoteEl.textContent = quoteText;
