@@ -481,12 +481,25 @@ class TradePlaceOrderEndpointTest(unittest.TestCase):
         self.assertTrue(data['placed'])
         self.assertEqual(data['schwab_status'], 201)
         self.assertIn('/orders/987654321', data['location'])
+        self.assertEqual(data['order_id'], '987654321')
         self.assertEqual(ezoptionsschwab.client.place_calls, [('HASH123', preview['order'])])
         events = self.app.get('/trade/journal').get_json()['events']
         self.assertEqual(events[0]['event_type'], 'placed_order')
         self.assertEqual(events[0]['location'], 'https://api.schwabapi.com/trader/v1/accounts/HASH123/orders/987654321')
+        self.assertEqual(events[0]['details']['order_id'], '987654321')
         self.assertEqual(data['journal_event_id'], events[0]['id'])
         self.assertEqual(data['media_storage_path'], self.temp_media_dir.name)
+
+    def test_trade_order_id_from_location_parses_common_locations(self):
+        cases = {
+            'https://api.schwabapi.com/trader/v1/accounts/HASH123/orders/987654321': '987654321',
+            '/trader/v1/accounts/HASH123/orders/987654321?foo=bar': '987654321',
+            '987654321': '987654321',
+            '/trader/v1/accounts/HASH123/orders/': None,
+            '': None,
+        }
+        for location, expected in cases.items():
+            self.assertEqual(ezoptionsschwab._trade_order_id_from_location(location), expected)
 
     def test_screenshot_attachment_is_local_and_linked_to_successful_placement(self):
         preview = self.post_preview().get_json()
@@ -635,6 +648,30 @@ class TradeOrderManagementEndpointTest(unittest.TestCase):
         self.assertEqual(data['orders'][0]['order_id'], '111')
         self.assertEqual(data['orders'][0]['legs'][0]['symbol'], 'SPY   260501C00722000')
         self.assertEqual(ezoptionsschwab.client.order_calls[0][0], 'HASH123')
+
+    def test_pending_review_order_status_is_cancelable(self):
+        rows = ezoptionsschwab._normalize_trade_orders([
+            {
+                'orderId': 444,
+                'status': 'PENDING_REVIEW',
+                'enteredTime': '2026-05-01T14:30:00Z',
+                'orderType': 'LIMIT',
+                'price': 0.57,
+                'orderLegCollection': [
+                    {
+                        'instruction': 'BUY_TO_OPEN',
+                        'quantity': 1,
+                        'instrument': {
+                            'symbol': 'SPY   260501C00722000',
+                            'assetType': 'OPTION',
+                            'underlyingSymbol': 'SPY',
+                        },
+                    }
+                ],
+            }
+        ], ticker='SPY', contract_symbol='SPY   260501C00722000')
+        self.assertEqual(rows[0]['order_id'], '444')
+        self.assertTrue(rows[0]['cancelable'])
 
     def test_selected_contract_filtering_excludes_other_same_underlying_orders(self):
         response = self.post_orders(contract_symbol='SPY   260501C00723000')
