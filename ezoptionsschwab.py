@@ -12187,6 +12187,13 @@ def index():
         .trade-active-ladder-row:hover {
             background: color-mix(in srgb, var(--accent) 9%, transparent);
         }
+        .trade-active-ladder-row.position-average {
+            background: color-mix(in srgb, var(--warn) 18%, transparent);
+            box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 28%, transparent);
+        }
+        .trade-active-ladder-row.position-average:hover {
+            background: color-mix(in srgb, var(--warn) 24%, transparent);
+        }
         .trade-active-ladder-row:focus-visible {
             outline: 1px solid var(--accent);
             outline-offset: -2px;
@@ -12311,6 +12318,30 @@ def index():
         .trade-active-price.current-market {
             background: color-mix(in srgb, var(--fg-0) 18%, var(--bg-1));
             color: var(--fg-0);
+        }
+        .trade-active-price.position-average-price {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            background: color-mix(in srgb, var(--warn) 16%, var(--bg-0));
+            color: var(--warn);
+            font-weight: 900;
+        }
+        .trade-active-price.position-average-price::before,
+        .trade-active-price.position-average-price::after {
+            content: "";
+            width: 0;
+            height: 0;
+            border-top: 3px solid transparent;
+            border-bottom: 3px solid transparent;
+            flex: 0 0 auto;
+        }
+        .trade-active-price.position-average-price::before {
+            border-right: 4px solid var(--warn);
+        }
+        .trade-active-price.position-average-price::after {
+            border-left: 4px solid var(--warn);
         }
         .trade-active-bid {
             color: var(--call);
@@ -32205,7 +32236,7 @@ def index():
             const position = getSelectedTradePosition(selected);
             const positionQty = getSelectedTradePositionQuantity(selected);
             if (!position || positionQty <= 0) return null;
-            const avg = normalizeTradePositionAveragePrice(position.average_price, selected);
+            const avg = getTradePositionAveragePremium(position);
             if (avg && Number.isFinite(avg.premium) && avg.premium > 0) {
                 return {
                     premium: avg.premium,
@@ -32668,6 +32699,7 @@ def index():
         }
         function getTradeLadderRenderSignature(selected, markers = []) {
             if (!selected) return 'empty';
+            const basis = getTradeEntryBasis(selected);
             return [
                 selected.contract_symbol || '',
                 normalizeTradeIntentLimit(tradeRailState.ladderCenterPrice),
@@ -32676,6 +32708,8 @@ def index():
                 normalizeTradeIntentLimit(selected.bid),
                 normalizeTradeIntentLimit(selected.ask),
                 normalizeTradeIntentLimit(tradeRailState.limitPrice),
+                basis ? normalizeTradeIntentLimit(basis.premium) : '',
+                basis ? String(basis.quantity || '') : '',
                 markers.map(marker => [
                     marker.marker_id,
                     marker.source,
@@ -32762,16 +32796,24 @@ def index():
                 const normalized = normalizeTradeLadderPrice(price, tick);
                 if (normalized != null) rowMap.set(normalized.toFixed(2), normalized);
             });
-            const rows = Array.from(rowMap.values()).sort((a, b) => b - a);
             const basis = getTradeEntryBasis(selected);
             const basisQty = basis && Number.isFinite(basis.quantity)
                 ? Math.max(1, Math.floor(basis.quantity))
                 : 0;
+            const basisPremium = basis && Number.isFinite(basis.premium) && basis.premium > 0
+                ? Number(basis.premium)
+                : null;
+            const basisRowPrice = basisPremium == null ? null : normalizeTradeLadderPrice(basisPremium, tick);
+            if (basisRowPrice != null && basisRowPrice <= top + tick / 2 && basisRowPrice >= bottom - tick / 2) {
+                rowMap.set(basisRowPrice.toFixed(2), basisRowPrice);
+            }
+            const rows = Array.from(rowMap.values()).sort((a, b) => b - a);
             return rows.map(price => {
                 const nearBid = Number.isFinite(bid) && Math.abs(price - bid) < tick / 2 + 0.0001;
                 const nearAsk = Number.isFinite(ask) && Math.abs(price - ask) < tick / 2 + 0.0001;
                 const nearLimit = Number.isFinite(limit) && Math.abs(price - limit) < tick / 2 + 0.0001;
                 const nearCurrent = Number.isFinite(viewport.currentPrice) && Math.abs(price - viewport.currentPrice) < tick / 2 + 0.0001;
+                const nearAverage = basisRowPrice != null && Math.abs(price - basisRowPrice) < tick / 2 + 0.0001;
                 const matchingMarkers = ladderMarkers.filter(marker => {
                     const orderPrice = normalizeTradeLadderPrice(marker.price, tick);
                     return orderPrice != null && Math.abs(orderPrice - price) < tick / 2 + 0.0001;
@@ -32781,6 +32823,7 @@ def index():
                 const classes = [
                     'trade-active-ladder-row',
                     nearLimit ? 'limit' : '',
+                    nearAverage ? 'position-average' : '',
                     matchingMarkers.some(marker => marker.state === 'working') ? 'working-order' : '',
                 ].filter(Boolean).join(' ');
                 const buyCellClasses = [
@@ -32797,6 +32840,7 @@ def index():
                     'trade-active-ladder-cell',
                     'trade-active-price',
                     nearCurrent ? 'current-market' : '',
+                    nearAverage ? 'position-average-price' : '',
                 ].filter(Boolean).join(' ');
                 const askClasses = [
                     'trade-active-ladder-cell',
@@ -32820,11 +32864,15 @@ def index():
                 const pnlTitle = basis
                     ? ('P/L from ' + basis.source + ' ' + fmtTradePrice(basis.premium) + ' x' + basisQty)
                     : 'P/L unavailable without an active long selected-contract position.';
+                const averageTitle = nearAverage && basis
+                    ? ('Position average paid ' + fmtTradePrice(basis.premium) + ' x' + basisQty + ' (' + basis.source + ')')
+                    : '';
                 const priceText = price.toFixed(2);
-                return '<div role="button" tabindex="0" class="' + classes + '" data-trade-fast-price="' + _escapeHtml(priceText) + '" title="' + _escapeHtml('Click price row to stage the current side at ' + fmtTradePrice(price)) + '">' +
+                const rowTitle = 'Click price row to stage the current side at ' + fmtTradePrice(price) + (averageTitle ? ' | ' + averageTitle : '');
+                return '<div role="button" tabindex="0" class="' + classes + '" data-trade-fast-price="' + _escapeHtml(priceText) + '" title="' + _escapeHtml(rowTitle) + '">' +
                     '<span class="' + buyCellClasses + '" data-trade-ladder-action="BUY_TO_OPEN" title="' + _escapeHtml('Stage buy limit @ ' + fmtTradePrice(price)) + '">' + buyMarkers + '</span>' +
                     '<span class="' + bidClasses + '">' + (nearBid ? 'BID' : '') + '</span>' +
-                    '<span class="' + priceClasses + '">' + _escapeHtml(fmtTradePrice(price)) + '</span>' +
+                    '<span class="' + priceClasses + '"' + (averageTitle ? ' title="' + _escapeHtml(averageTitle) + '"' : '') + '>' + _escapeHtml(fmtTradePrice(price)) + '</span>' +
                     '<span class="' + askClasses + '">' + (nearAsk ? 'ASK' : '') + '</span>' +
                     '<span class="' + sellCellClasses + '" data-trade-ladder-action="SELL_TO_CLOSE" title="' + _escapeHtml('Stage sell limit @ ' + fmtTradePrice(price)) + '">' + sellMarkers + '</span>' +
                     '<span class="' + pnlClasses + '" title="' + _escapeHtml(pnlTitle) + '">' + _escapeHtml(Number.isFinite(pnl) ? fmtTradeSignedMoney(pnl) : '—') + '</span>' +
