@@ -11293,6 +11293,20 @@ def index():
             gap: 8px;
             padding: 8px;
             overflow-y: auto;
+            overscroll-behavior: contain;
+            scrollbar-gutter: stable;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-strong) transparent;
+        }
+        .trade-rail-shell::-webkit-scrollbar {
+            width: 8px;
+        }
+        .trade-rail-shell::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .trade-rail-shell::-webkit-scrollbar-thumb {
+            background: var(--border-strong);
+            border-radius: 999px;
         }
         .trade-panel {
             border: 1px solid var(--border);
@@ -16024,6 +16038,45 @@ def index():
             z-index: 2;
             pointer-events: none;
         }
+        .tv-session-calendar-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+            pointer-events: none;
+            overflow: hidden;
+        }
+        .tv-session-week-line {
+            position: absolute;
+            top: 0;
+            width: 1px;
+            background: color-mix(in srgb, var(--accent) 62%, transparent);
+            opacity: 0.58;
+            box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg-0) 70%, transparent);
+        }
+        .tv-session-day-label {
+            position: absolute;
+            height: 16px;
+            min-width: 28px;
+            padding: 1px 5px;
+            border: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--bg-0) 78%, transparent);
+            color: var(--fg-1);
+            font-size: 9px;
+            font-weight: 750;
+            line-height: 12px;
+            text-align: center;
+            text-transform: uppercase;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+            transform: translateX(-50%);
+            box-shadow: 0 4px 12px color-mix(in srgb, var(--bg-0) 42%, transparent);
+        }
+        .tv-session-day-label.week-start {
+            color: var(--fg-0);
+            border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+            background: color-mix(in srgb, var(--accent) 12%, var(--bg-0));
+        }
         .tv-session-cloud-overlay {
             position: absolute;
             inset: 0;
@@ -19658,6 +19711,33 @@ def index():
         let tvHistoricalOverlayDomEventsBound = false;
         let tvHistoricalRenderedPoints = [];
         const tvHistoricalOverlayMaxVisible = 1200;
+        let tvSessionCalendarOverlayPending = false;
+        const TV_ET_TIME_ZONE = 'America/New_York';
+        const TV_AXIS_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
+            timeZone: TV_ET_TIME_ZONE,
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        });
+        const TV_AXIS_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+            timeZone: TV_ET_TIME_ZONE,
+            month: 'short',
+            day: 'numeric',
+        });
+        const TV_AXIS_WEEKDAY_SHORT_FORMATTER = new Intl.DateTimeFormat('en-US', {
+            timeZone: TV_ET_TIME_ZONE,
+            weekday: 'short',
+        });
+        const TV_AXIS_WEEKDAY_LONG_FORMATTER = new Intl.DateTimeFormat('en-US', {
+            timeZone: TV_ET_TIME_ZONE,
+            weekday: 'long',
+        });
+        const TV_AXIS_TOOLTIP_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+            timeZone: TV_ET_TIME_ZONE,
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+        });
         // Track the active ticker so we can reset chart state on ticker change
         let tvLastTicker = null;
         // When true, the next render will call fitContent() regardless of tvAutoRange
@@ -20309,6 +20389,7 @@ def index():
                     // Sub-pane charts also need their price axes reset
                     if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
                     if (tvMacdChart) tvMacdChart.priceScale('right').applyOptions({ autoScale: true });
+                    scheduleTVSessionCalendarOverlaySettleDraw();
                     scheduleTVStrikeOverlayDraw();
                 } catch(e) {}
             }, 50);
@@ -20327,7 +20408,7 @@ def index():
             if (!Number.isFinite(unixSec)) return '';
             try {
                 return new Intl.DateTimeFormat('en-CA', {
-                    timeZone: 'America/New_York',
+                    timeZone: TV_ET_TIME_ZONE,
                     year: 'numeric',
                     month: '2-digit',
                     day: '2-digit',
@@ -20336,6 +20417,57 @@ def index():
                 const d = new Date(unixSec * 1000);
                 return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
             }
+        }
+
+        function tvFormatAxisTime(unixSec) {
+            if (!Number.isFinite(Number(unixSec))) return '';
+            try { return TV_AXIS_TIME_FORMATTER.format(new Date(Number(unixSec) * 1000)); }
+            catch (e) {
+                const d = new Date(Number(unixSec) * 1000);
+                return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+            }
+        }
+
+        function tvFormatAxisDate(unixSec) {
+            if (!Number.isFinite(Number(unixSec))) return '';
+            try { return TV_AXIS_DATE_FORMATTER.format(new Date(Number(unixSec) * 1000)); }
+            catch (e) { return tvDateKeyET(Number(unixSec)); }
+        }
+
+        function tvFormatAxisWeekday(unixSec, longName = false) {
+            if (!Number.isFinite(Number(unixSec))) return '';
+            const date = new Date(Number(unixSec) * 1000);
+            try {
+                return (longName ? TV_AXIS_WEEKDAY_LONG_FORMATTER : TV_AXIS_WEEKDAY_SHORT_FORMATTER).format(date);
+            } catch (e) {
+                return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()] || '';
+            }
+        }
+
+        function tvFormatAxisTooltipDateTime(unixSec) {
+            const n = Number(unixSec);
+            if (!Number.isFinite(n)) return '';
+            const date = new Date(n * 1000);
+            let dateText = '';
+            try { dateText = TV_AXIS_TOOLTIP_DATE_FORMATTER.format(date); }
+            catch (e) { dateText = tvDateKeyET(n); }
+            return dateText + ' · ' + tvFormatAxisTime(n) + ' ET';
+        }
+
+        function tvWeekKeyFromDateKey(dateKey) {
+            if (!dateKey) return '';
+            const parts = String(dateKey).split('-').map(value => parseInt(value, 10));
+            if (parts.length !== 3 || parts.some(value => !Number.isFinite(value))) return dateKey;
+            const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], 12));
+            const day = date.getUTCDay();
+            const offset = day === 0 ? -6 : 1 - day;
+            date.setUTCDate(date.getUTCDate() + offset);
+            return date.getUTCFullYear() + '-' + String(date.getUTCMonth() + 1).padStart(2, '0') + '-' + String(date.getUTCDate()).padStart(2, '0');
+        }
+
+        function tvIsWeekStartSegment(segment, previousSegment) {
+            if (!segment || !previousSegment) return false;
+            return segment.weekKey && previousSegment.weekKey && segment.weekKey !== previousSegment.weekKey;
         }
 
         function tvFindCurrentDayStartFromCandles() {
@@ -20395,6 +20527,7 @@ def index():
                     tvApplyAutoscale();
                     if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
                     if (tvMacdChart) tvMacdChart.priceScale('right').applyOptions({ autoScale: true });
+                    scheduleTVSessionCalendarOverlaySettleDraw();
                     scheduleTVStrikeOverlayDraw();
                     scheduleTVHistoricalOverlayDraw();
                     scheduleGexPanelSync();
@@ -20518,6 +20651,7 @@ def index():
                     tvIndicatorRefreshTimer = setTimeout(() => applyIndicators(tvIndicatorCandles, tvActiveInds), 2000);
                 }
                 scheduleTVStrikeOverlayDraw();
+                scheduleTVSessionCalendarOverlayDraw();
                 tvResolveDeferredSessionFocus();
             } else if (bucketStart > lastCandle.time) {
                 // Clock has rolled past the bucket boundary but CHART_EQUITY hasn't
@@ -20542,6 +20676,7 @@ def index():
                 const vwLast = tvVwapCandles[tvVwapCandles.length - 1];
                 if (!vwLast || vwLast.time < bucketStart) tvVwapCandles.push(fresh);
                 scheduleTVStrikeOverlayDraw();
+                scheduleTVSessionCalendarOverlayDraw();
                 tvResolveDeferredSessionFocus();
             }
         }
@@ -20625,6 +20760,7 @@ def index():
             } catch(e) {}
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             scheduleTVStrikeOverlayDraw();
+            scheduleTVSessionCalendarOverlaySettleDraw();
             tvResolveDeferredSessionFocus();
         }
 
@@ -21019,7 +21155,7 @@ def index():
     lineStyleMap={dashed:LightweightCharts.LineStyle.Dashed,dotted:LightweightCharts.LineStyle.Dotted,large_dashed:LightweightCharts.LineStyle.LargeDashed};
     if(!tvChart){
       var el=document.getElementById('price-chart');
-      tvChart=LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'#1E1E1E'},textColor:'#CCCCCC',fontFamily:'Arial,sans-serif'},grid:{vertLines:{color:'#2A2A2A'},horzLines:{color:'#2A2A2A'}},crosshair:{mode:LightweightCharts.CrosshairMode.Normal,vertLine:{color:'#555',labelBackgroundColor:'#2D2D2D'},horzLine:{color:'#555',labelBackgroundColor:'#2D2D2D'}},rightPriceScale:{borderColor:'#333',scaleMargins:{top:0.04,bottom:0.15}},localization:{timeFormatter:function(time){var d=new Date(time*1000);return d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/New_York'});}},timeScale:{borderColor:'#333',timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false,tickMarkFormatter:function(time){var d=new Date(time*1000);return d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/New_York'});}},handleScale:{mouseWheel:true,pinch:true,axisPressedMouseMove:true},handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:false}});
+      tvChart=LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'#1E1E1E'},textColor:'#CCCCCC',fontFamily:'Arial,sans-serif'},grid:{vertLines:{color:'#2A2A2A'},horzLines:{color:'#2A2A2A'}},crosshair:{mode:LightweightCharts.CrosshairMode.Normal,vertLine:{color:'#555',labelBackgroundColor:'#2D2D2D'},horzLine:{color:'#555',labelBackgroundColor:'#2D2D2D'}},rightPriceScale:{borderColor:'#333',scaleMargins:{top:0.04,bottom:0.15}},localization:{timeFormatter:function(time){return tvFormatAxisTooltipDateTime(time);}},timeScale:{borderColor:'#333',timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false,tickMarkFormatter:function(time,tickMarkType){if(tickMarkType===0||tickMarkType===1||tickMarkType===2){var weekday=tvFormatAxisWeekday(time,false),dateText=tvFormatAxisDate(time);return weekday?(weekday+' '+dateText):dateText;}return tvFormatAxisTime(time);}},handleScale:{mouseWheel:true,pinch:true,axisPressedMouseMove:true},handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:false}});
       tvCandle=tvChart.addCandlestickSeries({upColor:upColor,downColor:downColor,borderVisible:false,wickUpColor:upColor,wickDownColor:downColor});
       tvVol=tvChart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'volume',lastValueVisible:false,priceLineVisible:false});
       tvChart.priceScale('volume').applyOptions({scaleMargins:{top:0.88,bottom:0}});
@@ -21032,8 +21168,7 @@ def index():
         var tip=document.getElementById('tv-ohlc-tooltip');if(!tip)return;
         if(!param||!param.time||!param.seriesData){tip.style.display='none';return;}
         var bar=param.seriesData.get(tvCandle);if(!bar){tip.style.display='none';return;}
-        var d=new Date(param.time*1000);
-        var ts=d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/New_York'})+' ET';
+        var ts=tvFormatAxisTooltipDateTime(param.time);
         var cls=bar.close>=bar.open?'tt-up':'tt-dn';
         var chg=bar.open!==0?((bar.close-bar.open)/bar.open*100).toFixed(2):'0.00';
         var fmt=function(v){return v!=null?v.toFixed(2):'--';};
@@ -24087,6 +24222,7 @@ def index():
 
         function drawTVChartPriceProjectedOverlays() {
             drawSessionLevelClouds();
+            drawTVSessionCalendarOverlay();
             drawTVStrikeOverlay();
             drawTVDrawingOverlay();
             drawTVEthOverlay();
@@ -28822,6 +28958,156 @@ def index():
             });
         }
 
+        function ensureTVSessionCalendarOverlay() {
+            const container = document.getElementById('price-chart');
+            if (!container) return null;
+            let overlay = container.querySelector('.tv-session-calendar-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.className = 'tv-session-calendar-overlay';
+                const cloudOverlay = container.querySelector('.tv-session-cloud-overlay');
+                if (cloudOverlay) container.insertBefore(overlay, cloudOverlay);
+                else container.appendChild(overlay);
+            }
+            return overlay;
+        }
+
+        function getTVVisibleDaySegments(visibleWidth = null) {
+            if (!tvPriceChart || !tvLastCandles.length) return [];
+            const timeScale = tvPriceChart.timeScale();
+            const container = document.getElementById('price-chart');
+            const bounds = container ? container.getBoundingClientRect() : null;
+            const maxX = Number.isFinite(visibleWidth)
+                ? visibleWidth
+                : Math.max(0, bounds ? bounds.width : 0, container ? container.clientWidth : 0);
+            const segments = [];
+            let current = null;
+            for (let idx = 0; idx < tvLastCandles.length; idx += 1) {
+                const candle = tvLastCandles[idx];
+                const time = Number(candle && candle.time);
+                if (!Number.isFinite(time)) continue;
+                let x = null;
+                try { x = timeScale.timeToCoordinate(time); } catch (e) { x = null; }
+                if (!Number.isFinite(x)) x = tvLogicalToCoordinate(idx);
+                if (!Number.isFinite(x)) continue;
+                if (maxX && (x < -80 || x > maxX + 80)) continue;
+                const dateKey = tvDateKeyET(time);
+                if (!dateKey) continue;
+                if (!current || current.dateKey !== dateKey) {
+                    current = {
+                        dateKey,
+                        weekKey: tvWeekKeyFromDateKey(dateKey),
+                        firstTime: time,
+                        lastTime: time,
+                        firstIndex: idx,
+                        lastIndex: idx,
+                        firstX: x,
+                        lastX: x,
+                    };
+                    segments.push(current);
+                } else {
+                    current.lastTime = time;
+                    current.lastIndex = idx;
+                    current.lastX = x;
+                }
+            }
+            return segments;
+        }
+
+        function drawTVSessionCalendarOverlay() {
+            const overlay = ensureTVSessionCalendarOverlay();
+            const container = document.getElementById('price-chart');
+            if (!overlay || !container) return;
+            if (!tvPriceChart || !tvLastCandles.length) {
+                overlay.replaceChildren();
+                overlay.style.display = 'none';
+                return;
+            }
+            const bounds = container.getBoundingClientRect();
+            const width = Math.max(0, bounds.width, overlay.clientWidth, container.clientWidth);
+            const height = Math.max(0, bounds.height, overlay.clientHeight, container.clientHeight);
+            overlay.replaceChildren();
+            if (!width || !height) {
+                overlay.style.display = 'none';
+                return;
+            }
+            const timeScale = tvPriceChart.timeScale();
+            let timeScaleHeight = 0;
+            try {
+                timeScaleHeight = timeScale && timeScale.height ? timeScale.height() : 0;
+            } catch (e) {}
+            const plotBottom = Math.max(0, height - timeScaleHeight);
+            const labelTop = Math.max(4, plotBottom - 19);
+            const candleSpan = getTVTimeframeSeconds();
+            const xFor = (index, time) => {
+                let x = null;
+                try { x = timeScale.timeToCoordinate(time); } catch (e) { x = null; }
+                if (!Number.isFinite(x)) x = tvLogicalToCoordinate(index);
+                return Number.isFinite(x) ? x : null;
+            };
+            const segments = getTVVisibleDaySegments(width);
+            const fragment = document.createDocumentFragment();
+            let lastLabelRight = -Infinity;
+
+            segments.forEach((segment, idx) => {
+                const startX = Number.isFinite(segment.firstX) ? segment.firstX : xFor(segment.firstIndex, segment.firstTime);
+                let endX = null;
+                try { endX = timeScale.timeToCoordinate(segment.lastTime + candleSpan); } catch (e) { endX = null; }
+                if (!Number.isFinite(endX)) endX = Number.isFinite(segment.lastX) ? segment.lastX : xFor(segment.lastIndex, segment.lastTime);
+                if (!Number.isFinite(startX) || !Number.isFinite(endX)) return;
+                const left = Math.max(-40, Math.min(startX, endX));
+                const right = Math.min(width + 40, Math.max(startX, endX));
+                if (right < -20 || left > width + 20) return;
+
+                const isWeekStart = tvIsWeekStartSegment(segment, segments[idx - 1]);
+                if (isWeekStart && plotBottom > 0) {
+                    const line = document.createElement('div');
+                    line.className = 'tv-session-week-line';
+                    line.style.left = Math.max(0, Math.min(width, startX)) + 'px';
+                    line.style.height = plotBottom + 'px';
+                    fragment.appendChild(line);
+                }
+
+                const dayWidth = Math.max(1, right - left);
+                const center = Math.max(16, Math.min(width - 16, left + (dayWidth / 2)));
+                const longName = dayWidth >= 74;
+                const shortName = tvFormatAxisWeekday(segment.firstTime, false);
+                const labelText = longName ? tvFormatAxisWeekday(segment.firstTime, true) : (dayWidth >= 32 ? shortName : shortName.slice(0, 1));
+                if (!labelText) return;
+                const estimatedWidth = longName ? Math.min(74, Math.max(48, labelText.length * 7)) : (labelText.length <= 1 ? 18 : 32);
+                const labelLeft = center - (estimatedWidth / 2);
+                const labelRight = center + (estimatedWidth / 2);
+                if (labelLeft < lastLabelRight + 4) return;
+                lastLabelRight = labelRight;
+
+                const label = document.createElement('div');
+                label.className = 'tv-session-day-label' + (isWeekStart ? ' week-start' : '');
+                label.textContent = labelText;
+                label.style.left = center + 'px';
+                label.style.top = labelTop + 'px';
+                label.setAttribute('aria-hidden', 'true');
+                label.dataset.date = tvFormatAxisDate(segment.firstTime);
+                fragment.appendChild(label);
+            });
+
+            overlay.replaceChildren(fragment);
+            overlay.style.display = overlay.childNodes.length ? 'block' : 'none';
+        }
+
+        function scheduleTVSessionCalendarOverlayDraw() {
+            if (tvSessionCalendarOverlayPending) return;
+            tvSessionCalendarOverlayPending = true;
+            requestAnimationFrame(() => {
+                tvSessionCalendarOverlayPending = false;
+                drawTVSessionCalendarOverlay();
+            });
+        }
+        function scheduleTVSessionCalendarOverlaySettleDraw() {
+            scheduleTVSessionCalendarOverlayDraw();
+            setTimeout(scheduleTVSessionCalendarOverlayDraw, 120);
+            setTimeout(scheduleTVSessionCalendarOverlayDraw, 420);
+        }
+
         function ensureTVEthOverlay() {
             const container = document.getElementById('price-chart');
             if (!container) return null;
@@ -28939,11 +29225,7 @@ def index():
                     },
                     localization: {
                         timeFormatter: (time) => {
-                            const d = new Date(time * 1000);
-                            return d.toLocaleTimeString('en-US', {
-                                hour: '2-digit', minute: '2-digit',
-                                hour12: false, timeZone: 'America/New_York'
-                            });
+                            return tvFormatAxisTooltipDateTime(time);
                         }
                     },
                     timeScale: {
@@ -28956,17 +29238,12 @@ def index():
                         // Show dates ("Apr 15") at day/month/year boundaries so multi-day views
                         // are readable without vertical separators.
                         tickMarkFormatter: (time, tickMarkType) => {
-                            const d = new Date(time * 1000);
                             if (tickMarkType === 0 || tickMarkType === 1 || tickMarkType === 2) {
-                                return d.toLocaleDateString('en-US', {
-                                    month: 'short', day: 'numeric',
-                                    timeZone: 'America/New_York'
-                                });
+                                const weekday = tvFormatAxisWeekday(time, false);
+                                const dateText = tvFormatAxisDate(time);
+                                return weekday ? (weekday + ' ' + dateText) : dateText;
                             }
-                            return d.toLocaleTimeString('en-US', {
-                                hour: '2-digit', minute: '2-digit',
-                                hour12: false, timeZone: 'America/New_York'
-                            });
+                            return tvFormatAxisTime(time);
                         }
                     },
                     handleScale:  { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
@@ -29008,8 +29285,10 @@ def index():
                 ensureTVStrikeOverlay();
                 ensureTVDrawingEditor();
                 ensureTVHistoricalOverlay();
+                ensureTVSessionCalendarOverlay();
                 applyStrikeOverlayRightOffset({ force: true });
                 tvPriceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+                    scheduleTVSessionCalendarOverlayDraw();
                     scheduleSessionLevelCloudDraw();
                     scheduleTVStrikeOverlayDraw();
                     scheduleTVDrawingOverlayDraw();
@@ -29021,6 +29300,7 @@ def index():
                 if (!tvHistoricalOverlayDomEventsBound) {
                     tvHistoricalOverlayDomEventsBound = true;
                     const schedulePanOverlayDraws = (activeDuration = 220) => {
+                        scheduleTVSessionCalendarOverlaySettleDraw();
                         scheduleSessionLevelCloudDraw();
                         scheduleTVStrikeOverlayDraw();
                         scheduleTVDrawingOverlayDraw();
@@ -29114,8 +29394,7 @@ def index():
                     }
                     const bar = param.seriesData.get(tvCandleSeries);
                     if (!bar) { tip.style.display = 'none'; return; }
-                    const d = new Date(param.time * 1000);
-                    const timeStr = d.toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/New_York'}) + ' ET';
+                    const timeStr = tvFormatAxisTooltipDateTime(param.time);
                     const isUp = bar.close >= bar.open;
                     const cls = isUp ? 'tt-up' : 'tt-dn';
                     const chg = bar.open !== 0 ? ((bar.close - bar.open) / bar.open * 100).toFixed(2) : '0.00';
@@ -29227,6 +29506,7 @@ def index():
             tvVolumeProfilePayload = priceData.volume_profile || null;
             tvTpoProfilePayload = priceData.tpo_profile || null;
             tvRestoreDrawings();
+            scheduleTVSessionCalendarOverlayDraw();
             scheduleSessionLevelCloudDraw();
             scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
@@ -29248,6 +29528,7 @@ def index():
                         tvApplyAutoscale();
                         if (tvRsiChart)  tvRsiChart.priceScale('right').applyOptions({ autoScale: true });
                         if (tvMacdChart) tvMacdChart.priceScale('right').applyOptions({ autoScale: true });
+                        scheduleTVSessionCalendarOverlayDraw();
                         scheduleSessionLevelCloudDraw();
                         scheduleTVStrikeOverlayDraw();
                         scheduleTVHistoricalOverlayDraw();
@@ -29655,6 +29936,7 @@ def index():
 
         function ensureTradeRailDom(grid = document.getElementById('chart-grid')) {
             if (!grid) return null;
+            const scrollTop = rememberTradeRailScroll();
             let header = document.getElementById('trade-rail-header');
             if (!header) {
                 header = document.createElement('div');
@@ -29690,6 +29972,7 @@ def index():
                 rail.innerHTML = buildTradeRailHtml();
                 rail.__tradePickerWired = false;
             }
+            wireTradeRailScrollMemory(rail);
             if (!tradeRailState.__bracketDefaultRestored) {
                 tradeRailState.__bracketDefaultRestored = true;
                 restoreTradeBracketDefault();
@@ -29700,6 +29983,8 @@ def index():
             try { renderContractHelper(getScopedStats()); } catch (e) {}
             renderTradeRail();
             applyTradeRailCollapse(isTradeRailCollapsed());
+            restoreTradeRailScroll(scrollTop);
+            requestAnimationFrame(() => restoreTradeRailScroll(scrollTop));
             return rail;
         }
 
@@ -30337,6 +30622,7 @@ def index():
             bracketCollapsed: getTradeStoredBool(TRADE_BRACKET_COLLAPSE_KEY, true),
             positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
             helperCompact: getTradeStoredBool(TRADE_HELPER_COMPACT_KEY, false),
+            railScrollTop: 0,
         };
 
         function getTradeStoredBool(key, fallback = false) {
@@ -30858,14 +31144,37 @@ def index():
         function setTradeField(key, text) {
             setTradeText('[data-trade-' + key + ']', text);
         }
-        function preserveTradeRailScroll(callback) {
-            const shell = document.querySelector('#trade-rail .trade-rail-shell');
-            const scrollTop = shell ? shell.scrollTop : 0;
-            callback();
+        function getTradeRailShell() {
+            return document.querySelector('#trade-rail .trade-rail-shell');
+        }
+        function rememberTradeRailScroll(shell = getTradeRailShell()) {
+            if (!shell) return tradeRailState.railScrollTop || 0;
+            const top = Number(shell.scrollTop);
+            if (Number.isFinite(top)) tradeRailState.railScrollTop = Math.max(0, top);
+            return tradeRailState.railScrollTop || 0;
+        }
+        function restoreTradeRailScroll(scrollTop = tradeRailState.railScrollTop || 0) {
+            const shell = getTradeRailShell();
             if (!shell) return;
+            const maxTop = Math.max(0, shell.scrollHeight - shell.clientHeight);
+            const nextTop = Math.max(0, Math.min(Number(scrollTop) || 0, maxTop));
+            shell.scrollTop = nextTop;
+            tradeRailState.railScrollTop = nextTop;
+        }
+        function wireTradeRailScrollMemory(rail = document.getElementById('trade-rail')) {
+            const shell = rail ? rail.querySelector('.trade-rail-shell') : getTradeRailShell();
+            if (!shell || shell.__tradeScrollMemoryWired) return;
+            shell.__tradeScrollMemoryWired = true;
+            shell.addEventListener('scroll', () => rememberTradeRailScroll(shell), { passive: true });
+            restoreTradeRailScroll();
+        }
+        function preserveTradeRailScroll(callback) {
+            const shell = getTradeRailShell();
+            const scrollTop = shell ? rememberTradeRailScroll(shell) : (tradeRailState.railScrollTop || 0);
+            callback();
             const restore = () => {
-                const currentShell = document.querySelector('#trade-rail .trade-rail-shell');
-                if (currentShell) currentShell.scrollTop = scrollTop;
+                wireTradeRailScrollMemory();
+                restoreTradeRailScroll(scrollTop);
             };
             restore();
             requestAnimationFrame(restore);
@@ -33845,6 +34154,8 @@ def index():
             const selectors = [
                 '.tv-historical-bubble',
                 '.tv-strike-overlay-bar',
+                '.tv-session-week-line',
+                '.tv-session-day-label',
                 '.tv-axis-countdown',
                 '.tv-cum-rvol-badge',
                 '.tv-profile-summary',
