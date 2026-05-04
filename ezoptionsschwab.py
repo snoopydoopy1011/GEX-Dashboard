@@ -17718,6 +17718,9 @@ def index():
             left: auto;
             z-index: 10001;
         }
+        #price-chart:not(.fullscreen) > .chart-fullscreen-btn {
+            display: none;
+        }
         /* Pop-out button */
         .chart-popout-btn {
             position: absolute;
@@ -17756,6 +17759,9 @@ def index():
             right: 50px;
             left: auto;
             z-index: 10001;
+        }
+        #price-chart > .chart-popout-btn {
+            display: none;
         }
     </style>
 </head>
@@ -20731,24 +20737,41 @@ def index():
         const fsExpandSvg = '<svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9"/></svg>';
         const fsCollapseSvg = '<svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 1v4H1M9 5h4V1M9 13V9h4M1 9h4v4"/></svg>';
 
+        function syncFullscreenActionControls(container) {
+            if (!container) return;
+            const isFullscreen = container.classList.contains('fullscreen');
+            const icon = isFullscreen ? fsCollapseSvg : fsExpandSvg;
+            container.querySelectorAll('.chart-fullscreen-btn').forEach(button => {
+                button.innerHTML = icon;
+                button.title = isFullscreen ? 'Exit fullscreen (Esc)' : 'Toggle fullscreen (Esc to exit)';
+            });
+            if (!container.id) return;
+            document.querySelectorAll('[data-chart-window-action="fullscreen"]').forEach(button => {
+                if (button.dataset.chartId !== container.id) return;
+                button.textContent = isFullscreen ? 'Exit Full Screen' : 'Full Screen';
+                button.title = isFullscreen ? 'Exit full screen' : 'Open price chart full screen';
+                button.classList.toggle('active', isFullscreen);
+                button.setAttribute('aria-pressed', isFullscreen ? 'true' : 'false');
+            });
+        }
+
         function toggleChartFullscreen(container) {
+            if (!container) return;
             const isFullscreen = container.classList.contains('fullscreen');
 
             // Exit any other fullscreen chart first
             document.querySelectorAll('.chart-container.fullscreen').forEach(el => {
                 el.classList.remove('fullscreen');
-                const b = el.querySelector('.chart-fullscreen-btn');
-                if (b) b.innerHTML = fsExpandSvg;
+                syncFullscreenActionControls(el);
             });
 
             if (!isFullscreen) {
                 container.classList.add('fullscreen');
                 document.body.style.overflow = 'hidden';
-                const b = container.querySelector('.chart-fullscreen-btn');
-                if (b) b.innerHTML = fsCollapseSvg;
             } else {
                 document.body.style.overflow = '';
             }
+            syncFullscreenActionControls(container);
 
             // Let Plotly know about the size change; also trigger TV chart resize
             requestAnimationFrame(() => {
@@ -20776,6 +20799,7 @@ def index():
                 toggleChartFullscreen(container);
             });
             container.appendChild(btn);
+            syncFullscreenActionControls(container);
         }
 
         // ESC key exits fullscreen chart
@@ -20785,8 +20809,7 @@ def index():
                 if (fs) {
                     fs.classList.remove('fullscreen');
                     document.body.style.overflow = '';
-                    const b = fs.querySelector('.chart-fullscreen-btn');
-                    if (b) b.innerHTML = fsExpandSvg;
+                    syncFullscreenActionControls(fs);
                     requestAnimationFrame(() => {
                         document.querySelectorAll('.chart-container').forEach(el => {
                             const plot = el.querySelector('.js-plotly-plot');
@@ -21407,7 +21430,7 @@ def index():
         }
 
         function addPopoutButton(container) {
-            if (!container || container.querySelector('.chart-popout-btn')) return;
+            if (!container || container.id === 'price-chart' || container.querySelector('.chart-popout-btn')) return;
             const btn = document.createElement('button');
             btn.className = 'chart-popout-btn';
             btn.innerHTML = popoutSvg;
@@ -28630,6 +28653,30 @@ def index():
                 levelStylesBtn.classList.add('tv-draw-menu-item');
                 section.appendChild(levelStylesBtn);
             });
+            appendToolbarMenuSection(chartMenuGrid, 'Window', section => {
+                const fullScreenBtn = btn('Full Screen', 'Open price chart full screen', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleChartFullscreen(document.getElementById('price-chart'));
+                    closeTVToolbarMenus();
+                });
+                fullScreenBtn.classList.add('tv-draw-menu-item');
+                fullScreenBtn.dataset.chartWindowAction = 'fullscreen';
+                fullScreenBtn.dataset.chartId = 'price-chart';
+                fullScreenBtn.setAttribute('aria-pressed', 'false');
+                section.appendChild(fullScreenBtn);
+
+                const popoutBtn = btn('Pop Out', 'Open price chart in a separate window', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openPopoutChart('price-chart');
+                    closeTVToolbarMenus();
+                });
+                popoutBtn.classList.add('tv-draw-menu-item');
+                popoutBtn.dataset.chartWindowAction = 'popout';
+                popoutBtn.dataset.chartId = 'price-chart';
+                section.appendChild(popoutBtn);
+            });
             appendToolbarMenuSection(chartMenuGrid, 'Data', section => {
                 const volumeInfo = document.createElement('div');
                 volumeInfo.className = 'tv-toolbar-menu-info';
@@ -28639,6 +28686,7 @@ def index():
             });
             chartMenu.menuPanel.appendChild(chartMenuGrid);
             addToGroup(actionsGroup, chartMenu.wrap);
+            syncFullscreenActionControls(document.getElementById('price-chart'));
             syncTVDrawingToolbarControls();
 
             // Auto-Range toggle
