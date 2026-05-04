@@ -11,6 +11,7 @@ import time
 import collections
 import os
 import atexit
+import re
 
 # python.org Python on macOS ships without a default CA bundle unless
 # "Install Certificates.command" has been run, so ssl.create_default_context()
@@ -4819,12 +4820,27 @@ def _pick_balance_fields(account):
         for key in (
             'buyingPower',
             'cashBalance',
+            'cashAvailableForTrading',
+            'cashAvailableForWithdrawal',
             'availableFunds',
+            'settledFunds',
             'optionBuyingPower',
             'liquidationValue',
+            'currentLiquidationValue',
             'accountValue',
+            'equity',
+            'equityPercentage',
             'longOptionMarketValue',
             'shortOptionMarketValue',
+            'longMarketValue',
+            'shortMarketValue',
+            'moneyMarketFund',
+            'dayTradingBuyingPower',
+            'roundTrips',
+            'dayTradesRemaining',
+            'currentDayProfitLoss',
+            'currentDayProfitLossPercentage',
+            'openProfitLoss',
         ):
             if key in bucket and bucket[key] is not None:
                 balances[key] = bucket[key]
@@ -4842,6 +4858,121 @@ def _position_number(row, key):
         return value
     except Exception:
         return None
+
+
+def _position_first_number(row, keys):
+    for key in keys:
+        value = _position_number(row, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _option_position_multiplier(symbol, instrument):
+    asset_type = str(instrument.get('assetType') or '').upper()
+    if asset_type == 'OPTION':
+        return 100
+    symbol_text = str(symbol or '').replace(' ', '').upper()
+    return 100 if re.match(r'^[A-Z.]{1,6}\d{6}[CP]\d{8}$', symbol_text) else 1
+
+
+def _normalized_position_average_price(avg_price, quantity, market_value, multiplier):
+    """Normalize Schwab option averagePrice when it is reported in cents-per-contract."""
+    avg = float(avg_price) if avg_price is not None else None
+    if avg is None or not math.isfinite(avg) or avg <= 0:
+        return None
+    qty = abs(float(quantity or 0))
+    if multiplier == 100 and qty > 0 and avg > 10:
+        mv = abs(float(market_value or 0))
+        live_premium = (mv / qty / multiplier) if mv > 0 else None
+        if live_premium is None or live_premium < avg / 5:
+            return avg / 100
+    return avg
+
+
+def _compute_position_totals(row, instrument, symbol, quantity, average_price, market_value):
+    multiplier = _option_position_multiplier(symbol, instrument)
+    qty_abs = abs(float(quantity or 0))
+    avg = _normalized_position_average_price(average_price, quantity, market_value, multiplier)
+    if avg is None or qty_abs <= 0:
+        total_cost = None
+    else:
+        total_cost = avg * qty_abs * multiplier
+
+    raw_open_pnl = _position_first_number(row, (
+        'openProfitLoss',
+        'longOpenProfitLoss',
+        'shortOpenProfitLoss',
+        'profitLoss',
+    ))
+    if raw_open_pnl is not None:
+        open_pnl = raw_open_pnl
+    elif total_cost is not None and market_value is not None:
+        mv = float(market_value)
+        open_pnl = (mv - total_cost) if float(quantity or 0) >= 0 else (total_cost - abs(mv))
+    else:
+        open_pnl = None
+
+    open_pnl_pct = None
+    if open_pnl is not None and total_cost not in (None, 0):
+        open_pnl_pct = open_pnl / abs(total_cost)
+
+    return {
+        'average_price_per_contract': avg,
+        'total_cost': total_cost,
+        'open_pnl': open_pnl,
+        'open_pnl_pct': open_pnl_pct,
+        'contract_multiplier': multiplier,
+    }
+
+
+def _compute_trade_account_summary(account):
+    raw_positions = account.get('positions') if isinstance(account, dict) else []
+    if not isinstance(raw_positions, list):
+        raw_positions = []
+    summary = {
+        'positions_count': 0,
+        'day_pnl': 0.0,
+        'day_pnl_count': 0,
+        'open_pnl': 0.0,
+        'open_pnl_count': 0,
+        'total_cost': 0.0,
+        'market_value': 0.0,
+    }
+    for row in raw_positions:
+        if not isinstance(row, dict):
+            continue
+        instrument = row.get('instrument') if isinstance(row.get('instrument'), dict) else {}
+        symbol = str(instrument.get('symbol') or row.get('symbol') or '').strip()
+        long_qty = _position_number(row, 'longQuantity') or 0
+        short_qty = _position_number(row, 'shortQuantity') or 0
+        quantity = long_qty - short_qty
+        if not quantity:
+            continue
+        market_value = _position_number(row, 'marketValue')
+        average_price = _position_number(row, 'averagePrice')
+        totals = _compute_position_totals(row, instrument, symbol, quantity, average_price, market_value)
+        summary['positions_count'] += 1
+        day_pnl = _position_number(row, 'currentDayProfitLoss')
+        if day_pnl is not None:
+            summary['day_pnl'] += day_pnl
+            summary['day_pnl_count'] += 1
+        if totals.get('open_pnl') is not None:
+            summary['open_pnl'] += totals['open_pnl']
+            summary['open_pnl_count'] += 1
+        if totals.get('total_cost') is not None:
+            summary['total_cost'] += totals['total_cost']
+        if market_value is not None:
+            summary['market_value'] += market_value
+    if not summary['day_pnl_count']:
+        summary['day_pnl'] = None
+    if not summary['open_pnl_count']:
+        summary['open_pnl'] = None
+    summary['open_pnl_pct'] = (
+        summary['open_pnl'] / abs(summary['total_cost'])
+        if summary.get('open_pnl') is not None and summary.get('total_cost') else None
+    )
+    return summary
 
 
 def _position_matches_ticker(symbol, instrument, ticker):
@@ -4875,6 +5006,9 @@ def _normalize_trade_positions(account, ticker=None, contract_symbol=None):
         long_qty = _position_number(row, 'longQuantity') or 0
         short_qty = _position_number(row, 'shortQuantity') or 0
         quantity = long_qty - short_qty
+        average_price = _position_number(row, 'averagePrice')
+        market_value = _position_number(row, 'marketValue')
+        totals = _compute_position_totals(row, instrument, symbol, quantity, average_price, market_value)
         normalized.append({
             'symbol': symbol,
             'asset_type': instrument.get('assetType') or row.get('assetType'),
@@ -4883,8 +5017,13 @@ def _normalize_trade_positions(account, ticker=None, contract_symbol=None):
             'quantity': quantity,
             'long_quantity': long_qty,
             'short_quantity': short_qty,
-            'average_price': _position_number(row, 'averagePrice'),
-            'market_value': _position_number(row, 'marketValue'),
+            'average_price': average_price,
+            'average_price_per_contract': totals.get('average_price_per_contract'),
+            'total_cost': totals.get('total_cost'),
+            'market_value': market_value,
+            'open_pnl': totals.get('open_pnl'),
+            'open_pnl_pct': totals.get('open_pnl_pct'),
+            'contract_multiplier': totals.get('contract_multiplier'),
             'day_pnl': _position_number(row, 'currentDayProfitLoss'),
             'day_pnl_pct': _position_number(row, 'currentDayProfitLossPercentage'),
             'selected_contract_match': exact_match,
@@ -4903,6 +5042,7 @@ def build_trade_account_details_payload(raw_details, account_hash, ticker=None, 
         'account_hash': str(account_hash or ''),
         'account_type': str(account_type) if account_type else None,
         'balances': _pick_balance_fields(account),
+        'account_summary': _compute_trade_account_summary(account),
         'positions': _normalize_trade_positions(account, ticker=ticker, contract_symbol=contract_symbol),
     }
 
@@ -11383,6 +11523,10 @@ def index():
             border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
             background: color-mix(in srgb, var(--accent) 3%, var(--bg-1));
         }
+        .trade-account-info-panel {
+            order: 8;
+            border-color: color-mix(in srgb, var(--info) 22%, var(--border));
+        }
         .trade-position-panel {
             order: 9;
             border-color: color-mix(in srgb, var(--accent) 20%, var(--border));
@@ -11904,6 +12048,30 @@ def index():
             gap: 4px;
             margin-top: 5px;
         }
+        .trade-active-freshness {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 5px;
+            min-width: 0;
+            margin-top: 4px;
+            color: var(--fg-2);
+            font-size: 9px;
+            line-height: 1.25;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-active-freshness span {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-active-freshness strong {
+            color: var(--fg-0);
+            font-weight: 800;
+        }
+        .trade-active-freshness .warn strong { color: var(--warn); }
+        .trade-active-freshness .bad strong { color: var(--put); }
         .trade-ticket-freshness {
             grid-template-columns: repeat(2, minmax(0, 1fr));
             margin: 8px 0 0;
@@ -11940,6 +12108,12 @@ def index():
             color: var(--warn);
         }
         .trade-active-stat.bad strong {
+            color: var(--put);
+        }
+        .trade-active-stat.pos strong {
+            color: var(--call);
+        }
+        .trade-active-stat.neg strong {
             color: var(--put);
         }
         .trade-active-ladder {
@@ -12012,6 +12186,12 @@ def index():
         .trade-active-ask.ask-zone {
             background: color-mix(in srgb, var(--put) 9%, transparent);
         }
+        .trade-active-marker-cell[data-trade-ladder-action] {
+            cursor: pointer;
+        }
+        .trade-active-marker-cell[data-trade-ladder-action]:hover {
+            box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
+        }
         .trade-ladder-order-marker {
             display: inline-grid;
             grid-template-columns: minmax(0, 1fr) 14px;
@@ -12028,6 +12208,12 @@ def index():
             line-height: 1.1;
             text-align: left;
             text-transform: uppercase;
+            cursor: grab;
+        }
+        .trade-ladder-order-marker.dragging {
+            cursor: grabbing;
+            opacity: 0.82;
+            transform: translateY(-1px);
         }
         .trade-ladder-order-marker.buy {
             border-color: color-mix(in srgb, var(--call) 58%, var(--border));
@@ -12371,6 +12557,7 @@ def index():
             font-weight: 800;
         }
         .trade-helper-toggle,
+        .trade-account-info-toggle,
         .trade-position-toggle,
         .trade-position-select {
             min-height: 22px;
@@ -12384,6 +12571,7 @@ def index():
             cursor: pointer;
         }
         .trade-helper-toggle,
+        .trade-account-info-toggle,
         .trade-position-toggle {
             min-width: 24px;
             padding: 0 6px;
@@ -12580,6 +12768,39 @@ def index():
         }
         .trade-account-context.visible {
             display: block;
+        }
+        .trade-account-info-grid {
+            display: grid;
+            gap: 4px;
+            min-width: 0;
+        }
+        .trade-account-info-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(70px, auto);
+            gap: 8px;
+            align-items: center;
+            min-width: 0;
+            color: var(--fg-2);
+            font-size: 10px;
+            line-height: 1.25;
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-account-info-row span,
+        .trade-account-info-row strong {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .trade-account-info-row strong {
+            color: var(--fg-0);
+            font-size: 11px;
+            text-align: right;
+        }
+        .trade-account-info-row.pos strong { color: var(--call); }
+        .trade-account-info-row.neg strong { color: var(--put); }
+        .trade-account-info-collapsed [data-trade-account-info-body] {
+            display: none;
         }
         .trade-account-row {
             display: grid;
@@ -18863,6 +19084,18 @@ def index():
                             <span class="trade-scalp-target-method unavailable" data-trade-scalp-method>Unavailable</span>
                         </div>
                     </section>
+                    <section class="trade-panel trade-account-info-panel" data-trade-account-info-panel>
+                        <div class="trade-panel-head">
+                            <div class="trade-panel-title">Account Info</div>
+                            <div class="trade-position-tools">
+                                <div class="trade-panel-note" data-trade-account-info-note>No account</div>
+                                <button type="button" class="trade-account-info-toggle" data-trade-account-info-toggle title="Collapse account info" aria-label="Collapse account info" aria-expanded="true">⌃</button>
+                            </div>
+                        </div>
+                        <div class="trade-account-info-grid" data-trade-account-info-body>
+                            <div class="trade-empty">Select an account to show day/account fields.</div>
+                        </div>
+                    </section>
                     <section class="trade-panel trade-position-panel">
                         <div class="trade-panel-head">
                             <div class="trade-panel-title">Active Positions</div>
@@ -18931,11 +19164,16 @@ def index():
                                 </div>
                             </div>
                             <div class="trade-active-context">
-                                <div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div>
-                                <div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div>
-                                <div class="trade-active-stat" data-trade-fast-quote-age-wrap><span>Quote Age</span><strong data-trade-fast-quote-age>—</strong></div>
-                                <div class="trade-active-stat" data-trade-fast-preview-ttl-wrap><span>Preview TTL</span><strong data-trade-fast-preview-ttl>5:00</strong></div>
-                                <div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div>
+                                <div class="trade-active-stat"><span>Qty</span><strong data-trade-fast-position>—</strong></div>
+                                <div class="trade-active-stat"><span>Avg</span><strong data-trade-fast-average>—</strong></div>
+                                <div class="trade-active-stat" data-trade-fast-open-pnl-wrap><span>Open P/L</span><strong data-trade-fast-open-pnl>—</strong></div>
+                                <div class="trade-active-stat" data-trade-fast-day-pnl-wrap><span>Day P/L</span><strong data-trade-fast-day-pnl>—</strong></div>
+                                <div class="trade-active-stat"><span>Working</span><strong data-trade-fast-orders>—</strong></div>
+                            </div>
+                            <div class="trade-active-freshness">
+                                <span>Preview <strong data-trade-fast-preview>Required</strong></span>
+                                <span data-trade-fast-quote-age-wrap>Quote <strong data-trade-fast-quote-age>—</strong></span>
+                                <span data-trade-fast-preview-ttl-wrap>TTL <strong data-trade-fast-preview-ttl>5:00</strong></span>
                             </div>
                             <div class="trade-active-ladder">
                                 <div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span><span>P/L</span></div>
@@ -29833,6 +30071,15 @@ def index():
             );
         }
 
+        function buildTradeAccountInfoPanelHtml() {
+            return (
+                '<section class="trade-panel trade-account-info-panel" data-trade-account-info-panel>' +
+                    '<div class="trade-panel-head"><div class="trade-panel-title">Account Info</div><div class="trade-position-tools"><div class="trade-panel-note" data-trade-account-info-note>No account</div><button type="button" class="trade-account-info-toggle" data-trade-account-info-toggle title="Collapse account info" aria-label="Collapse account info" aria-expanded="true">⌃</button></div></div>' +
+                    '<div class="trade-account-info-grid" data-trade-account-info-body><div class="trade-empty">Select an account to show day/account fields.</div></div>' +
+                '</section>'
+            );
+        }
+
         function buildTradePositionPanelHtml() {
             return (
                 '<section class="trade-panel trade-position-panel">' +
@@ -29853,7 +30100,8 @@ def index():
                             '<label class="trade-active-template-control"><span class="trade-active-control-label">Tpl</span><select data-trade-fast-template></select></label>' +
                         '</div>' +
                         '<div class="trade-active-template-plan" data-trade-fast-bracket-plan><div class="trade-active-template-head"><strong data-trade-fast-bracket-title>TRG template</strong><span data-trade-fast-bracket-summary>Planning only</span><button type="button" data-trade-fast-bracket-toggle aria-expanded="false">Plan</button></div><div class="trade-active-offsets"><label>Limit +<input data-trade-fast-target-offset type="number" min="0.01" max="99" step="0.01" value="1"></label><label>Stop -<input data-trade-fast-stop-offset type="number" min="0.01" max="99" step="0.01" value="1"></label></div><div class="trade-active-bracket-rows" data-trade-fast-bracket-rows><div class="trade-empty">Select a contract to plan exits.</div></div></div>' +
-                        '<div class="trade-active-context"><div class="trade-active-stat"><span>Position</span><strong data-trade-fast-position>—</strong></div><div class="trade-active-stat"><span>Preview</span><strong data-trade-fast-preview>Required</strong></div><div class="trade-active-stat" data-trade-fast-quote-age-wrap><span>Quote Age</span><strong data-trade-fast-quote-age>—</strong></div><div class="trade-active-stat" data-trade-fast-preview-ttl-wrap><span>Preview TTL</span><strong data-trade-fast-preview-ttl>5:00</strong></div><div class="trade-active-stat"><span>Orders</span><strong data-trade-fast-orders>—</strong></div></div>' +
+                        '<div class="trade-active-context"><div class="trade-active-stat"><span>Qty</span><strong data-trade-fast-position>—</strong></div><div class="trade-active-stat"><span>Avg</span><strong data-trade-fast-average>—</strong></div><div class="trade-active-stat" data-trade-fast-open-pnl-wrap><span>Open P/L</span><strong data-trade-fast-open-pnl>—</strong></div><div class="trade-active-stat" data-trade-fast-day-pnl-wrap><span>Day P/L</span><strong data-trade-fast-day-pnl>—</strong></div><div class="trade-active-stat"><span>Working</span><strong data-trade-fast-orders>—</strong></div></div>' +
+                        '<div class="trade-active-freshness"><span>Preview <strong data-trade-fast-preview>Required</strong></span><span data-trade-fast-quote-age-wrap>Quote <strong data-trade-fast-quote-age>—</strong></span><span data-trade-fast-preview-ttl-wrap>TTL <strong data-trade-fast-preview-ttl>5:00</strong></span></div>' +
                         '<div class="trade-active-ladder"><div class="trade-active-ladder-head"><span>Buy</span><span>Bid</span><span>Price</span><span>Ask</span><span>Sell</span><span>P/L</span></div><div data-trade-fast-ladder><div class="trade-empty">Select a contract to show the price ladder.</div></div></div>' +
                         '<div class="trade-active-message" data-trade-fast-message>Auto-send starts off. Live sends still require a successful preview.</div>' +
                     '</div>' +
@@ -29893,6 +30141,7 @@ def index():
                 '<div class="trade-rail-shell">' +
                     '<div class="trade-account-context" data-trade-account-context><span data-trade-account-status>Read only</span><span data-trade-account-warnings></span></div>' +
                     buildTradeScalpTargetsPanelHtml() +
+                    buildTradeAccountInfoPanelHtml() +
                     buildTradePositionPanelHtml() +
                     buildTradeActiveTraderPanelHtml() +
                     buildTradeHelperPanelHtml() +
@@ -30043,7 +30292,7 @@ def index():
                 rail.setAttribute('aria-label', 'Options trading rail');
                 rail.innerHTML = buildTradeRailHtml();
                 grid.appendChild(rail);
-            } else if (!rail.querySelector('.trade-rail-shell') || !rail.querySelector('[data-trade-scalp-target-panel]') || !rail.querySelector('[data-trade-active-panel]') || !rail.querySelector('[data-trade-quick-contracts]')) {
+            } else if (!rail.querySelector('.trade-rail-shell') || !rail.querySelector('[data-trade-scalp-target-panel]') || !rail.querySelector('[data-trade-account-info-panel]') || !rail.querySelector('[data-trade-active-panel]') || !rail.querySelector('[data-trade-quick-contracts]')) {
                 rail.innerHTML = buildTradeRailHtml();
                 rail.__tradePickerWired = false;
             }
@@ -30606,6 +30855,7 @@ def index():
         const TRADE_BRACKET_CUSTOM_KEY = 'gex.tradeBracketTemplates';
         const TRADE_BRACKET_COLLAPSE_KEY = 'gex.tradeBracketCollapsed';
         const TRADE_FAST_BRACKET_COLLAPSE_KEY = 'gex.tradeFastBracketCollapsed';
+        const TRADE_ACCOUNT_INFO_COLLAPSE_KEY = 'gex.tradeAccountInfoCollapsed';
         const TRADE_POSITION_COLLAPSE_KEY = 'gex.tradePositionCollapsed';
         const TRADE_HELPER_COMPACT_KEY = 'gex.tradeHelperCompact';
         const TRADE_ACTIVE_TRADER_COLLAPSE_KEY = 'gex.tradeActiveTraderCollapsed';
@@ -30652,6 +30902,7 @@ def index():
             orderPollInFlight: false,
             lastOrderPollAt: 0,
             cancelLoadingId: '',
+            replacingOrderId: '',
             action: 'BUY_TO_OPEN',
             quantity: 1,
             scalpTargetProfitPerContract: getTradeStoredNumber(TRADE_SCALP_TARGET_PROFIT_KEY, 100),
@@ -30705,6 +30956,7 @@ def index():
             ladderRenderSignature: '',
             fastBracketCollapsed: getTradeStoredBool(TRADE_FAST_BRACKET_COLLAPSE_KEY, true),
             bracketCollapsed: getTradeStoredBool(TRADE_BRACKET_COLLAPSE_KEY, true),
+            accountInfoCollapsed: getTradeStoredBool(TRADE_ACCOUNT_INFO_COLLAPSE_KEY, false),
             positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
             helperCompact: getTradeStoredBool(TRADE_HELPER_COMPACT_KEY, false),
             railScrollTop: 0,
@@ -31810,6 +32062,65 @@ def index():
             const qty = Number(pos && pos.quantity);
             return Number.isFinite(qty) ? Math.max(0, Math.floor(qty)) : 0;
         }
+        function getTradeContractForPosition(pos) {
+            const symbol = normalizeTradeContractSymbolForMatch(pos && pos.symbol);
+            if (!symbol) return null;
+            return getTradePayloadContracts().find(row => normalizeTradeContractSymbolForMatch(row && row.contract_symbol) === symbol) || null;
+        }
+        function getTradePositionQuantityAbs(pos) {
+            const qty = Number(pos && pos.quantity);
+            return Number.isFinite(qty) ? Math.abs(qty) : 0;
+        }
+        function getTradePositionMultiplier(pos) {
+            const multiplier = Number(pos && pos.contract_multiplier);
+            if (Number.isFinite(multiplier) && multiplier > 0) return multiplier;
+            const symbol = normalizeTradeContractSymbolForMatch(pos && pos.symbol);
+            return /^[A-Z.]{1,6}\d{6}[CP]\d{8}$/.test(symbol) || String(pos && pos.asset_type || '').toUpperCase() === 'OPTION' ? 100 : 1;
+        }
+        function getTradePositionAveragePremium(pos) {
+            const backendAvg = Number(pos && pos.average_price_per_contract);
+            if (Number.isFinite(backendAvg) && backendAvg > 0) {
+                return { premium: backendAvg, source: 'Schwab avg', normalized: backendAvg !== Number(pos && pos.average_price) };
+            }
+            const contract = getTradeContractForPosition(pos) || getSelectedTradeContract();
+            const avg = normalizeTradePositionAveragePrice(pos && pos.average_price, contract);
+            if (avg && Number.isFinite(avg.premium) && avg.premium > 0) return avg;
+            const raw = Number(pos && pos.average_price);
+            if (Number.isFinite(raw) && raw > 0) return { premium: raw, source: 'Schwab avg', normalized: false };
+            return null;
+        }
+        function getTradePositionTotalCost(pos) {
+            const backendCost = Number(pos && pos.total_cost);
+            if (Number.isFinite(backendCost) && backendCost > 0) return backendCost;
+            const avg = getTradePositionAveragePremium(pos);
+            const qty = getTradePositionQuantityAbs(pos);
+            if (!avg || !Number.isFinite(avg.premium) || !qty) return null;
+            return avg.premium * qty * getTradePositionMultiplier(pos);
+        }
+        function getTradePositionOpenPnl(pos) {
+            const backendPnl = getTradeFirstFinite([pos && pos.open_pnl]);
+            if (backendPnl != null) return backendPnl;
+            const totalCost = getTradePositionTotalCost(pos);
+            const marketValue = getTradeFirstFinite([pos && pos.market_value]);
+            const qty = getTradeFirstFinite([pos && pos.quantity]);
+            if (!Number.isFinite(totalCost) || !Number.isFinite(marketValue) || !Number.isFinite(qty)) return null;
+            return qty >= 0 ? (marketValue - totalCost) : (totalCost - Math.abs(marketValue));
+        }
+        function getTradePositionOpenPnlPct(pos) {
+            const backendPct = getTradeFirstFinite([pos && pos.open_pnl_pct]);
+            if (backendPct != null) return backendPct;
+            const pnl = getTradePositionOpenPnl(pos);
+            const totalCost = getTradePositionTotalCost(pos);
+            if (!Number.isFinite(pnl) || !Number.isFinite(totalCost) || totalCost === 0) return null;
+            return pnl / Math.abs(totalCost);
+        }
+        function fmtTradeSignedPct(value) {
+            if (value == null || value === '') return '—';
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '—';
+            const sign = n > 0 ? '+' : '';
+            return sign + (n * 100).toFixed(Math.abs(n) >= 1 ? 0 : 1) + '%';
+        }
         function normalizeTradePositionAveragePrice(avg, selected) {
             const n = Number(avg);
             const ref = Number(selected && (selected.mid || selected.mark || selected.ask || selected.bid));
@@ -32129,6 +32440,20 @@ def index():
                 return true;
             });
         }
+        function getTradeActiveOrderSummary(selected, orders = tradeRailState.orders) {
+            const markers = selected ? getTradeLadderMarkersForSelected(selected) : [];
+            const working = markers.filter(marker => String(marker.state || '').toLowerCase() === 'working' || marker.source === 'schwab');
+            const staged = markers.filter(marker => ['staged', 'previewed', 'previewing', 'sending'].includes(String(marker.state || '').toLowerCase()));
+            const primary = working[0] || staged[0] || null;
+            if (primary) {
+                const side = primary.side === 'sell' ? 'Sell' : 'Buy';
+                const qty = primary.quantity == null ? '' : (' ' + primary.quantity);
+                const suffix = working.length + staged.length > 1 ? ' +' + (working.length + staged.length - 1) : '';
+                return side + qty + ' @ ' + fmtTradePrice(primary.price) + suffix;
+            }
+            const rawOrders = Array.isArray(orders) ? orders : [];
+            return rawOrders.length ? rawOrders.length + ' open/recent' : 'None';
+        }
         function normalizeTradeLadderPrice(value, tick) {
             const n = Number(value);
             const step = Number(tick);
@@ -32215,7 +32540,17 @@ def index():
             } else if (marker && marker.clearable && marker.local_id) {
                 control = '<button type="button" class="trade-ladder-cancel" data-trade-ladder-clear-intent="' + _escapeHtml(marker.local_id) + '" aria-label="' + _escapeHtml('Clear local ' + state + ' marker') + '">x</button>';
             }
-            return '<span class="trade-ladder-order-marker ' + side + ' ' + _escapeHtml(marker.source || '') + ' ' + _escapeHtml(state) + '" title="' + _escapeHtml(title) + '">' +
+            return '<span class="trade-ladder-order-marker ' + side + ' ' + _escapeHtml(marker.source || '') + ' ' + _escapeHtml(state) + '"' +
+                ' title="' + _escapeHtml(title) + '"' +
+                ' data-trade-ladder-marker-id="' + _escapeHtml(marker.marker_id || '') + '"' +
+                ' data-trade-ladder-source="' + _escapeHtml(marker.source || '') + '"' +
+                ' data-trade-ladder-side="' + _escapeHtml(side) + '"' +
+                ' data-trade-ladder-state="' + _escapeHtml(state) + '"' +
+                ' data-trade-ladder-price="' + _escapeHtml(marker.price == null ? '' : normalizeTradeIntentLimit(marker.price)) + '"' +
+                ' data-trade-ladder-local-id="' + _escapeHtml(marker.local_id || '') + '"' +
+                ' data-trade-ladder-order-id="' + _escapeHtml(marker.order_id || '') + '"' +
+                ' data-trade-ladder-instruction="' + _escapeHtml(marker.instruction || '') + '"' +
+                ' data-trade-ladder-quantity="' + _escapeHtml(marker.quantity == null ? '' : String(marker.quantity)) + '">' +
                 '<span>' + _escapeHtml(marker && marker.label || 'ORDER') + '</span>' +
                 control +
             '</span>';
@@ -32434,12 +32769,13 @@ def index():
                 const pnlTitle = basis
                     ? ('P/L from ' + basis.source + ' ' + fmtTradePrice(basis.premium) + ' x' + basisQty)
                     : 'P/L unavailable without an active long selected-contract position.';
-                return '<div role="button" tabindex="0" class="' + classes + '" data-trade-fast-price="' + _escapeHtml(price.toFixed(2)) + '">' +
-                    '<span class="' + buyCellClasses + '">' + buyMarkers + '</span>' +
+                const priceText = price.toFixed(2);
+                return '<div role="button" tabindex="0" class="' + classes + '" data-trade-fast-price="' + _escapeHtml(priceText) + '" title="' + _escapeHtml('Click price row to stage the current side at ' + fmtTradePrice(price)) + '">' +
+                    '<span class="' + buyCellClasses + '" data-trade-ladder-action="BUY_TO_OPEN" title="' + _escapeHtml('Stage buy limit @ ' + fmtTradePrice(price)) + '">' + buyMarkers + '</span>' +
                     '<span class="' + bidClasses + '">' + (nearBid ? 'BID' : '') + '</span>' +
                     '<span class="' + priceClasses + '">' + _escapeHtml(fmtTradePrice(price)) + '</span>' +
                     '<span class="' + askClasses + '">' + (nearAsk ? 'ASK' : '') + '</span>' +
-                    '<span class="' + sellCellClasses + '">' + sellMarkers + '</span>' +
+                    '<span class="' + sellCellClasses + '" data-trade-ladder-action="SELL_TO_CLOSE" title="' + _escapeHtml('Stage sell limit @ ' + fmtTradePrice(price)) + '">' + sellMarkers + '</span>' +
                     '<span class="' + pnlClasses + '" title="' + _escapeHtml(pnlTitle) + '">' + _escapeHtml(Number.isFinite(pnl) ? fmtTradeSignedMoney(pnl) : '—') + '</span>' +
                 '</div>';
             }).join('');
@@ -32526,6 +32862,11 @@ def index():
             const arm = panel.querySelector('[data-trade-fast-arm]');
             const armWrap = panel.querySelector('[data-trade-fast-arm-wrap]');
             const positionEl = panel.querySelector('[data-trade-fast-position]');
+            const averageEl = panel.querySelector('[data-trade-fast-average]');
+            const openPnlEl = panel.querySelector('[data-trade-fast-open-pnl]');
+            const openPnlWrap = panel.querySelector('[data-trade-fast-open-pnl-wrap]');
+            const dayPnlEl = panel.querySelector('[data-trade-fast-day-pnl]');
+            const dayPnlWrap = panel.querySelector('[data-trade-fast-day-pnl-wrap]');
             const previewEl = panel.querySelector('[data-trade-fast-preview]');
             const quoteAgeEl = panel.querySelector('[data-trade-fast-quote-age]');
             const quoteAgeWrap = panel.querySelector('[data-trade-fast-quote-age-wrap]');
@@ -32565,7 +32906,24 @@ def index():
             if (arm) arm.checked = !!tradeRailState.activeTraderArmed;
             if (armWrap) armWrap.classList.toggle('armed', !!tradeRailState.activeTraderArmed);
             const posQty = position ? getSelectedTradePositionQuantity() : 0;
-            if (positionEl) positionEl.textContent = position ? ('Net ' + posQty + ' · Day ' + fmtTradeMoney(position.day_pnl)) : 'Flat';
+            const avg = position ? getTradePositionAveragePremium(position) : null;
+            const openPnl = position ? getTradePositionOpenPnl(position) : null;
+            const openPct = position ? getTradePositionOpenPnlPct(position) : null;
+            const dayPnl = position ? getTradeFirstFinite([position.day_pnl]) : null;
+            if (positionEl) positionEl.textContent = position ? (posQty + ' contract' + (posQty === 1 ? '' : 's')) : 'Flat';
+            if (averageEl) averageEl.textContent = avg ? fmtTradeMoney(avg.premium) : '—';
+            if (openPnlEl) openPnlEl.textContent = Number.isFinite(openPnl)
+                ? (fmtTradeSignedMoney(openPnl) + (Number.isFinite(openPct) ? ' ' + fmtTradeSignedPct(openPct) : ''))
+                : '—';
+            if (openPnlWrap) {
+                openPnlWrap.classList.toggle('pos', Number.isFinite(openPnl) && openPnl > 0);
+                openPnlWrap.classList.toggle('neg', Number.isFinite(openPnl) && openPnl < 0);
+            }
+            if (dayPnlEl) dayPnlEl.textContent = Number.isFinite(dayPnl) ? fmtTradeSignedMoney(dayPnl) : '—';
+            if (dayPnlWrap) {
+                dayPnlWrap.classList.toggle('pos', Number.isFinite(dayPnl) && dayPnl > 0);
+                dayPnlWrap.classList.toggle('neg', Number.isFinite(dayPnl) && dayPnl < 0);
+            }
             if (previewEl) previewEl.textContent = tradeRailState.previewToken ? 'Ready' : (tradeRailState.previewLoading ? 'Loading' : 'Required');
             const quoteAgeSeconds = getTradeQuoteAgeSeconds(selected);
             if (quoteAgeEl) quoteAgeEl.textContent = quoteAgeSeconds == null ? '—' : fmtTradeDuration(quoteAgeSeconds);
@@ -32580,7 +32938,7 @@ def index():
                 previewTtlWrap.classList.toggle('bad', ttl.cls === 'bad');
             }
             const orders = Array.isArray(tradeRailState.orders) ? tradeRailState.orders : [];
-            if (ordersEl) ordersEl.textContent = tradeRailState.ordersLoading ? 'Loading' : (orders.length ? orders.length + ' open/recent' : 'None');
+            if (ordersEl) ordersEl.textContent = tradeRailState.ordersLoading ? 'Loading' : getTradeActiveOrderSummary(selected, orders);
             if (flatten) flatten.disabled = !selected || !posQty;
             panel.querySelectorAll('[data-trade-fast-action]').forEach(btn => {
                 btn.disabled = !selected || tradeRailState.placementLoading || tradeRailState.previewLoading;
@@ -32606,7 +32964,8 @@ def index():
                     btn.__tradeFastPriceBound = true;
                     btn.addEventListener('click', event => {
                         if (event.target && event.target.closest && event.target.closest('[data-trade-ladder-cancel-order], [data-trade-ladder-clear-intent]')) return;
-                        handleTradeFastLadderPrice(btn.dataset.tradeFastPrice || '');
+                        const actionEl = event.target && event.target.closest ? event.target.closest('[data-trade-ladder-action]') : null;
+                        handleTradeFastLadderPrice(btn.dataset.tradeFastPrice || '', actionEl ? actionEl.dataset.tradeLadderAction : '');
                     });
                     btn.addEventListener('keydown', event => {
                         if (event.target && event.target.closest && event.target.closest('[data-trade-ladder-cancel-order], [data-trade-ladder-clear-intent]')) return;
@@ -32632,6 +32991,9 @@ def index():
                         event.stopPropagation();
                         clearTradeOrderIntent(btn.dataset.tradeLadderClearIntent || '');
                     });
+                });
+                ladder.querySelectorAll('[data-trade-ladder-marker-id]').forEach(markerEl => {
+                    wireTradeLadderMarkerDrag(markerEl);
                 });
             }
             const detail = tradeRailState.fastTradeMessage || quoteMove.message || mode.detail;
@@ -33002,6 +33364,114 @@ def index():
                 select.innerHTML = options;
                 select.disabled = tradeRailState.accountLoading || !tradeRailState.accounts.length;
             }
+            renderTradeAccountInfo();
+        }
+        function getTradeFirstFinite(values) {
+            for (const value of values) {
+                if (value == null || value === '') continue;
+                const n = Number(value);
+                if (Number.isFinite(n)) return n;
+            }
+            return null;
+        }
+        function fmtTradeMaybeMoney(value) {
+            return value == null ? '—' : fmtTradeMoney(value);
+        }
+        function fmtTradeMaybeSignedMoney(value) {
+            return value == null ? '—' : fmtTradeSignedMoney(value);
+        }
+        function getTradeBalanceNumber(balances, keys) {
+            return getTradeFirstFinite((keys || []).map(key => balances && balances[key]));
+        }
+        function getTradePositionsOpenPnlSummary() {
+            const positions = Array.isArray(tradeRailState.accountDetails && tradeRailState.accountDetails.positions)
+                ? tradeRailState.accountDetails.positions
+                : [];
+            let openPnl = 0;
+            let totalCost = 0;
+            let openCount = 0;
+            let dayPnl = 0;
+            let dayCount = 0;
+            positions.forEach(pos => {
+                const open = getTradePositionOpenPnl(pos);
+                const cost = getTradePositionTotalCost(pos);
+                const day = getTradeFirstFinite([pos && pos.day_pnl]);
+                if (Number.isFinite(open)) {
+                    openPnl += open;
+                    openCount += 1;
+                }
+                if (Number.isFinite(cost)) totalCost += Math.abs(cost);
+                if (day != null) {
+                    dayPnl += day;
+                    dayCount += 1;
+                }
+            });
+            return {
+                open_pnl: openCount ? openPnl : null,
+                open_pnl_pct: openCount && totalCost ? openPnl / totalCost : null,
+                day_pnl: dayCount ? dayPnl : null,
+            };
+        }
+        function buildTradeAccountInfoRow(label, value, cls = '') {
+            return '<div class="trade-account-info-row ' + _escapeHtml(cls) + '"><span>' + _escapeHtml(label) + '</span><strong>' + _escapeHtml(value) + '</strong></div>';
+        }
+        function renderTradeAccountInfo() {
+            const panel = document.querySelector('[data-trade-account-info-panel]');
+            const body = document.querySelector('[data-trade-account-info-body]');
+            const note = document.querySelector('[data-trade-account-info-note]');
+            const toggle = document.querySelector('[data-trade-account-info-toggle]');
+            if (!panel || !body) return;
+            panel.classList.toggle('trade-account-info-collapsed', !!tradeRailState.accountInfoCollapsed);
+            if (toggle) {
+                toggle.textContent = tradeRailState.accountInfoCollapsed ? '⌄' : '⌃';
+                toggle.title = tradeRailState.accountInfoCollapsed ? 'Expand account info' : 'Collapse account info';
+                toggle.setAttribute('aria-label', toggle.title);
+                toggle.setAttribute('aria-expanded', tradeRailState.accountInfoCollapsed ? 'false' : 'true');
+            }
+            if (tradeRailState.accountInfoCollapsed) {
+                if (note) note.textContent = 'Hidden';
+                return;
+            }
+            if (!tradeRailState.accountHash) {
+                if (note) note.textContent = 'No account';
+                body.innerHTML = '<div class="trade-empty">Select an account to show day/account fields.</div>';
+                return;
+            }
+            if (tradeRailState.accountDetailsLoading) {
+                if (note) note.textContent = 'Loading';
+                body.innerHTML = '<div class="trade-empty">Loading account info...</div>';
+                return;
+            }
+            if (!tradeRailState.accountDetails && tradeRailState.accountError) {
+                if (note) note.textContent = 'Unavailable';
+                body.innerHTML = '<div class="trade-empty">' + _escapeHtml(tradeRailState.accountError) + '</div>';
+                return;
+            }
+            const details = tradeRailState.accountDetails || {};
+            const balances = details.balances || {};
+            const summary = details.account_summary || {};
+            const positionSummary = getTradePositionsOpenPnlSummary();
+            const dayPnl = getTradeFirstFinite([summary.day_pnl, balances.currentDayProfitLoss, positionSummary.day_pnl]);
+            const openPnl = getTradeFirstFinite([summary.open_pnl, balances.openProfitLoss, positionSummary.open_pnl]);
+            const openPct = getTradeFirstFinite([summary.open_pnl_pct, balances.currentDayProfitLossPercentage, positionSummary.open_pnl_pct]);
+            const settledFunds = getTradeBalanceNumber(balances, ['settledFunds', 'cashAvailableForTrading', 'availableFunds']);
+            const cashBalance = getTradeBalanceNumber(balances, ['cashBalance', 'moneyMarketFund']);
+            const netLiq = getTradeBalanceNumber(balances, ['liquidationValue', 'currentLiquidationValue', 'accountValue']);
+            const dayTrades = getTradeBalanceNumber(balances, ['dayTradesRemaining', 'roundTrips']);
+            const netLiqText = fmtTradeMaybeMoney(netLiq) + (Number.isFinite(dayTrades) ? ' · DT ' + fmtTradeInt(dayTrades) : '');
+            const rows = [
+                ['P/L Day', fmtTradeMaybeSignedMoney(dayPnl), Number(dayPnl) > 0 ? 'pos' : (Number(dayPnl) < 0 ? 'neg' : '')],
+                ['P/L Open', fmtTradeMaybeSignedMoney(openPnl), Number(openPnl) > 0 ? 'pos' : (Number(openPnl) < 0 ? 'neg' : '')],
+                ['P/L Percent', fmtTradeSignedPct(openPct), Number(openPct) > 0 ? 'pos' : (Number(openPct) < 0 ? 'neg' : '')],
+                ['Settled Funds', fmtTradeMaybeMoney(settledFunds), ''],
+                ['Cash Balance', fmtTradeMaybeMoney(cashBalance), ''],
+                ['Net Liq & Day Trades', netLiqText, ''],
+            ];
+            body.innerHTML = rows.map(row => buildTradeAccountInfoRow(row[0], row[1], row[2])).join('');
+            if (note) {
+                const count = Number(summary.positions_count);
+                note.textContent = Number.isFinite(count) && count ? count + ' pos' : (details.account_type || 'Loaded');
+            }
         }
         function renderTradePositions() {
             const list = document.querySelector('[data-trade-position-list]');
@@ -33044,9 +33514,19 @@ def index():
             list.innerHTML = positions.map(pos => {
                 const qty = Number(pos.quantity);
                 const qtyText = Number.isFinite(qty) ? qty.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—';
-                const mv = fmtTradeMoney(pos.market_value);
-                const day = fmtTradeMoney(pos.day_pnl);
-                const dayValue = Number(pos.day_pnl);
+                const avg = getTradePositionAveragePremium(pos);
+                const avgText = avg ? fmtTradeMoney(avg.premium) : '—';
+                const totalCost = getTradePositionTotalCost(pos);
+                const costText = Number.isFinite(totalCost) ? fmtTradeMoney(totalCost) : '—';
+                const mv = fmtTradeMaybeMoney(getTradeFirstFinite([pos.market_value]));
+                const openPnl = getTradePositionOpenPnl(pos);
+                const openPct = getTradePositionOpenPnlPct(pos);
+                const openText = Number.isFinite(openPnl)
+                    ? (fmtTradeSignedMoney(openPnl) + (Number.isFinite(openPct) ? ' ' + fmtTradeSignedPct(openPct) : ''))
+                    : '—';
+                const dayValue = getTradeFirstFinite([pos.day_pnl]);
+                const day = dayValue == null ? '—' : fmtTradeSignedMoney(dayValue);
+                const openClass = Number.isFinite(openPnl) && openPnl > 0 ? ' pos' : (Number.isFinite(openPnl) && openPnl < 0 ? ' neg' : '');
                 const dayClass = Number.isFinite(dayValue) && dayValue > 0 ? ' pos' : (Number.isFinite(dayValue) && dayValue < 0 ? ' neg' : '');
                 const display = getTradePositionDisplay(pos);
                 const matchClass = pos.selected_contract_match ? ' match' : '';
@@ -33064,7 +33544,10 @@ def index():
                         '</div>' +
                         '<div class="trade-position-values">' +
                             '<div class="trade-position-metric"><span>Qty</span><strong>' + _escapeHtml(qtyText) + '</strong></div>' +
-                            '<div class="trade-position-metric"><span>Mkt</span><strong>' + _escapeHtml(mv) + '</strong></div>' +
+                            '<div class="trade-position-metric"><span>Avg</span><strong>' + _escapeHtml(avgText) + '</strong></div>' +
+                            '<div class="trade-position-metric"><span>Cost</span><strong>' + _escapeHtml(costText) + '</strong></div>' +
+                            '<div class="trade-position-metric"><span>Liq</span><strong>' + _escapeHtml(mv) + '</strong></div>' +
+                            '<div class="trade-position-metric pnl' + openClass + '"><span>Open</span><strong>' + _escapeHtml(openText) + '</strong></div>' +
                             '<div class="trade-position-metric pnl' + dayClass + '"><span>Day</span><strong>' + _escapeHtml(day) + '</strong></div>' +
                             selectButton +
                         '</div>' +
@@ -34055,6 +34538,7 @@ def index():
             if (!options.force && tradeRailState.accountRequestKey === key && tradeRailState.accountDetails) return;
             tradeRailState.accountDetailsLoading = true;
             tradeRailState.accountRequestKey = key;
+            renderTradeAccountInfo();
             renderTradePositions();
             fetch('/trade/account_details', {
                 method: 'POST',
@@ -34585,7 +35069,7 @@ def index():
             }
             return { selected, changed, value, intent };
         }
-        function handleTradeFastLadderPrice(priceValue) {
+        function handleTradeFastLadderPrice(priceValue, instruction = '') {
             const selected = getSelectedTradeContract();
             if (!selected) {
                 tradeRailState.fastTradeMessage = 'Select a cached contract first.';
@@ -34599,30 +35083,210 @@ def index():
                 return;
             }
             const nextPrice = price.toFixed(2);
+            const nextInstruction = instruction ? normalizeTradeIntentInstruction(instruction) : normalizeTradeIntentInstruction(tradeRailState.action);
             const changed = String(tradeRailState.limitPrice || '') !== nextPrice;
+            const sideChanged = normalizeTradeIntentInstruction(tradeRailState.action) !== nextInstruction;
+            tradeRailState.action = nextInstruction;
             setTradeLimitPrice(nextPrice);
             createTradeOrderIntent({
                 selected,
                 state: 'staged',
-                source: 'ladder',
-                instruction: tradeRailState.action,
+                source: nextInstruction === 'SELL_TO_CLOSE' ? 'ladder_sell' : 'ladder_buy',
+                instruction: nextInstruction,
                 quantity: tradeRailState.quantity,
                 limit_price: nextPrice,
                 error: '',
             });
+            const sideLabel = nextInstruction === 'SELL_TO_CLOSE' ? 'Sell' : 'Buy';
             const message = tradeRailState.activeTraderArmed
-                ? (changed
-                    ? 'Ladder limit staged at ' + fmtTradePrice(nextPrice) + '. Use Buy Ask, Sell Bid, or Flatten for armed auto-send.'
+                ? (changed || sideChanged
+                    ? sideLabel + ' limit staged at ' + fmtTradePrice(nextPrice) + '. Use Buy Ask, Sell Bid, or Flatten for armed auto-send.'
                     : (tradeRailState.previewToken
                         ? 'Limit already matches the preview. Ladder clicks stage only; use a send control for live placement.'
                         : 'Ladder limit staged. Preview this exact ladder price before live placement.'))
-                : 'Ladder limit staged at ' + fmtTradePrice(nextPrice) + '. Preview before live placement.';
-            if (changed) {
+                : sideLabel + ' limit staged at ' + fmtTradePrice(nextPrice) + '. Preview before live placement.';
+            if (changed || sideChanged) {
                 invalidateTradePreview(message);
             } else {
                 tradeRailState.fastTradeMessage = message;
                 renderTradeTicket();
             }
+        }
+        function getTradeLadderMarkerPayloadFromElement(markerEl) {
+            return {
+                markerId: String(markerEl && markerEl.dataset.tradeLadderMarkerId || ''),
+                source: String(markerEl && markerEl.dataset.tradeLadderSource || ''),
+                side: String(markerEl && markerEl.dataset.tradeLadderSide || ''),
+                state: String(markerEl && markerEl.dataset.tradeLadderState || ''),
+                localId: String(markerEl && markerEl.dataset.tradeLadderLocalId || ''),
+                orderId: String(markerEl && markerEl.dataset.tradeLadderOrderId || ''),
+                instruction: normalizeTradeIntentInstruction(markerEl && markerEl.dataset.tradeLadderInstruction),
+                quantity: normalizeTradeIntentQuantity(markerEl && markerEl.dataset.tradeLadderQuantity),
+                price: normalizeTradeIntentLimit(markerEl && markerEl.dataset.tradeLadderPrice),
+            };
+        }
+        function moveTradeLocalLadderMarker(marker, priceValue) {
+            const selected = getSelectedTradeContract();
+            const nextPrice = normalizeTradeIntentLimit(priceValue);
+            if (!marker.localId || !selected || !nextPrice) return;
+            const updated = updateTradeOrderIntent(marker.localId, {
+                state: 'staged',
+                instruction: marker.instruction,
+                quantity: marker.quantity,
+                limit_price: nextPrice,
+                preview_token: '',
+                order_hash: '',
+                order: null,
+                error: '',
+            });
+            tradeRailState.action = marker.instruction;
+            setTradeLimitPrice(nextPrice);
+            clearTradePreviewSnapshot();
+            tradeRailState.preview = null;
+            tradeRailState.previewError = 'Dragged ladder marker to ' + fmtTradePrice(nextPrice) + '. Preview again.';
+            tradeRailState.placement = null;
+            tradeRailState.placementError = '';
+            tradeRailState.fastTradeMessage = (marker.side === 'sell' ? 'Sell' : 'Buy') + ' marker moved to ' + fmtTradePrice(nextPrice) + '. Preview before live placement.';
+            if (!updated) {
+                createTradeOrderIntent({
+                    selected,
+                    state: 'staged',
+                    source: 'ladder_drag',
+                    instruction: marker.instruction,
+                    quantity: marker.quantity,
+                    limit_price: nextPrice,
+                });
+            }
+            renderTradeTicket();
+        }
+        function replaceTradeWorkingOrderFromLadder(marker, priceValue) {
+            const selected = getSelectedTradeContract();
+            const nextPrice = normalizeTradeIntentLimit(priceValue);
+            if (!selected || !marker.orderId || !nextPrice) return;
+            const instruction = normalizeTradeIntentInstruction(marker.instruction || (marker.side === 'sell' ? 'SELL_TO_CLOSE' : 'BUY_TO_OPEN'));
+            const quantity = normalizeTradeIntentQuantity(marker.quantity);
+            const summary = instruction + ' x' + quantity + ' ' + selected.contract_symbol + ' @ ' + nextPrice;
+            if (!window.confirm('Replace working Schwab order #' + marker.orderId + '?\\n\\n' + summary)) return;
+            tradeRailState.replacingOrderId = marker.orderId;
+            tradeRailState.fastTradeMessage = 'Replacing order #' + marker.orderId + ' at ' + fmtTradePrice(nextPrice) + '...';
+            renderTradeActiveTrader();
+            fetch('/trade/replace_order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    account_hash: tradeRailState.accountHash,
+                    order_id: marker.orderId,
+                    ticker: tradeRailState.ticker || getTradeRailTicker(),
+                    contract_symbol: selected.contract_symbol,
+                    instruction,
+                    quantity,
+                    limit_price: nextPrice,
+                    confirmed: true,
+                }),
+            })
+            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(({ ok, data }) => {
+                tradeRailState.replacingOrderId = '';
+                if (!ok || data.error || data.replaced === false) throw new Error(data.error || 'Order replacement failed');
+                const newOrderId = String(data.order_id || marker.orderId);
+                let updatedIntent = null;
+                (tradeRailState.orderIntents || []).forEach(intent => {
+                    if (String(intent && intent.schwab_order_id || '') === marker.orderId) {
+                        updatedIntent = updateTradeOrderIntent(intent.local_id, {
+                            state: 'working',
+                            schwab_order_id: newOrderId,
+                            schwab_status: data.schwab_status == null ? '' : String(data.schwab_status),
+                            instruction,
+                            quantity,
+                            limit_price: nextPrice,
+                            error: '',
+                        });
+                    }
+                });
+                if (!updatedIntent) {
+                    createTradeOrderIntent({
+                        selected,
+                        state: 'working',
+                        source: 'ladder_replace',
+                        instruction,
+                        quantity,
+                        limit_price: nextPrice,
+                        schwab_order_id: newOrderId,
+                        schwab_status: data.schwab_status == null ? '' : String(data.schwab_status),
+                    });
+                }
+                tradeRailState.action = instruction;
+                setTradeLimitPrice(nextPrice);
+                tradeRailState.fastTradeMessage = 'Working order moved to ' + fmtTradePrice(nextPrice) + '.';
+                requestTradeOrders({ force: true, silent: true });
+                requestTradeAccountDetails({ force: true });
+                scheduleTradeOrderPolling(1000);
+                if (tradeRailState.journalVisible) requestTradeJournal({ force: true });
+                renderTradeTicket();
+            })
+            .catch(err => {
+                tradeRailState.replacingOrderId = '';
+                tradeRailState.fastTradeMessage = err.message || 'Order replacement failed';
+                renderTradeTicket();
+            });
+        }
+        function handleTradeLadderMarkerDrop(marker, priceValue) {
+            const nextPrice = normalizeTradeIntentLimit(priceValue);
+            if (!nextPrice || nextPrice === normalizeTradeIntentLimit(marker.price)) return;
+            if (marker.source === 'schwab' || marker.orderId) {
+                replaceTradeWorkingOrderFromLadder(marker, nextPrice);
+                return;
+            }
+            moveTradeLocalLadderMarker(marker, nextPrice);
+        }
+        function wireTradeLadderMarkerDrag(markerEl) {
+            if (!markerEl || markerEl.__tradeLadderMarkerDragBound) return;
+            markerEl.__tradeLadderMarkerDragBound = true;
+            markerEl.addEventListener('click', event => {
+                if (markerEl.__tradeSuppressClick) {
+                    markerEl.__tradeSuppressClick = false;
+                    event.preventDefault();
+                }
+                event.stopPropagation();
+            });
+            markerEl.addEventListener('pointerdown', event => {
+                if (event.button !== 0) return;
+                if (event.target && event.target.closest && event.target.closest('[data-trade-ladder-cancel-order], [data-trade-ladder-clear-intent]')) return;
+                const marker = getTradeLadderMarkerPayloadFromElement(markerEl);
+                const startX = event.clientX;
+                const startY = event.clientY;
+                let moved = false;
+                const cleanup = () => {
+                    document.removeEventListener('pointermove', onMove);
+                    document.removeEventListener('pointerup', onUp);
+                    document.removeEventListener('pointercancel', onUp);
+                    markerEl.classList.remove('dragging');
+                    try { markerEl.releasePointerCapture(event.pointerId); } catch (e) {}
+                };
+                const onMove = moveEvent => {
+                    const dx = Math.abs(moveEvent.clientX - startX);
+                    const dy = Math.abs(moveEvent.clientY - startY);
+                    if (dx + dy > 4) {
+                        moved = true;
+                        markerEl.classList.add('dragging');
+                    }
+                };
+                const onUp = upEvent => {
+                    cleanup();
+                    if (!moved) return;
+                    markerEl.__tradeSuppressClick = true;
+                    const target = document.elementFromPoint(upEvent.clientX, upEvent.clientY);
+                    const row = target && target.closest ? target.closest('[data-trade-fast-price]') : null;
+                    if (!row) return;
+                    handleTradeLadderMarkerDrop(marker, row.dataset.tradeFastPrice || '');
+                };
+                event.preventDefault();
+                event.stopPropagation();
+                try { markerEl.setPointerCapture(event.pointerId); } catch (e) {}
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', onUp);
+                document.addEventListener('pointercancel', onUp);
+            });
         }
         function handleTradeReprice(preset) {
             const selected = getSelectedTradeContract();
@@ -35251,6 +35915,14 @@ def index():
                 journalModal.addEventListener('close', () => {
                     if (!tradeRailState.journalSaving) tradeRailState.journalEditorId = '';
                     if (!tradeRailState.journalSaving) tradeRailState.journalEditorMode = 'edit';
+                });
+            }
+            const accountInfoToggle = root.querySelector('[data-trade-account-info-toggle]');
+            if (accountInfoToggle) {
+                accountInfoToggle.addEventListener('click', () => {
+                    tradeRailState.accountInfoCollapsed = !tradeRailState.accountInfoCollapsed;
+                    try { localStorage.setItem(TRADE_ACCOUNT_INFO_COLLAPSE_KEY, tradeRailState.accountInfoCollapsed ? '1' : '0'); } catch (e) {}
+                    renderTradeAccountInfo();
                 });
             }
             const positionToggle = root.querySelector('[data-trade-position-toggle]');
@@ -40601,6 +41273,109 @@ def trade_place_order():
         'order': preview_order,
         'schwab_response': response_body,
         'bracket_plan': _redact_trade_payload(data.get('bracket_plan') or data.get('bracketPlan') or {}),
+    })
+    result['journal_event_id'] = journal_event_id
+    result['media_storage_path'] = _trade_media_storage_path()
+    return jsonify(result)
+
+
+@app.route('/trade/replace_order', methods=['POST'])
+def trade_replace_order():
+    """Live single-leg DAY LIMIT replace for an existing working Schwab order."""
+    if os.getenv('ENABLE_LIVE_TRADING') != '1':
+        return _trade_api_error('Live trading is disabled. Set ENABLE_LIVE_TRADING=1 to enable order replacement.', 403)
+
+    client_error = _require_schwab_client()
+    if client_error:
+        return _trade_api_error(client_error, 503)
+
+    data = request.get_json(silent=True) or {}
+    if data.get('confirmed') is not True and data.get('final_confirmed') is not True:
+        return _trade_api_error('Final confirmation is required before live order replacement.', 400)
+
+    account_hash = str(data.get('account_hash') or data.get('accountHash') or '').strip()
+    order_id = str(data.get('order_id') or data.get('orderId') or '').strip()
+    ticker = format_ticker(data.get('ticker') or '')
+    contract_symbol = str(data.get('contract_symbol') or data.get('contractSymbol') or '').strip()
+    instruction = str(data.get('instruction') or data.get('action') or '').upper()
+
+    if not account_hash:
+        return _trade_api_error('Missing account hash.', 400)
+    if not order_id:
+        return _trade_api_error('Missing order id.', 400)
+    if not ticker:
+        return _trade_api_error('Missing ticker.', 400)
+
+    contract = _find_cached_trade_contract(ticker, contract_symbol)
+    if not contract:
+        return _trade_api_error('Selected contract is not in the latest cached trading chain.', 400)
+
+    try:
+        quantity = _parse_trade_quantity(data.get('quantity'))
+        limit_price = _parse_limit_price(data.get('limit_price') if 'limit_price' in data else data.get('limitPrice'))
+        order = build_single_option_limit_order(contract_symbol, instruction, quantity, limit_price)
+    except ValueError as e:
+        return _trade_api_error(str(e), 400)
+
+    if instruction == 'SELL_TO_CLOSE':
+        try:
+            details_response = client.account_details(account_hash, fields='positions')
+        except Exception as e:
+            return _trade_api_error('Position check failed before replacement.', 502, e)
+        if not getattr(details_response, 'ok', False):
+            return _trade_api_error(
+                f"Position check failed with Schwab status {getattr(details_response, 'status_code', 'unknown')}.",
+                502,
+                getattr(details_response, 'reason', None),
+            )
+        available_qty = _selected_contract_position_quantity(_safe_response_json(details_response) or {}, contract_symbol)
+        if available_qty < quantity:
+            return _trade_api_error('SELL_TO_CLOSE quantity exceeds the selected-contract long position.', 400)
+
+    try:
+        response = client.replace_order(account_hash, order_id, order)
+    except Exception as e:
+        return _trade_api_error('Schwab order replacement failed.', 502, e)
+
+    status_code = getattr(response, 'status_code', None)
+    schwab_ok = bool(getattr(response, 'ok', False)) or status_code in (200, 201, 204)
+    response_body = _redact_trade_payload(_safe_response_json(response))
+    location = _trade_order_location(response)
+    replacement_order_id = _trade_order_id_from_location(location) or order_id
+    result = {
+        'ok': schwab_ok,
+        'replaced': schwab_ok,
+        'old_order_id': order_id,
+        'order_id': replacement_order_id,
+        'schwab_status': status_code,
+        'location': location,
+        'contract_symbol': contract_symbol,
+        'ticker': ticker,
+        'instruction': instruction,
+        'quantity': int(quantity),
+        'limit_price': f'{limit_price:.2f}',
+        'order': order,
+        'schwab_response': response_body,
+        'warnings': [],
+    }
+    if not schwab_ok:
+        result['warnings'].append(f"Schwab replacement returned status {status_code or 'unknown'}.")
+        return jsonify(result), 502
+
+    journal_event_id = _write_trade_event('replaced_order', {
+        'account_hash': account_hash,
+        'ticker': ticker,
+        'contract_symbol': contract_symbol,
+        'instruction': instruction,
+        'quantity': int(quantity),
+        'limit_price': f'{limit_price:.2f}',
+        'schwab_status': status_code,
+        'location': location,
+        'order_id': replacement_order_id,
+        'old_order_id': order_id,
+        'contract': contract,
+        'order': order,
+        'schwab_response': response_body,
     })
     result['journal_event_id'] = journal_event_id
     result['media_storage_path'] = _trade_media_storage_path()
