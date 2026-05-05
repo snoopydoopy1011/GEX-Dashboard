@@ -21112,6 +21112,26 @@ def index():
             try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
         }
         function isChartVisible(id) { return !!getChartVisibility()[id]; }
+        function getRequestedStrikeRailTab(selectedCharts = getChartVisibility()) {
+            const availableTabs = getVisibleStrikeRailTabs(selectedCharts);
+            if (!availableTabs.includes(activeStrikeRailTab)) {
+                activeStrikeRailTab = availableTabs[0] || 'gex';
+                try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
+            }
+            return activeStrikeRailTab || 'gex';
+        }
+        function buildUpdateChartVisibilityPayload(selectedCharts = getChartVisibility()) {
+            const payload = {};
+            CHART_IDS.forEach(id => {
+                if (id !== 'price') payload['show_' + id] = !!selectedCharts[id];
+            });
+            const requestedStrikeRailTab = getRequestedStrikeRailTab(selectedCharts);
+            STRIKE_RAIL_CHART_IDS.forEach(id => {
+                payload['show_' + id] = !!selectedCharts[id] && requestedStrikeRailTab === id;
+            });
+            payload.active_strike_rail_tab = requestedStrikeRailTab;
+            return payload;
+        }
         function applyScalpOverlayPreset() {
             closeTVToolbarMenus();
             setAllChartVisibility({
@@ -23059,8 +23079,7 @@ def index():
             
             // Get visible charts (server payload uses show_<id> keys for back-compat)
             const _vis = getChartVisibility();
-            const visibleCharts = {};
-            CHART_IDS.forEach(id => { visibleCharts['show_' + id] = _vis[id]; });
+            const visibleCharts = buildUpdateChartVisibilityPayload(_vis);
             visibleCharts.show_large_trades = true;
 
             // Common payload fields shared by both requests
@@ -23085,11 +23104,11 @@ def index():
 
             // Fetch price history: immediate on ticker/settings change, throttled to 30s otherwise.
             // Real-time candle ticks come from SSE (connectPriceStream), not from polling.
-            if (visibleCharts.show_price) {
+            if (_vis.price) {
                 fetchPriceHistory(tickerChanged || !tvLastCandles.length);
             }
             
-            const updateFetchPerf = gexPerfStart('fetch:/update', { ticker, expiries: expiry.length });
+            const updateFetchPerf = gexPerfStart('fetch:/update', { ticker, expiries: expiry.length, strike_tab: visibleCharts.active_strike_rail_tab || 'gex' });
             fetch('/update', {
                 method: 'POST',
                 headers: {
@@ -23120,8 +23139,8 @@ def index():
                     highlight_max_level: highlightMaxLevel,
                     max_level_color: maxLevelColor,
                     max_level_mode: maxLevelMode,
+                    ...visibleCharts,
                     show_price: false,  // price is fetched independently via /update_price
-                    ...visibleCharts
                 })
             })
             .then(response => {
@@ -42771,6 +42790,8 @@ def update():
     
     ticker = format_ticker(ticker) 
     perf.add('ticker', ticker)
+    active_strike_rail_tab = str(data.get('active_strike_rail_tab') or 'gex').strip() or 'gex'
+    perf.add('active_strike_rail_tab', active_strike_rail_tab)
     if not ticker or not expiry:
         return _perf_jsonify(perf, {'error': 'Missing ticker or expiry'}, 400)
     
