@@ -6484,6 +6484,156 @@ def build_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=0.02, top_n=6
     return rows[:max(1, int(top_n or 6))]
 
 
+_FLOW_PULSE_SHARED_TOP_N = 4000
+_FLOW_PULSE_SNAPSHOT_CACHE_TTL_SECONDS = 6.0
+_FLOW_PULSE_SNAPSHOT_CACHE = {}
+_FLOW_PULSE_SNAPSHOT_CACHE_LOCK = threading.Lock()
+
+
+def _flow_pulse_numeric_signature(df, column, reducer='sum'):
+    if df is None or getattr(df, 'empty', True) or column not in df.columns:
+        return 0.0
+    try:
+        values = pd.to_numeric(df[column], errors='coerce')
+        if reducer == 'max':
+            value = values.max()
+        elif reducer == 'min':
+            value = values.min()
+        else:
+            value = values.fillna(0).sum()
+        if pd.isna(value) or not np.isfinite(float(value)):
+            return 0.0
+        return round(float(value), 6)
+    except Exception:
+        return 0.0
+
+
+def _flow_pulse_expiry_signature(df):
+    if df is None or getattr(df, 'empty', True):
+        return ()
+    for column in ('expiration_date', 'expiration'):
+        if column in df.columns:
+            try:
+                values = [
+                    _normalize_expiry_iso(value)
+                    for value in pd.Series(df[column]).dropna().unique().tolist()
+                ]
+                return tuple(sorted(value for value in values if value))
+            except Exception:
+                return ()
+    return ()
+
+
+def _flow_pulse_df_signature(df):
+    if df is None or getattr(df, 'empty', True):
+        return (0, (), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    return (
+        int(len(df)),
+        _flow_pulse_expiry_signature(df),
+        _flow_pulse_numeric_signature(df, 'strike', reducer='min'),
+        _flow_pulse_numeric_signature(df, 'strike', reducer='max'),
+        _flow_pulse_numeric_signature(df, 'volume'),
+        _flow_pulse_numeric_signature(df, 'openInterest'),
+        _flow_pulse_numeric_signature(df, 'bid'),
+        _flow_pulse_numeric_signature(df, 'ask'),
+        _flow_pulse_numeric_signature(df, 'lastPrice'),
+        max(
+            _flow_pulse_numeric_signature(df, 'quoteTimeInLong', reducer='max'),
+            _flow_pulse_numeric_signature(df, 'tradeTimeInLong', reducer='max'),
+        ),
+    )
+
+
+def _flow_pulse_snapshot_cache_key(ticker, calls, puts, S, strike_range):
+    try:
+        spot_key = round(float(S), 4)
+    except Exception:
+        spot_key = None
+    try:
+        range_key = round(float(strike_range), 6)
+    except Exception:
+        range_key = None
+    return (
+        _current_session_date_str(),
+        str(ticker or '').upper(),
+        spot_key,
+        range_key,
+        _flow_pulse_df_signature(calls),
+        _flow_pulse_df_signature(puts),
+    )
+
+
+def _prune_flow_pulse_snapshot_cache(now_ts):
+    stale_after = _FLOW_PULSE_SNAPSHOT_CACHE_TTL_SECONDS * 3.0
+    stale_keys = [
+        key for key, entry in _FLOW_PULSE_SNAPSHOT_CACHE.items()
+        if now_ts - float(entry.get('created_at', 0.0) or 0.0) > stale_after
+    ]
+    for key in stale_keys:
+        _FLOW_PULSE_SNAPSHOT_CACHE.pop(key, None)
+
+
+def get_shared_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=0.02, top_n=6, return_cache_hit=False):
+    """Return a flow pulse snapshot, reusing same-chain scans across hot paths."""
+    try:
+        requested_top_n = max(1, int(top_n or 6))
+    except Exception:
+        requested_top_n = 6
+    if not ticker or S is None:
+        return ([], False) if return_cache_hit else []
+
+    now_ts = time.time()
+    try:
+        cache_key = _flow_pulse_snapshot_cache_key(ticker, calls, puts, S, strike_range)
+    except Exception:
+        rows = build_flow_pulse_snapshot(
+            ticker, calls, puts, S,
+            strike_range=strike_range,
+            top_n=max(requested_top_n, _FLOW_PULSE_SHARED_TOP_N),
+        )
+        result = rows[:requested_top_n]
+        return (result, False) if return_cache_hit else result
+
+    with _FLOW_PULSE_SNAPSHOT_CACHE_LOCK:
+        _prune_flow_pulse_snapshot_cache(now_ts)
+        entry = _FLOW_PULSE_SNAPSHOT_CACHE.get(cache_key)
+        if entry and now_ts - float(entry.get('created_at', 0.0) or 0.0) <= _FLOW_PULSE_SNAPSHOT_CACHE_TTL_SECONDS:
+            rows = entry.get('rows') or []
+            result = rows[:requested_top_n]
+            return (result, True) if return_cache_hit else result
+
+    rows = build_flow_pulse_snapshot(
+        ticker, calls, puts, S,
+        strike_range=strike_range,
+        top_n=max(requested_top_n, _FLOW_PULSE_SHARED_TOP_N),
+    )
+    with _FLOW_PULSE_SNAPSHOT_CACHE_LOCK:
+        _FLOW_PULSE_SNAPSHOT_CACHE[cache_key] = {
+            'created_at': time.time(),
+            'rows': rows,
+        }
+    result = rows[:requested_top_n]
+    return (result, False) if return_cache_hit else result
+
+
+def _filter_flow_pulse_snapshot_by_expiry(flow_pulse_snapshot, selected_expiries=None):
+    if flow_pulse_snapshot is None:
+        return None
+    if not selected_expiries:
+        return list(flow_pulse_snapshot)
+    expiry_set = set()
+    for expiry in selected_expiries:
+        expiry_iso = _normalize_expiry_iso(expiry)
+        if expiry_iso:
+            expiry_set.add(expiry_iso)
+    if not expiry_set:
+        return list(flow_pulse_snapshot)
+    return [
+        row for row in flow_pulse_snapshot
+        if _normalize_expiry_iso(row.get('expiry_iso')) in expiry_set
+    ]
+
+
 def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None):
     """Return the key dealer-flow levels to draw on the price chart.
 
@@ -8025,7 +8175,7 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
                          delta_adjusted: bool = False, calculate_in_notional: bool = True,
                          ticker: str = None, gate_strike_alerts: bool = True,
                          scope_id: str = None, price_data=None, timeframe=1,
-                         expected_move_snapshot=None):
+                         expected_move_snapshot=None, flow_pulse_snapshot=None):
     """High-level trader KPIs + a short alerts list, for the header strip.
 
     Reuses compute_key_levels for the wall/flip/EM lookups so we don't drift
@@ -8307,14 +8457,17 @@ def compute_trader_stats(calls, puts, S, strike_range=0.02, selected_expiries=No
         out['contract_helper_1dte'] = None
 
     try:
-        out['flow_pulse'] = build_flow_pulse_snapshot(
-            ticker=ticker,
-            calls=calls,
-            puts=puts,
-            S=S,
-            strike_range=strike_range,
-            top_n=5,
-        ) if ticker else []
+        if flow_pulse_snapshot is not None:
+            out['flow_pulse'] = list(flow_pulse_snapshot[:5])
+        else:
+            out['flow_pulse'] = get_shared_flow_pulse_snapshot(
+                ticker=ticker,
+                calls=calls,
+                puts=puts,
+                S=S,
+                strike_range=strike_range,
+                top_n=5,
+            ) if ticker else []
     except Exception as e:
         print(f"[compute_trader_stats] flow_pulse failed: {e}")
         out['flow_pulse'] = []
@@ -9191,7 +9344,11 @@ def prepare_price_chart_data(price_data, calls=None, puts=None, exposure_levels_
     })
 
 
-def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLOR, put_color=PUT_COLOR, selected_expiries=None, ticker=None):
+def create_large_trades_table(
+    calls, puts, S, strike_range,
+    call_color=CALL_COLOR, put_color=PUT_COLOR,
+    selected_expiries=None, ticker=None, flow_pulse_snapshot=None,
+):
     """Create a flow-oriented blotter from the option chain snapshot."""
     try:
         spot = float(S)
@@ -9202,7 +9359,14 @@ def create_large_trades_table(calls, puts, S, strike_range, call_color=CALL_COLO
     min_strike = spot * (1 - strike_range) if spot and np.isfinite(spot) else None
     max_strike = spot * (1 + strike_range) if spot and np.isfinite(spot) else None
 
-    pulse_snapshot = build_flow_pulse_snapshot(ticker, calls, puts, S, strike_range=strike_range, top_n=4000) if ticker else []
+    if flow_pulse_snapshot is not None:
+        pulse_snapshot = flow_pulse_snapshot
+    else:
+        pulse_snapshot = get_shared_flow_pulse_snapshot(
+            ticker, calls, puts, S,
+            strike_range=strike_range,
+            top_n=4000,
+        ) if ticker else []
     pulse_map = {(row['option_type'], row['expiry_iso'], round(float(row['strike']), 4)): row for row in pulse_snapshot}
 
     def build_rows(df, is_put=False):
@@ -43014,8 +43178,26 @@ def update():
                 response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_large_trades', True):
+            flow_pulse_snapshot = None
+            try:
+                with perf.span('flow_pulse_snapshot_shared'):
+                    flow_pulse_snapshot, flow_pulse_cache_hit = get_shared_flow_pulse_snapshot(
+                        ticker, calls, puts, S,
+                        strike_range=strike_range,
+                        top_n=4000,
+                        return_cache_hit=True,
+                    )
+                    perf.add('flow_pulse_cache_hit', flow_pulse_cache_hit)
+            except Exception as e:
+                print(f"[flow_pulse] shared snapshot build failed: {e}")
+                flow_pulse_snapshot = None
             with perf.span('create_large_trades_table'):
-                response['large_trades'] = create_large_trades_table(calls, puts, S, strike_range, call_color, put_color, expiry_dates, ticker=ticker)
+                response['large_trades'] = create_large_trades_table(
+                    calls, puts, S, strike_range,
+                    call_color, put_color, expiry_dates,
+                    ticker=ticker,
+                    flow_pulse_snapshot=flow_pulse_snapshot,
+                )
         
         if data.get('show_centroid', False):
             with perf.span('chart_centroid'):
@@ -43265,6 +43447,7 @@ def update_price():
         gex_panel = None
         key_levels = None
         top_oi = {'calls': [], 'puts': [], 'both': []}
+        flow_pulse_snapshot = None
         S_for_panel = cached.get('S')
         quote_ticker = "$SPX" if ticker == "MARKET" else ("SPY" if ticker == "MARKET2" else ticker)
         pinned_em_snapshot = None
@@ -43334,6 +43517,18 @@ def update_price():
             except Exception as e:
                 print(f"[top_oi] cached build failed: {e}")
                 top_oi = {'calls': [], 'puts': [], 'both': []}
+            try:
+                with perf.span('flow_pulse_snapshot_shared'):
+                    flow_pulse_snapshot, flow_pulse_cache_hit = get_shared_flow_pulse_snapshot(
+                        ticker, calls, puts, S_for_panel,
+                        strike_range=strike_range,
+                        top_n=4000,
+                        return_cache_hit=True,
+                    )
+                    perf.add('flow_pulse_cache_hit', flow_pulse_cache_hit)
+            except Exception as e:
+                print(f"[flow_pulse] price-path shared snapshot failed: {e}")
+                flow_pulse_snapshot = None
 
         trader_stats = None
         if calls is not None and puts is not None and S_for_panel is not None:
@@ -43355,6 +43550,7 @@ def update_price():
                         price_data=price_data,
                         timeframe=timeframe,
                         expected_move_snapshot=pinned_em_snapshot,
+                        flow_pulse_snapshot=flow_pulse_snapshot,
                     )
                     trader_stats = apply_expected_move_snapshot_to_stats(trader_stats, pinned_em_snapshot)
             except Exception as e:
@@ -43400,6 +43596,10 @@ def update_price():
                             price_data=price_data,
                             timeframe=timeframe,
                             expected_move_snapshot=pinned_em_0dte,
+                            flow_pulse_snapshot=_filter_flow_pulse_snapshot_by_expiry(
+                                flow_pulse_snapshot,
+                                [nearest_exp],
+                            ),
                         )
                         stats_0dte = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
             except Exception as e:
