@@ -1,7 +1,7 @@
 # Desktop App Wrapper Implementation Plan
 
 **Created:** 2026-05-04
-**Status:** Phase 2 handoff complete; next phase is Phase 3 PySide6 Shell
+**Status:** Phase 3 handoff complete; next phase is Phase 4 Packaging
 **Recommended first prototype:** pywebview launcher
 **Likely long-term wrapper:** PySide6 + `QWebEngineView`
 **Current app target:** `ezoptionsschwab.py` stays the dashboard runtime
@@ -468,6 +468,80 @@ Exit criteria:
 - Local storage persists.
 - Closing the app stops only the wrapper-owned Flask server.
 - Existing browser launch still works with `python3 ezoptionsschwab.py`.
+
+### Phase 3 Handoff - 2026-05-04
+
+Accomplished:
+
+- Added optional PySide6 dependency handling to `requirements-desktop.txt` while keeping `pywebview` and the existing browser/server requirements unchanged.
+- Added `desktop_app.py` as a separate PySide6 shell. It imports the existing Flask app, starts the same in-process Werkzeug server model used by `desktop_launcher.py`, loads the main dashboard at `/?desktop=1`, and shuts down only the wrapper-owned server when the final native window closes.
+- Added a persistent `QWebEngineProfile` for local storage, cookies, and cache under `~/Library/Application Support/GEX Dashboard/pyside6`, with overrides via `GEX_DESKTOP_APP_SUPPORT_DIR` or `GEX_QTWEBENGINE_STORAGE_DIR`.
+- Added a PySide6-injected bridge compatible with the Phase 2 `window.pywebview.api.open_window` contract. The dashboard still posts explicit state through `/desktop/window_state`; the bridge opens route-backed windows with `window.open('/desktop/window/price?...')`, and Qt routes those requests through `QWebEngineView.createWindow` into native windows.
+- Added minimal native menus: New Dashboard Window, New Price Chart Window, Reload, Toggle Full Screen, and Quit and Stop Server.
+- Kept `ezoptionsschwab.py` directly runnable with `python3 ezoptionsschwab.py` and kept `desktop_launcher.py` working.
+- Did not change analytics formulas, chart calculations, flow/alert logic, Schwab order endpoints, order JSON, preview/place/cancel gates, trading behavior, dashboard layout, or `Trading_from_dashboard.txt`.
+
+Verification passed:
+
+- `python3 -m py_compile ezoptionsschwab.py`
+- `python3 -m py_compile desktop_launcher.py`
+- `python3 -m py_compile desktop_app.py`
+- `git diff --check`
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview`
+- Normal browser smoke on `http://127.0.0.1:5021/` returned HTTP 200 for `/` and `/token_health`, then the smoke server was stopped.
+- pywebview wrapper smoke on `http://127.0.0.1:5022/` loaded `/?desktop=1`, `/load_settings`, `/trade/journal`, `/token_health`, and `/expirations/SPY`, then auto-closed and left no listener on the smoke port.
+- PySide6 shell smoke on `http://127.0.0.1:5024/` loaded `/?desktop=1`, opened a route-backed price window via `/desktop/window_state` and `/desktop/window/price`, fetched the child state, hit `/update_price`, connected `/price_stream/SPY`, then auto-closed and left no listener on the smoke port.
+
+Tricky parts / findings:
+
+- PySide6 was not installed locally at the start of Phase 3. Installing `requirements-desktop.txt` installed PySide6 6.11.0 plus its Addons, Essentials, and shiboken packages.
+- The PySide6 shell preserves the Phase 2 bridge contract by injecting a pywebview-compatible JS shim rather than adding another frontend branch. This keeps normal browser `window.open('', ...)` behavior untouched and keeps the pywebview launcher path intact.
+- The native New Price Chart Window action asks the current dashboard page to call `openDashboardWindow('price', buildPricePayload())`, so state still flows through `/desktop/window_state` rather than `window.opener`.
+- `ezoptionsschwab.py` still emits the pre-existing compile-time `SyntaxWarning` for an invalid escape sequence inside the large dashboard template; compilation succeeds.
+
+Suggested next-session prompt:
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard.
+
+Read AGENTS.md first, then read docs/DESKTOP_APP_WRAPPER_IMPLEMENTATION_PLAN.md.
+
+Continue from the Phase 3 Handoff dated 2026-05-04. Phase 3 added optional PySide6 dependency handling, desktop_app.py, a persistent QWebEngineProfile under the desktop app support directory, a pywebview-compatible injected bridge for route-backed windows, Qt createWindow routing for /desktop/window/price, and minimal native shell menus. Browser window.open('', ...) behavior and the pywebview launcher were intentionally kept working.
+
+Goal: knock out all remaining desktop-wrapper phases in one go, starting with Phase 4 Packaging and any narrow path-policy work required to make the packaged macOS app usable. Do not do a sanity check of completed Phase 1, Phase 2, or Phase 3 beyond normal branch/worktree confirmation and whatever local context is needed for packaging.
+
+Constraints:
+- Wrapper/shell/window-seam/packaging work only. Do not change analytics formulas, chart calculations, flow/alert logic, Schwab order endpoints, order JSON, preview/place/cancel safety gates, or trading behavior.
+- Keep ezoptionsschwab.py runnable directly with python3 ezoptionsschwab.py.
+- Keep desktop_launcher.py and desktop_app.py working unless a packaging-specific supplement is deliberately added.
+- Do not redesign the UI.
+- No JS framework introduction.
+- Leave Trading_from_dashboard.txt alone unless explicitly asked.
+- Preserve existing browser window.open behavior while the desktop shell matures.
+- Do not move existing user data automatically without a clear migration step.
+
+Start by confirming:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Recommended remaining target:
+- Add optional packaging dependency handling, preferably without bloating the normal browser requirements.
+- Add the narrow data/path policy needed for packaged desktop mode, preserving dev-mode behavior and supporting env overrides such as GEX_DASHBOARD_DATA_DIR and SCHWAB_TOKENS_DB.
+- Build a macOS .app with PyInstaller --onedir --windowed for the PySide6 shell.
+- Ensure Qt WebEngine resources/plugins are included or document the exact required PyInstaller adjustment.
+- Keep .env, options_data.db, settings.json, screenshots, and Schwab tokens out of git and in predictable user-controlled locations.
+- Launch the packaged app from Finder or command line, confirm it starts the local Flask server, loads /?desktop=1, opens a route-backed price chart window, and shuts down its owned server.
+- Smoke normal browser launch, pywebview launcher launch, PySide6 launcher launch, and packaged app launch.
+
+Verification:
+python3 -m py_compile ezoptionsschwab.py
+python3 -m py_compile desktop_launcher.py
+python3 -m py_compile desktop_app.py
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview if tests exist
+Smoke normal browser launch, pywebview wrapper launch, PySide6 wrapper launch, and packaged .app launch.
+```
 
 ### Phase 4: Packaging
 
