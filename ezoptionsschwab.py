@@ -20701,6 +20701,7 @@ def index():
     <script>
         let charts = {};
         let updateInterval;
+        let tradeChainAutoRefreshInterval;
         let lastUpdateTime = 0;
         let callColor = '#10B981';
         let putColor = '#EF4444';
@@ -21166,8 +21167,10 @@ def index():
         // Debounce timer for Plotly price-line updates (avoid flooding relayout calls)
         let plotlyPriceUpdateTimer = null;
         const IS_DESKTOP_SHELL = !!window.GEX_DESKTOP;
-        const DASHBOARD_UPDATE_INTERVAL_MS = IS_DESKTOP_SHELL ? 2000 : 1000;
+        const DASHBOARD_UPDATE_INTERVAL_MS = IS_DESKTOP_SHELL ? 4000 : 2500;
+        const DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS = DASHBOARD_UPDATE_INTERVAL_MS;
         const TRADE_CHAIN_AUTO_REFRESH_MS = IS_DESKTOP_SHELL ? 5000 : 2500;
+        const PRICE_HISTORY_REFRESH_MS = 30000;
         const PLOTLY_PRICE_LINE_MIN_INTERVAL_MS = IS_DESKTOP_SHELL ? 1000 : 500;
         let pendingRealtimeQuote = null;
         let pendingRealtimeQuoteFrame = null;
@@ -36703,6 +36706,19 @@ def index():
                 renderTradeSelected(null);
             });
         }
+        function refreshTradeChainForOpenRail() {
+            if (!isStreaming || isTradeRailCollapsed()) return;
+            requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS });
+        }
+        function startTradeChainAutoRefresh() {
+            if (tradeChainAutoRefreshInterval) clearInterval(tradeChainAutoRefreshInterval);
+            tradeChainAutoRefreshInterval = setInterval(refreshTradeChainForOpenRail, TRADE_CHAIN_AUTO_REFRESH_MS);
+        }
+        function stopTradeChainAutoRefresh() {
+            if (!tradeChainAutoRefreshInterval) return;
+            clearInterval(tradeChainAutoRefreshInterval);
+            tradeChainAutoRefreshInterval = null;
+        }
         function buildTradeOrderRequestBodyFromIntent(intent, selected, extra = {}) {
             return Object.assign({
                 account_hash: intent.account_hash || tradeRailState.accountHash,
@@ -40367,8 +40383,8 @@ def index():
             const key = JSON.stringify(payload);
             const requestTopOIContextKey = getTopOIContextKey();
             const now = Date.now();
-            // Skip if nothing changed and it's been less than 30 seconds
-            if (!force && key === _priceHistoryLastKey && now - _priceHistoryLastMs < 30000) return;
+            // Skip if nothing changed and the throttled historical snapshot is still fresh.
+            if (!force && key === _priceHistoryLastKey && now - _priceHistoryLastMs < PRICE_HISTORY_REFRESH_MS) return;
             _priceHistoryLastMs = now;
             _priceHistoryLastKey = key;
             _priceHistoryInFlight = true;
@@ -41737,8 +41753,10 @@ def index():
         ensureTradeJournalWorkspace();
         requestTradeJournal({ force: true });
 
-        // Auto-update options/analytics. Live candles still update through SSE.
-        updateInterval = setInterval(updateData, DASHBOARD_UPDATE_INTERVAL_MS);
+        // Auto-update heavy options/analytics at a slower cadence. Live candles
+        // and the selected option quote stream stay on their SSE fast lanes.
+        updateInterval = setInterval(updateData, DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS);
+        startTradeChainAutoRefresh();
         
         // Handle window resize
         window.addEventListener('resize', () => {
@@ -41768,6 +41786,7 @@ def index():
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
             clearInterval(updateInterval);
+            stopTradeChainAutoRefresh();
             disconnectPriceStream();
             Object.values(charts).forEach(chart => {
                 Plotly.purge(chart);
@@ -41781,12 +41800,14 @@ def index():
             button.classList.toggle('paused', !isStreaming);
             
             if (isStreaming) {
-                updateInterval = setInterval(updateData, DASHBOARD_UPDATE_INTERVAL_MS);
+                updateInterval = setInterval(updateData, DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS);
+                startTradeChainAutoRefresh();
                 // Reconnect real-time price stream when resuming
                 const tickerVal = (document.getElementById('ticker').value || '').trim();
                 if (tickerVal) connectPriceStream(tickerVal);
             } else {
                 clearInterval(updateInterval);
+                stopTradeChainAutoRefresh();
                 // Disconnect real-time price stream when pausing
                 disconnectPriceStream();
             }
