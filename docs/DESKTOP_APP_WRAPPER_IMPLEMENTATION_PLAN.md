@@ -1,7 +1,7 @@
 # Desktop App Wrapper Implementation Plan
 
 **Created:** 2026-05-04
-**Status:** Phase 4 packaging handoff complete; desktop wrapper phases implemented
+**Status:** Phase 4 packaging handoff complete; desktop wrapper phases implemented; local PySide6 launch/OAuth validated
 **Recommended first prototype:** pywebview launcher
 **Likely long-term wrapper:** PySide6 + `QWebEngineView`
 **Current app target:** `ezoptionsschwab.py` stays the dashboard runtime
@@ -623,8 +623,61 @@ Tricky parts / findings:
 
 - Direct normal launch with the repo `.env` prompted for Schwab OAuth because the local refresh token was expired. Smoke runs used temporary `GEX_DASHBOARD_DATA_DIR` values to avoid touching live credentials or moving user data.
 - Temp-data smoke runs intentionally had no Schwab app credentials, so `/expirations/SPY` returned 400 and `/update_price` returned 500 after proving the route-backed window path. That is expected for no-client smoke.
-- PyInstaller built the app bundle but macOS ad-hoc signing reported `resource fork, Finder information, or similar detritus not allowed` due local protected provenance attributes. The bundle still launched from the command line for smoke testing. Distribution still needs a clean manual signing/notarization pass outside this local build-artifact caveat.
+- PyInstaller built the app bundle, but signing directly in the local Desktop/File Provider-backed `dist/` path can fail with `resource fork, Finder information, or similar detritus not allowed` when macOS attaches protected extended attributes. Follow-up added `packaging/sign_macos_app.sh`, which clean-copies the bundle with `ditto --norsrc --noextattr`, signs the clean copy, and passes strict `codesign --verify --deep --strict` for local validation. Gatekeeper distribution still requires a Developer ID certificate and notarization.
 - `ezoptionsschwab.py` still emits the pre-existing compile-time `SyntaxWarning` for an invalid escape sequence inside the large dashboard template; compilation succeeds.
+
+User validation after handoff:
+
+- On 2026-05-05, the user launched the PySide6 wrapper with `python3 desktop_app.py`.
+- The desktop shell appeared to work locally.
+- The user completed the Schwab OAuth prompt during that run, and OAuth/token behavior was working afterward.
+- Practical local launch recommendation is now `python3 desktop_app.py` for the desktop shell, while `python3 ezoptionsschwab.py` remains the supported browser fallback.
+
+Suggested next-session audit prompt:
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard.
+
+Read AGENTS.md first, then read docs/DESKTOP_APP_WRAPPER_IMPLEMENTATION_PLAN.md.
+
+Continue from the Phase 4 Handoff dated 2026-05-05 and the user validation note that `python3 desktop_app.py` launched successfully and Schwab OAuth was completed successfully.
+
+Goal: audit the completed desktop-wrapper implementation end to end. Do not start a new feature phase. Inspect the code and run focused smoke tests to confirm the browser app, pywebview launcher, PySide6 launcher, route-backed price window, data-path policy, OAuth/token behavior, and packaged app path are correct. If you find narrow defects in wrapper/shell/window-seam/packaging behavior, fix them and re-run the relevant checks.
+
+Constraints:
+- Wrapper/shell/window-seam/packaging verification and narrow fixes only.
+- Do not change analytics formulas, chart calculations, flow/alert logic, Schwab order endpoints, order JSON, preview/place/cancel safety gates, or trading behavior.
+- Keep `ezoptionsschwab.py` runnable directly with `python3 ezoptionsschwab.py`.
+- Keep `desktop_launcher.py` and `desktop_app.py` working.
+- Do not redesign the UI.
+- No JS framework introduction.
+- Leave `Trading_from_dashboard.txt` alone unless explicitly asked.
+- Preserve existing browser `window.open('', ...)` behavior while validating the desktop route-backed windows.
+- Do not move existing user data automatically.
+
+Start by confirming:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Recommended audit targets:
+- Review `ezoptionsschwab.py` path policy for dev mode, packaged/frozen mode, `GEX_DASHBOARD_DATA_DIR`, `SCHWAB_TOKENS_DB`, `.env`, `options_data.db`, `settings.json`, and `Screenshots/trade_journal`.
+- Confirm direct browser launch still serves `/` without `window.GEX_DESKTOP = true`.
+- Confirm `desktop_launcher.py` still loads `/?desktop=1` and can auto-close without leaving a listener.
+- Confirm `desktop_app.py` loads `/?desktop=1`, uses persistent Qt WebEngine storage, opens `/desktop/window/price` through `/desktop/window_state`, and shuts down its owned server.
+- Confirm OAuth/token behavior works with the normal repo `.env` and does not require any code-secret changes.
+- Confirm packaged app build docs and spec are accurate; rebuild only if needed.
+- Check whether the local macOS signing/provenance issue is only a distribution/signing problem or blocks Finder launch.
+- Inspect for accidental inclusion of `.env`, `options_data.db`, `settings.json`, screenshots, token DBs, `build/`, or `dist/` in git.
+
+Verification:
+python3 -m py_compile ezoptionsschwab.py
+python3 -m py_compile desktop_launcher.py
+python3 -m py_compile desktop_app.py
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview if tests exist
+Smoke normal browser launch, pywebview wrapper launch, PySide6 wrapper launch, route-backed price window, and packaged app launch if the local build/signing state allows it.
+```
 
 ## 7. Schwab OAuth / Token Handling
 
