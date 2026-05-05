@@ -44,6 +44,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_SUPPORT_DIR_NAME = 'GEX Dashboard'
+PLOTLY_JS_CDN_URL = 'https://cdn.plot.ly/plotly-3.5.0.min.js'
 
 
 def _is_packaged_app():
@@ -1149,7 +1150,16 @@ class PriceStreamer:
             try:
                 q.put_nowait(payload)
             except queue.Full:
-                pass  # drop stale data rather than block
+                # Desktop WebEngine can stop reading SSE while the main thread is
+                # busy. Keep the stream live by replacing stale ticks instead of
+                # replaying a large backlog later.
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except queue.Empty:
+                    pass
+                except queue.Full:
+                    pass
 
     def _ensure_started(self):
         with self._lock:
@@ -11039,7 +11049,7 @@ def index():
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <script>window.GEX_DESKTOP = {{ desktop_mode|tojson }};</script>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="{{ plotly_js_cdn_url }}"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
@@ -20703,6 +20713,14 @@ def index():
         let livePrice = null;
         // Debounce timer for Plotly price-line updates (avoid flooding relayout calls)
         let plotlyPriceUpdateTimer = null;
+        const IS_DESKTOP_SHELL = !!window.GEX_DESKTOP;
+        const DASHBOARD_UPDATE_INTERVAL_MS = IS_DESKTOP_SHELL ? 2000 : 1000;
+        const TRADE_CHAIN_AUTO_REFRESH_MS = IS_DESKTOP_SHELL ? 5000 : 2500;
+        const PLOTLY_PRICE_LINE_MIN_INTERVAL_MS = IS_DESKTOP_SHELL ? 1000 : 500;
+        let pendingRealtimeQuote = null;
+        let pendingRealtimeQuoteFrame = null;
+        let pendingPlotlyPriceLine = null;
+        let lastPlotlyPriceLineUpdateAt = 0;
 
         // ── Chart visibility (replaces the deleted .chart-selector checkbox row) ──
         // Source of truth for which secondary charts render. Defaults below mirror the
@@ -21146,7 +21164,36 @@ def index():
          * Update the current-price line (shape + annotation) on all visible Plotly charts
          * and refresh the "Current Price" text in the price-info panel.
          */
+        function isPlotlyPriceLineTargetVisible(div, id) {
+            if (!div || !div._fullLayout) return false;
+            if (id === 'gex-side-panel' && typeof isGexColumnCollapsed === 'function' && isGexColumnCollapsed()) return false;
+            if (div.offsetParent === null) return false;
+            return (div.clientWidth || div.offsetWidth || 0) > 0 && (div.clientHeight || div.offsetHeight || 0) > 0;
+        }
+
+        function schedulePlotlyPriceLineUpdate(price) {
+            if (!Number.isFinite(price)) return;
+            const priceStr = price.toFixed(2);
+            const cpLine = document.querySelector('[data-live-price]');
+            if (cpLine) cpLine.textContent = '$' + priceStr;
+
+            pendingPlotlyPriceLine = price;
+            if (plotlyPriceUpdateTimer) return;
+            const now = Date.now();
+            const delay = Math.max(0, PLOTLY_PRICE_LINE_MIN_INTERVAL_MS - (now - lastPlotlyPriceLineUpdateAt));
+            plotlyPriceUpdateTimer = setTimeout(function() {
+                plotlyPriceUpdateTimer = null;
+                const nextPrice = pendingPlotlyPriceLine;
+                pendingPlotlyPriceLine = null;
+                lastPlotlyPriceLineUpdateAt = Date.now();
+                requestAnimationFrame(function() {
+                    updateAllPlotlyPriceLines(nextPrice);
+                });
+            }, delay);
+        }
+
         function updateAllPlotlyPriceLines(price) {
+            if (!Number.isFinite(price)) return;
             const priceStr = price.toFixed(2);
             const numericAnnotationRe = /^-?\\d+(?:\\.\\d+)?$/;
 
@@ -21154,7 +21201,7 @@ def index():
 
             plotIds.forEach(function(id) {
                 const div = document.getElementById(id);
-                if (!div || !div._fullLayout) return;
+                if (!isPlotlyPriceLineTargetVisible(div, id)) return;
 
                 const shapes = div._fullLayout.shapes || [];
                 const annotations = div._fullLayout.annotations || [];
@@ -21492,6 +21539,18 @@ def index():
             }
         }
 
+        function queueRealtimeQuote(last) {
+            if (!Number.isFinite(last)) return;
+            pendingRealtimeQuote = last;
+            if (pendingRealtimeQuoteFrame != null) return;
+            pendingRealtimeQuoteFrame = requestAnimationFrame(function() {
+                const latest = pendingRealtimeQuote;
+                pendingRealtimeQuote = null;
+                pendingRealtimeQuoteFrame = null;
+                applyRealtimeQuote(latest);
+            });
+        }
+
         function connectPriceStream(ticker) {
             if (!ticker) return;
             const upperTicker = ticker.toUpperCase();
@@ -21511,7 +21570,7 @@ def index():
                     const msg = JSON.parse(event.data);
                     if (!tvCandleSeries || !tvLastCandles.length) return;
                     if (msg.type === 'quote' && typeof msg.last === 'number') {
-                        applyRealtimeQuote(msg.last);
+                        queueRealtimeQuote(msg.last);
                     } else if (msg.type === 'candle' && msg.time) {
                         applyRealtimeCandle(msg);
                     }
@@ -21560,10 +21619,9 @@ def index():
          * Bucket boundaries follow the selected timeframe.
          */
         function applyRealtimeQuote(last) {
-            // Track live price and debounce Plotly chart updates
+            // Track live price and throttle Plotly relayout work.
             livePrice = last;
-            clearTimeout(plotlyPriceUpdateTimer);
-            plotlyPriceUpdateTimer = setTimeout(function() { updateAllPlotlyPriceLines(last); }, 500);
+            schedulePlotlyPriceLineUpdate(last);
 
             if (!tvCandleSeries || !tvLastCandles.length) return;
             const nowSec = Math.floor(Date.now() / 1000);
@@ -21599,7 +21657,6 @@ def index():
                     tvIndicatorRefreshTimer = setTimeout(() => applyIndicators(tvIndicatorCandles, tvActiveInds), 2000);
                 }
                 scheduleTVStrikeOverlayDraw();
-                scheduleTVSessionCalendarOverlayDraw();
                 tvResolveDeferredSessionFocus();
             } else if (bucketStart > lastCandle.time) {
                 // Clock has rolled past the bucket boundary but CHART_EQUITY hasn't
@@ -21638,9 +21695,13 @@ def index():
         function applyRealtimeCandle(candle) {
             if (!tvCandleSeries) return;
             const bucketStart = tvBucketStartForUnixSec(candle.time);
+            if (!Number.isFinite(bucketStart)) return;
 
             function rollInto(arr) {
-                const idx = arr.findIndex(x => x.time === bucketStart);
+                const lastIdx = arr.length - 1;
+                const idx = (lastIdx >= 0 && arr[lastIdx].time === bucketStart)
+                    ? lastIdx
+                    : arr.findIndex(x => x.time === bucketStart);
                 if (idx >= 0) {
                     const b = arr[idx];
                     arr[idx] = {
@@ -21653,7 +21714,7 @@ def index():
                         __quoteSeeded: false,
                         __quoteDirty: false,
                     };
-                    return arr[idx];
+                    return { bar: arr[idx], isNew: false };
                 }
                 // First 1-min candle of a new bucket — open the bucket with it.
                 const fresh = {
@@ -21666,12 +21727,17 @@ def index():
                     __quoteSeeded: false,
                     __quoteDirty: false,
                 };
-                arr.push(fresh);
-                arr.sort((a, b) => a.time - b.time);
-                return fresh;
+                if (lastIdx < 0 || arr[lastIdx].time < bucketStart) {
+                    arr.push(fresh);
+                } else {
+                    arr.push(fresh);
+                    arr.sort((a, b) => a.time - b.time);
+                }
+                return { bar: fresh, isNew: true };
             }
 
-            const displayBar = rollInto(tvLastCandles);
+            const displayRoll = rollInto(tvLastCandles);
+            const displayBar = displayRoll.bar;
             rollInto(tvIndicatorCandles);
             rollInto(tvVwapCandles);
             try { tvCandleSeries.update(tvToSeriesBar(displayBar)); } catch(e) {}
@@ -21708,7 +21774,7 @@ def index():
             } catch(e) {}
             if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
             scheduleTVStrikeOverlayDraw();
-            scheduleTVSessionCalendarOverlaySettleDraw();
+            if (displayRoll.isNew) scheduleTVSessionCalendarOverlaySettleDraw();
             tvResolveDeferredSessionFocus();
         }
 
@@ -22359,7 +22425,7 @@ def index():
             } else {
                 popup.document.write(`<!DOCTYPE html>
 <html><head><title>${displayName} - EzOptions</title>
-<script src="https://cdn.plot.ly/plotly-latest.min.js"><\\/script>
+<script src="{{ plotly_js_cdn_url }}"><\\/script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #1E1E1E; overflow: hidden; position: relative; }
@@ -22770,14 +22836,11 @@ def index():
                     return;
                 }
                 
-                // Only update if data has changed
-                if (JSON.stringify(data) !== JSON.stringify(lastData)) {
-                    lastData = data;  // Update before rendering so popout windows get fresh data
-                    updateCharts(data, topOiContextKey);
-                    updatePriceInfo(data.price_info);
-                }
+                lastData = data;  // Update before rendering so popout windows get fresh data
+                updateCharts(data, topOiContextKey);
+                updatePriceInfo(data.price_info);
                 if (!isTradeRailCollapsed()) {
-                    requestTradeChain({ force: true });
+                    requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS });
                 }
                 // Options cache is now populated — refresh price levels immediately.
                 // This fixes the delay where levels were missing right after a ticker change
@@ -31614,6 +31677,7 @@ def index():
             orderPollTimer: null,
             orderPollInFlight: false,
             lastOrderPollAt: 0,
+            lastChainRequestAt: 0,
             cancelLoadingId: '',
             replacingOrderId: '',
             action: 'BUY_TO_OPEN',
@@ -35648,10 +35712,21 @@ def index():
             const selectedExpiry = tradeRailState.expiry ? [tradeRailState.expiry] : getTradeRailSelectedDashboardExpiries();
             const rangePct = Math.max(0.5, Math.min(20, Number(tradeRailState.strikeRangePct) || 2));
             const key = ticker + '|' + selectedExpiry.join(',') + '|' + rangePct;
+            const now = Date.now();
+            const minIntervalMs = Math.max(0, Number(options.minIntervalMs) || 0);
             if (!options.force && tradeRailState.requestKey === key && tradeRailState.payload) return;
+            if (tradeRailState.loading && tradeRailState.requestKey === key) return;
+            if (
+                options.force &&
+                minIntervalMs > 0 &&
+                tradeRailState.requestKey === key &&
+                tradeRailState.payload &&
+                now - (tradeRailState.lastChainRequestAt || 0) < minIntervalMs
+            ) return;
             tradeRailState.loading = true;
             tradeRailState.ticker = ticker;
             tradeRailState.requestKey = key;
+            tradeRailState.lastChainRequestAt = now;
             renderTradeRail();
             fetch('/trade_chain', {
                 method: 'POST',
@@ -40672,8 +40747,8 @@ def index():
         ensureTradeJournalWorkspace();
         requestTradeJournal({ force: true });
 
-        // Auto-update every 1 second
-        updateInterval = setInterval(updateData, 1000);
+        // Auto-update options/analytics. Live candles still update through SSE.
+        updateInterval = setInterval(updateData, DASHBOARD_UPDATE_INTERVAL_MS);
         
         // Handle window resize
         window.addEventListener('resize', () => {
@@ -40716,7 +40791,7 @@ def index():
             button.classList.toggle('paused', !isStreaming);
             
             if (isStreaming) {
-                updateInterval = setInterval(updateData, 1000);
+                updateInterval = setInterval(updateData, DASHBOARD_UPDATE_INTERVAL_MS);
                 // Reconnect real-time price stream when resuming
                 const tickerVal = (document.getElementById('ticker').value || '').trim();
                 if (tickerVal) connectPriceStream(tickerVal);
@@ -41484,7 +41559,7 @@ def index():
     </script>
 </body>
 </html>
-    ''', desktop_mode=desktop_mode)
+    ''', desktop_mode=desktop_mode, plotly_js_cdn_url=PLOTLY_JS_CDN_URL)
 
 @app.route('/expirations/<ticker>')
 def get_expirations(ticker):
@@ -42819,7 +42894,7 @@ def price_stream(ticker):
     from the schwabdev websocket stream.
     """
     ticker = format_ticker(ticker)
-    client_queue = queue.Queue(maxsize=300)
+    client_queue = queue.Queue(maxsize=40)
     price_streamer.subscribe(ticker, client_queue)
 
     def generate():

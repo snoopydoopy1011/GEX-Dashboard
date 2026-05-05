@@ -74,6 +74,11 @@ def configure_profile(profile) -> None:
     except AttributeError:
         profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
 
+    try:
+        profile.setHttpCacheMaximumSize(64 * 1024 * 1024)
+    except AttributeError:
+        pass
+
 
 def _qt_enum(container, name: str, group: str):
     direct = getattr(container, name, None)
