@@ -1,6 +1,6 @@
 # GEX Dashboard - Scalping Performance Optimization Plan
 
-**Status:** Implementation in progress - Stages 0, 1, 2, 3, and 4 complete on `codex/scalping-performance-plan`
+**Status:** Implementation in progress - Stages 0, 1, 2, 3, 4, and 5 complete on `codex/scalping-performance-plan`
 **Created:** 2026-05-05  
 **Last updated:** 2026-05-05
 **Primary file:** `ezoptionsschwab.py`  
@@ -45,6 +45,10 @@ Completed on `codex/scalping-performance-plan`:
   - Added in-process guards so `store_interval_data` skips duplicate writes for the same ticker/date/minute/strike-range/expiry-scope bucket unless forced.
   - Added a similar 5-minute guard for `store_centroid_data`.
   - Moved active-path `clear_old_data` calls behind an hourly in-process retention guard while preserving forced startup and end-of-day pruning.
+- `b423a67 perf(trade): reduce active ladder render churn`
+  - Added Active Trader periodic render signatures so the 1-second tick skips when selected-contract live quote, preview TTL, account/order, and local intent state are unchanged.
+  - Added scalp-target render and price-line signatures. Existing Lightweight Charts scalp target lines are now skipped or updated in place instead of being removed and recreated on every render.
+  - Kept selected option quote stream updates requestAnimationFrame-batched and merged partial Schwab quote messages into the prior live selected quote so null partial fields do not flicker the ladder back to stale cached-chain values.
 
 Baseline findings collected before Stage 2:
 
@@ -60,6 +64,14 @@ Live validation collected before Stage 3:
 - `/trade_chain` cached SPY 0DTE path returned 58 contracts in 9.7 ms.
 - `/trade/quote_stream/SPY%20%20%20260505C00724000?ticker=SPY` returned 22 selected-contract quote events in 25 s with 144 ms median quote-time-to-receive latency.
 - A second live `/update` attempt hit Schwab `401 Unauthorized` after token expiry, so broader p95 sampling still needs a fresh token session.
+
+Live validation collected before Stage 5 on 2026-05-05, with `GEX_PERF_TRACE=1`, SPY 2026-05-05 expiry, active strike rail tab `gex`, and only the gamma strike-rail Plotly payload requested:
+
+- `/update`: n=5, median 977.6 ms, p95 1417.0 ms, 145.7-145.9 KB responses.
+- `/update_price`: n=5, median 1094.1 ms, p95 2264.4 ms, about 5.0 MB responses. The slow first sample included `prepare_price_chart_data_ms=631.3`, `pinned_expected_move_ms=310.9`, and `compute_trader_stats_full_ms=417.0`; later samples were mostly dominated by `get_price_history_ms`.
+- `/trade_chain`: n=10, median 5.7 ms, p95 6.5 ms, 58 contracts, 33.7 KB response.
+- Stage 4 DB guard timing showed the expected duplicate-write reduction: after the first `/update` sample, `store_interval_data_ms` was generally about 3.8-9.9 ms and `store_centroid_data_ms` about 0.3-2.2 ms; `/update_price` interval writes were about 2.7-5.5 ms.
+- Selected option quote streams were live for `SPY   260505C00724000` and `SPY   260505P00724000`. Both produced quote events without using preview/place endpoints.
 
 Validation already run for the implemented stages:
 
@@ -88,10 +100,13 @@ Tricky parts to preserve:
 - Stage 4 write guards track the latest physical ticker/time bucket signature, not every historical scope independently. If the user changes expiry scope inside the same minute, the new scope can still replace the current bucket.
 - `store_interval_data(..., force=True)` and `store_centroid_data(..., force=True)` bypass duplicate skipping and update the guard signature for the next normal call.
 - `clear_old_data(force=True)` is still used for startup and the end-of-day cleanup path; normal active writes run retention at most once per Eastern hour.
+- Schwab selected-option stream events can be partial. Preserve the live quote merge behavior so null fields in a later event do not erase the prior live bid/ask/last/mark.
+- Scalp target lines have two signatures: a context signature for selected symbol, basis, target profit, visibility, and quantity; and a full line signature that includes target line outputs. When only target prices move inside the same context, update existing price lines in place rather than recreating them.
+- The 1-second Active Trader interval should go through `renderTradeActiveTraderIfStale()`. Direct user actions and stream events can still call or schedule the full render immediately.
 - Any trading rail markup change must still be mirrored in `buildTradeRailHtml()`.
 - Any alerts/right-rail markup change must still be mirrored in `buildAlertsPanelHtml()`.
 
-Remaining implementation starts at Stage 5 unless new live-market measurements show a different bottleneck.
+Remaining implementation starts at Stage 6 only after the user accepts the Stage 1/2/5 live behavior and wants to slow the heavier analytics cadence.
 
 ---
 
@@ -615,7 +630,7 @@ Rollback:
 
 ### Stage 5 - Reduce Active Trader browser churn
 
-Status: Not started.
+Status: Implemented in `b423a67`; browser/live smoke validated on 2026-05-05.
 
 Goal:
 
@@ -623,22 +638,28 @@ Keep the ladder visually fresh while avoiding unnecessary DOM and chart-line wor
 
 Frontend plan:
 
-- Add a render signature to `renderTradeScalpTargets` similar to the ladder signature.
-- Do not recreate scalp target price lines if selected symbol, basis, target profit, and line visibility have not changed.
+- Added a render signature to `renderTradeScalpTargets` similar to the ladder signature.
+- Do not recreate scalp target price lines if selected symbol, basis, target profit, line visibility, and quantity have not changed. When target prices move in the same context and existing line handles support `applyOptions`, update the existing lines in place.
 - In the 1 second Active Trader interval, skip `renderTradeActiveTrader` if:
   - no selected contract
   - no live quote override change
   - no preview TTL display change
   - no order intent/account state change
-- Keep the existing ladder signature guard, but verify it includes only fields that should trigger full ladder HTML replacement.
-- If the selected option quote stream is active, use requestAnimationFrame batching for ladder updates.
+- Keep the existing ladder signature guard. The quote stream path still schedules Active Trader renders through requestAnimationFrame.
+- Merge partial selected-option stream messages into the prior live quote so partial null payloads do not force bid/ask/last fallback to cached-chain quotes.
 
 Validation:
 
-- Browser Performance trace should show fewer long tasks.
-- Ladder should not lose click/drag/cancel handlers.
-- Scroll position must remain stable.
-- Scalp target lines must still update when quantity, basis, target, or selected contract changes.
+- Browser smoke on `http://127.0.0.1:5017/` with `GEX_PERF_TRACE=1`: Active Trader opened with SPY 724C 0DTE selected, showed `Live` quote updates, and the ladder signature changed with streamed bid/ask/last updates.
+- Switched to the SPY 724P 0DTE cached contract and confirmed `Live` quote updates continued.
+- Staged a put ladder price with Auto off. The ladder showed a local `STAGED x1` marker and `Preview Required`; no preview or live placement endpoint was used.
+- Browser console sample after the ladder test showed no warnings, no errors, and no long-task entries. Recent Active Trader renders were about 0.5-3.4 ms; ladder rebuilds with one local marker were about 0.1-0.2 ms.
+- Required validation passed:
+  - `python3 -m py_compile ezoptionsschwab.py`
+  - `git diff --check`
+  - `python3 -m unittest tests.test_session_levels tests.test_trade_preview`
+  - inline JS extraction from `app.test_client().get('/')`
+  - `node --check /tmp/gex-inline-scripts.js`
 
 Expected win:
 
@@ -764,7 +785,7 @@ sed -n '1,220p' docs/ORDER_ENTRY_RAIL_SCALPING_REPAIR_PLAN.md
 sed -n '1,220p' docs/ALERTS_RAIL_PHASE3_PLAN.md
 ```
 
-3. Do not redo Stages 0-3 unless validation shows a regression. Start remaining implementation at Stage 4, or collect additional live-market p95 sampling first if the token session is fresh.
+3. Do not redo Stages 0-5 unless validation shows a regression. Start remaining implementation at Stage 6 only after confirming the user wants the heavier analytics cadence slowed.
 
 4. Implement one stage at a time. Commit each stage separately with timing results in the commit body.
 
