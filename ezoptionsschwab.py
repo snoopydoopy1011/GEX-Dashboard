@@ -21084,6 +21084,9 @@ def index():
         let tvSessionLevelLines = [];
         let tvTopOILines   = [];
         let tvScalpTargetLines = [];
+        let tvScalpTargetLineRecords = [];
+        let tvScalpTargetLineSignature = '';
+        let tvScalpTargetLineContextSignature = '';
         let tvUserHLinePriceLines = new Map();
         let tvUserDrawingAxisLabelLines = new Map();
         let _lastTopOI     = null;
@@ -32214,6 +32217,7 @@ def index():
             liveQuoteStreamStatus: '',
             liveQuoteEventSource: null,
             liveQuoteRenderPending: false,
+            liveQuoteSignature: '',
             liveQuoteLastErrorAt: 0,
             pendingContractScrollSymbol: '',
             loading: false,
@@ -32291,6 +32295,7 @@ def index():
             ladderRows: 25,
             ladderLastRecenterAt: 0,
             ladderRenderSignature: '',
+            activeTraderPeriodicSignature: '',
             fastBracketCollapsed: getTradeStoredBool(TRADE_FAST_BRACKET_COLLAPSE_KEY, true),
             bracketCollapsed: getTradeStoredBool(TRADE_BRACKET_COLLAPSE_KEY, true),
             accountInfoCollapsed: getTradeStoredBool(TRADE_ACCOUNT_INFO_COLLAPSE_KEY, false),
@@ -33155,6 +33160,45 @@ def index():
         function resetTradeSelectedQuoteOverride(symbol = '') {
             tradeRailState.liveSelectedQuote = null;
             tradeRailState.liveQuoteSymbol = '';
+            tradeRailState.liveQuoteSignature = '';
+            tradeRailState.activeTraderPeriodicSignature = '';
+        }
+        function getTradeLiveQuoteOverrideSignature(quote = tradeRailState.liveSelectedQuote) {
+            if (!quote || !quote.contract_symbol) return '';
+            const fmt = value => {
+                const n = Number(value);
+                return Number.isFinite(n) ? n.toFixed(4) : '';
+            };
+            return [
+                quote.contract_symbol || '',
+                fmt(quote.bid),
+                fmt(quote.ask),
+                fmt(quote.last),
+                fmt(quote.mark),
+                fmt(quote.mid),
+                fmt(quote.iv),
+                fmt(quote.delta),
+                fmt(quote.gamma),
+                fmt(quote.theta),
+                fmt(quote.vega),
+                quote.quote_time == null ? '' : String(quote.quote_time),
+                quote.trade_time == null ? '' : String(quote.trade_time),
+            ].join('|');
+        }
+        function mergeTradeLiveQuoteMessage(message) {
+            if (!message || !message.contract_symbol) return message || null;
+            const prior = tradeRailState.liveSelectedQuote && tradeRailState.liveSelectedQuote.contract_symbol === message.contract_symbol
+                ? tradeRailState.liveSelectedQuote
+                : null;
+            const merged = Object.assign({}, prior || {}, {
+                type: message.type,
+                contract_symbol: message.contract_symbol,
+                received_at: message.received_at,
+            });
+            ['bid', 'ask', 'last', 'mark', 'mid', 'volume', 'open_interest', 'iv', 'strike', 'dte', 'delta', 'gamma', 'theta', 'vega', 'quote_time', 'trade_time'].forEach(key => {
+                if (message[key] !== undefined && message[key] !== null) merged[key] = message[key];
+            });
+            return merged;
         }
         function mergeTradeSelectedLiveQuote(contract) {
             if (!contract) return contract;
@@ -33399,10 +33443,14 @@ def index():
                         }
                         if (msg.type === 'heartbeat') return;
                         if (msg.type !== 'option_quote' || msg.contract_symbol !== tradeRailState.selectedSymbol) return;
-                        tradeRailState.liveSelectedQuote = msg;
+                        const mergedQuote = mergeTradeLiveQuoteMessage(msg);
+                        const nextSignature = getTradeLiveQuoteOverrideSignature(mergedQuote);
+                        const quoteChanged = nextSignature !== tradeRailState.liveQuoteSignature;
+                        tradeRailState.liveSelectedQuote = mergedQuote;
+                        tradeRailState.liveQuoteSignature = nextSignature;
                         tradeRailState.liveQuoteStreamStatus = 'live';
                         tradeRailState.liveQuoteLastErrorAt = 0;
-                        scheduleTradeActiveTraderRender();
+                        if (quoteChanged) scheduleTradeActiveTraderRender();
                     } catch (e) {
                         console.warn('Selected option quote stream parse failed', e);
                     }
@@ -34265,6 +34313,85 @@ def index():
                 moveEl.classList.toggle('neg', hasMove && move < -0.004);
             }
         }
+        function getTradeRenderNumberSignature(value, digits = 4) {
+            const n = Number(value);
+            return Number.isFinite(n) ? n.toFixed(digits) : '';
+        }
+        function getTradeScalpBasisSignature(targets) {
+            const basis = targets && targets.basis;
+            if (!basis) return '';
+            return [
+                getTradeRenderNumberSignature(basis.premium),
+                String(basis.source || ''),
+                String(basis.quantity || ''),
+                basis.livePosition ? '1' : '0',
+            ].join(':');
+        }
+        function getTradeScalpTargetContextSignature(selected, targets) {
+            return [
+                selected && selected.contract_symbol || tradeRailState.selectedSymbol || '',
+                getTradeScalpBasisSignature(targets),
+                getTradeRenderNumberSignature(targets && targets.targetProfit, 2),
+                tradeRailState.scalpTargetLinesVisible ? '1' : '0',
+                String(normalizeTradeIntentQuantity(tradeRailState.quantity)),
+            ].join('|');
+        }
+        function getTradeScalpTargetResultSignature(result) {
+            if (!result) return '';
+            return [
+                getTradeRenderNumberSignature(result.spot),
+                getTradeRenderNumberSignature(result.move),
+                getTradeRenderNumberSignature(result.targetPremium),
+                String(result.method || ''),
+                result.stale ? '1' : '0',
+            ].join(':');
+        }
+        function getTradeScalpTargetRenderSignature(selected, targets) {
+            return [
+                getTradeScalpTargetContextSignature(selected, targets),
+                getTradeScalpTargetResultSignature(targets && targets.breakeven),
+                getTradeScalpTargetResultSignature(targets && targets.profit),
+            ].join('|');
+        }
+        function getTradeScalpTargetLineDefs(targets) {
+            const targetProfit = Math.max(1, Math.min(5000, Number(targets && targets.targetProfit) || 100));
+            const defs = [
+                {
+                    key: 'breakeven',
+                    result: targets && targets.breakeven,
+                    label: 'Scalp B/E',
+                    color: resolveCssColor('var(--warn)') || '#F59E0B',
+                    lineWidth: 1,
+                },
+                {
+                    key: 'profit',
+                    result: targets && targets.profit,
+                    label: 'Scalp +' + fmtTradeScalpTargetDollars(targetProfit),
+                    color: resolveCssColor('var(--accent)') || '#3B82F6',
+                    lineWidth: 2,
+                },
+            ];
+            const seenPrices = [];
+            return defs.map(def => {
+                const price = Number(def.result && def.result.spot);
+                if (!Number.isFinite(price)) return null;
+                if (seenPrices.some(existing => Math.abs(existing - price) <= 0.01)) return null;
+                seenPrices.push(price);
+                return Object.assign({}, def, {
+                    price,
+                    title: def.label + ' ' + fmtTradePrice(price),
+                });
+            }).filter(Boolean);
+        }
+        function getTradeScalpTargetLineSignature(contextSignature, defs) {
+            return contextSignature + '|' + defs.map(def => [
+                def.key,
+                getTradeRenderNumberSignature(def.price),
+                def.title,
+                def.color,
+                def.lineWidth,
+            ].join(':')).join(';');
+        }
         function clearTradeScalpTargetLines(refreshOverlay = true) {
             tvScalpTargetPrices = [];
             if (tvCandleSeries) {
@@ -34273,54 +34400,92 @@ def index():
                 });
             }
             tvScalpTargetLines = [];
+            tvScalpTargetLineRecords = [];
+            tvScalpTargetLineSignature = '';
+            tvScalpTargetLineContextSignature = '';
             if (refreshOverlay) tvRefreshOverlayLevelPrices();
         }
         function syncTradeScalpTargetLines(targets = null) {
             const scalpLinePerf = gexPerfStart('syncTradeScalpTargetLines');
-            clearTradeScalpTargetLines(false);
+            const selected = getSelectedTradeContract();
+            const resolvedTargets = targets || getTradeScalpTargets(selected);
+            const contextSignature = getTradeScalpTargetContextSignature(selected, resolvedTargets);
             if (!tradeRailState.scalpTargetLinesVisible || !tvCandleSeries || !window.LightweightCharts) {
+                if (tvScalpTargetLines.length || tvScalpTargetPrices.length || tvScalpTargetLineSignature) {
+                    clearTradeScalpTargetLines(false);
+                }
                 tvRefreshOverlayLevelPrices();
                 gexPerfEnd(scalpLinePerf, { visible: !!tradeRailState.scalpTargetLinesVisible, skipped: true });
                 return;
             }
-            const resolvedTargets = targets || getTradeScalpTargets(getSelectedTradeContract());
-            const targetProfit = Math.max(1, Math.min(5000, Number(resolvedTargets && resolvedTargets.targetProfit) || 100));
-            const defs = [
-                {
-                    key: 'breakeven',
-                    result: resolvedTargets && resolvedTargets.breakeven,
-                    label: 'Scalp B/E',
-                    color: resolveCssColor('var(--warn)') || '#F59E0B',
-                },
-                {
-                    key: 'profit',
-                    result: resolvedTargets && resolvedTargets.profit,
-                    label: 'Scalp +' + fmtTradeScalpTargetDollars(targetProfit),
-                    color: resolveCssColor('var(--accent)') || '#3B82F6',
-                },
-            ];
-            const seenPrices = [];
+            const defs = getTradeScalpTargetLineDefs(resolvedTargets);
+            const lineSignature = getTradeScalpTargetLineSignature(contextSignature, defs);
+            if (tvScalpTargetLineSignature === lineSignature) {
+                gexPerfEnd(scalpLinePerf, { lines: tvScalpTargetLines.length, skipped: true });
+                return;
+            }
+            const canReuseLines = (
+                tvScalpTargetLineContextSignature === contextSignature &&
+                tvScalpTargetLineRecords.length === defs.length &&
+                defs.every((def, index) => {
+                    const record = tvScalpTargetLineRecords[index];
+                    return record && record.key === def.key && record.line && typeof record.line.applyOptions === 'function';
+                })
+            );
+            if (canReuseLines) {
+                try {
+                    defs.forEach((def, index) => {
+                        const record = tvScalpTargetLineRecords[index];
+                        record.line.applyOptions({
+                            price: def.price,
+                            color: def.color,
+                            lineWidth: def.lineWidth,
+                            lineStyle: LightweightCharts.LineStyle.Dashed,
+                            lineVisible: true,
+                            axisLabelVisible: true,
+                            title: def.title,
+                        });
+                        tvScalpTargetLineRecords[index] = Object.assign({}, record, {
+                            price: def.price,
+                            title: def.title,
+                        });
+                    });
+                    tvScalpTargetPrices = defs.map(def => def.price);
+                    tvScalpTargetLineSignature = lineSignature;
+                    tvRefreshOverlayLevelPrices();
+                    gexPerfEnd(scalpLinePerf, { lines: tvScalpTargetLines.length, reused: true });
+                    return;
+                } catch (e) {
+                    console.warn('update scalp target price line failed; recreating lines', e);
+                }
+            }
+            clearTradeScalpTargetLines(false);
+            tvScalpTargetLineContextSignature = contextSignature;
+            if (!defs.length) {
+                tvScalpTargetLineSignature = lineSignature;
+                tvRefreshOverlayLevelPrices();
+                gexPerfEnd(scalpLinePerf, { lines: 0 });
+                return;
+            }
             defs.forEach(def => {
-                const price = Number(def.result && def.result.spot);
-                if (!Number.isFinite(price)) return;
-                if (seenPrices.some(existing => Math.abs(existing - price) <= 0.01)) return;
                 try {
                     const line = tvCandleSeries.createPriceLine({
-                        price,
+                        price: def.price,
                         color: def.color,
-                        lineWidth: def.key === 'profit' ? 2 : 1,
+                        lineWidth: def.lineWidth,
                         lineStyle: LightweightCharts.LineStyle.Dashed,
                         lineVisible: true,
                         axisLabelVisible: true,
-                        title: def.label + ' ' + fmtTradePrice(price),
+                        title: def.title,
                     });
                     tvScalpTargetLines.push(line);
-                    tvScalpTargetPrices.push(price);
-                    seenPrices.push(price);
+                    tvScalpTargetLineRecords.push({ key: def.key, line, price: def.price, title: def.title });
+                    tvScalpTargetPrices.push(def.price);
                 } catch (e) {
                     console.warn('createPriceLine failed for scalp target', def.key, e);
                 }
             });
+            tvScalpTargetLineSignature = tvScalpTargetLineRecords.length === defs.length ? lineSignature : '';
             tvRefreshOverlayLevelPrices();
             gexPerfEnd(scalpLinePerf, { lines: tvScalpTargetLines.length });
         }
@@ -34339,40 +34504,134 @@ def index():
             const basisEl = panel.querySelector('[data-trade-scalp-basis]');
             const methodEl = panel.querySelector('[data-trade-scalp-method]');
             const targetProfit = Math.max(1, Math.min(5000, Number(targets.targetProfit) || 100));
-            if (input && document.activeElement !== input) input.value = String(targetProfit);
-            if (lineToggle) {
-                lineToggle.checked = !!tradeRailState.scalpTargetLinesVisible;
-                const wrap = lineToggle.closest('.trade-scalp-target-lines');
-                if (wrap) wrap.classList.toggle('active', !!tradeRailState.scalpTargetLinesVisible);
-            }
-            if (label) label.textContent = '+' + fmtTradeScalpTargetDollars(targetProfit) + '/Ct SPY';
-            renderTradeScalpTargetSlot(breakevenValue, breakevenMove, targets.breakeven);
-            renderTradeScalpTargetSlot(profitValue, profitMove, targets.profit);
-            if (basisEl) {
-                basisEl.textContent = targets.basis
-                    ? ('Basis ' + fmtTradePrice(targets.basis.premium) + ' ' + targets.basis.source)
-                    : 'Basis —';
-            }
-            const methodResults = [targets.breakeven, targets.profit].filter(Boolean);
-            let methodClass = 'unavailable';
-            let methodText = 'Unavailable';
-            if (methodResults.some(result => result.method === 'iv_model')) {
-                methodClass = 'iv';
-                methodText = methodResults.some(result => result.stale) ? 'IV model | stale' : 'IV model | exit bid';
-            } else if (methodResults.some(result => result.method === 'delta_gamma')) {
-                methodClass = 'fallback';
-                methodText = methodResults.some(result => result.stale) ? 'Delta/gamma | stale' : 'Delta/gamma | exit bid';
-            }
-            if (methodEl) {
-                methodEl.textContent = methodText;
-                methodEl.classList.toggle('iv', methodClass === 'iv');
-                methodEl.classList.toggle('fallback', methodClass === 'fallback');
-                methodEl.classList.toggle('unavailable', methodClass === 'unavailable');
-                methodEl.title = methodText === 'Unavailable'
-                    ? 'Need an active long selected-contract position with Schwab average price.'
-                    : 'Planning estimate only; Schwab order payloads are unchanged.';
+            const renderSignature = getTradeScalpTargetRenderSignature(selected, targets);
+            if (panel.dataset.tradeScalpTargetSignature !== renderSignature) {
+                if (input && document.activeElement !== input) input.value = String(targetProfit);
+                if (lineToggle) {
+                    lineToggle.checked = !!tradeRailState.scalpTargetLinesVisible;
+                    const wrap = lineToggle.closest('.trade-scalp-target-lines');
+                    if (wrap) wrap.classList.toggle('active', !!tradeRailState.scalpTargetLinesVisible);
+                }
+                if (label) label.textContent = '+' + fmtTradeScalpTargetDollars(targetProfit) + '/Ct SPY';
+                renderTradeScalpTargetSlot(breakevenValue, breakevenMove, targets.breakeven);
+                renderTradeScalpTargetSlot(profitValue, profitMove, targets.profit);
+                if (basisEl) {
+                    basisEl.textContent = targets.basis
+                        ? ('Basis ' + fmtTradePrice(targets.basis.premium) + ' ' + targets.basis.source)
+                        : 'Basis —';
+                }
+                const methodResults = [targets.breakeven, targets.profit].filter(Boolean);
+                let methodClass = 'unavailable';
+                let methodText = 'Unavailable';
+                if (methodResults.some(result => result.method === 'iv_model')) {
+                    methodClass = 'iv';
+                    methodText = methodResults.some(result => result.stale) ? 'IV model | stale' : 'IV model | exit bid';
+                } else if (methodResults.some(result => result.method === 'delta_gamma')) {
+                    methodClass = 'fallback';
+                    methodText = methodResults.some(result => result.stale) ? 'Delta/gamma | stale' : 'Delta/gamma | exit bid';
+                }
+                if (methodEl) {
+                    methodEl.textContent = methodText;
+                    methodEl.classList.toggle('iv', methodClass === 'iv');
+                    methodEl.classList.toggle('fallback', methodClass === 'fallback');
+                    methodEl.classList.toggle('unavailable', methodClass === 'unavailable');
+                    methodEl.title = methodText === 'Unavailable'
+                        ? 'Need an active long selected-contract position with Schwab average price.'
+                        : 'Planning estimate only; Schwab order payloads are unchanged.';
+                }
+                panel.dataset.tradeScalpTargetSignature = renderSignature;
             }
             syncTradeScalpTargetLines(targets);
+        }
+        function getTradePositionStateSignature(position) {
+            if (!position) return '';
+            const avg = getTradePositionAveragePremium(position);
+            return [
+                String(position.symbol || position.instrument_symbol || ''),
+                getTradeRenderNumberSignature(position.quantity, 2),
+                avg ? getTradeRenderNumberSignature(avg.premium) : '',
+                getTradeRenderNumberSignature(getTradePositionOpenPnl(position), 2),
+                getTradeRenderNumberSignature(getTradePositionOpenPnlPct(position), 4),
+                getTradeRenderNumberSignature(position.day_pnl, 2),
+                position.selected_contract_match ? '1' : '0',
+            ].join(':');
+        }
+        function getTradeOrderStateSignature(selected) {
+            const orders = Array.isArray(tradeRailState.orders) ? tradeRailState.orders : [];
+            return [
+                tradeRailState.ordersLoading ? '1' : '0',
+                String(tradeRailState.ordersError || ''),
+                tradeRailState.ordersCollapsed ? '1' : '0',
+                orders.map(order => {
+                    const leg = getTradeOrderLegSummary(order);
+                    return [
+                        order && order.order_id || '',
+                        order && order.status || '',
+                        getTradeRenderNumberSignature(order && order.price),
+                        order && order.cancelable ? '1' : '0',
+                        leg.symbol || '',
+                        leg.instruction || '',
+                        String(leg.quantity == null ? '' : leg.quantity),
+                    ].join(':');
+                }).join(';'),
+                getTradeActiveOrderSummary(selected, orders),
+            ].join('|');
+        }
+        function getTradeIntentStateSignature(selected) {
+            return getActiveTradeOrderIntentsForSelected(selected).map(intent => [
+                intent.local_id || '',
+                intent.state || '',
+                intent.instruction || '',
+                normalizeTradeIntentQuantity(intent.quantity),
+                normalizeTradeIntentLimit(intent.limit_price),
+                intent.preview_token || '',
+                intent.schwab_order_id || '',
+                intent.error || '',
+            ].join(':')).join(';');
+        }
+        function getTradePreviewStateSignature() {
+            const ttl = getTradePreviewTtlInfo();
+            return [
+                tradeRailState.previewLoading ? '1' : '0',
+                tradeRailState.previewToken || '',
+                String(tradeRailState.previewCreatedAt || 0),
+                ttl.text || '',
+                ttl.cls || '',
+                tradeRailState.previewError || '',
+                tradeRailState.placementLoading ? '1' : '0',
+                tradeRailState.placementError || '',
+                tradeRailState.cancelLoadingId || '',
+                tradeRailState.replacingOrderId || '',
+            ].join('|');
+        }
+        function getTradeAccountStateSignature(selected) {
+            return [
+                tradeRailState.accountHash || '',
+                tradeRailState.accountDetailsLoading ? '1' : '0',
+                tradeRailState.accountError || '',
+                getTradePositionStateSignature(getSelectedTradePosition(selected)),
+            ].join('|');
+        }
+        function getTradeActiveTraderPeriodicSignature(selected) {
+            if (!selected) return '';
+            return [
+                selected.contract_symbol || '',
+                getTradeLiveQuoteOverrideSignature(),
+                getTradePreviewStateSignature(),
+                getTradeAccountStateSignature(selected),
+                getTradeOrderStateSignature(selected),
+                getTradeIntentStateSignature(selected),
+            ].join('||');
+        }
+        function renderTradeActiveTraderIfStale() {
+            const selected = getSelectedTradeContract();
+            if (!selected) {
+                tradeRailState.activeTraderPeriodicSignature = '';
+                return;
+            }
+            const signature = getTradeActiveTraderPeriodicSignature(selected);
+            if (signature && signature === tradeRailState.activeTraderPeriodicSignature) return;
+            renderTradeActiveTrader();
         }
         function renderTradeActiveTrader() {
             const panel = document.querySelector('[data-trade-active-panel]');
@@ -34536,6 +34795,7 @@ def index():
             }
             renderTradeModeBadge();
             renderTradeScalpTargets();
+            tradeRailState.activeTraderPeriodicSignature = getTradeActiveTraderPeriodicSignature(selected);
             gexPerfEnd(activeTraderPerf, { selected: !!selected });
         }
         function renderTradeBracketTemplateOptions() {
@@ -37961,7 +38221,7 @@ def index():
         setInterval(() => {
             const panel = document.querySelector('[data-trade-active-panel]');
             if (!panel || tradeRailState.activeTraderCollapsed || isTradeRailCollapsed() || !getSelectedTradeContract()) return;
-            renderTradeActiveTrader();
+            renderTradeActiveTraderIfStale();
         }, 1000);
 
         // Standalone price chart renderer — called by /update_price without touching other charts.
@@ -40217,6 +40477,9 @@ def index():
                     tvSessionLevelLines = [];
                     tvTopOILines = [];
                     tvScalpTargetLines = [];
+                    tvScalpTargetLineRecords = [];
+                    tvScalpTargetLineSignature = '';
+                    tvScalpTargetLineContextSignature = '';
                     tvKeyLevelPrices = [];
                     tvSessionLevelPrices = [];
                     tvTopOIPrices = [];
