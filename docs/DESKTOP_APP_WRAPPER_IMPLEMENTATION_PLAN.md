@@ -1,7 +1,7 @@
 # Desktop App Wrapper Implementation Plan
 
 **Created:** 2026-05-04
-**Status:** Planning only; no implementation yet
+**Status:** Phase 2 handoff complete; next phase is Phase 3 PySide6 Shell
 **Recommended first prototype:** pywebview launcher
 **Likely long-term wrapper:** PySide6 + `QWebEngineView`
 **Current app target:** `ezoptionsschwab.py` stays the dashboard runtime
@@ -366,6 +366,77 @@ Exit criteria:
 - Main dashboard works in browser and wrapper.
 - Price chart window can be opened as an independent desktop window.
 - Secondary chart windows no longer require `window.opener` for critical data.
+
+### Phase 2 Handoff - 2026-05-04
+
+Accomplished:
+
+- Added passive desktop detection to the main dashboard. `desktop_launcher.py` now opens the dashboard at `/?desktop=1`, and `ezoptionsschwab.py` injects `window.GEX_DESKTOP` only for that desktop launch URL. Direct browser launches remain unchanged.
+- Added a minimal route-backed desktop window seam:
+  - `POST /desktop/window_state` stores a short-lived in-memory window payload.
+  - `GET /desktop/window_state/<state_id>` retrieves the payload for a child window.
+  - `GET /desktop/window/price` serves a first-class desktop price chart surface.
+  - `GET /desktop/window/chart/<chart_id>` routes `price` / `price-chart` to the same price surface.
+- Added `openDashboardWindow(kind, params)` in the dashboard JavaScript. In normal browser mode it does nothing and the existing `window.open('', ...)` popout path remains active. In desktop mode, the price chart popout stores explicit state and asks the wrapper bridge to open `/desktop/window/price`.
+- Added `DashboardWindowBridge` to `desktop_launcher.py`. The bridge exposes a narrow pywebview JS API that can open route-backed native windows without relying on browser `window.open` / `window.opener`.
+- Kept `ezoptionsschwab.py` directly runnable with `python3 ezoptionsschwab.py`.
+- Did not change analytics formulas, chart calculations, flow/alert logic, Schwab order endpoints, order JSON, preview/place/cancel gates, trading behavior, dashboard layout, or `Trading_from_dashboard.txt`.
+- Verification passed: `python3 -m py_compile ezoptionsschwab.py`, `python3 -m py_compile desktop_launcher.py`, `git diff --check`, and `python3 -m unittest tests.test_session_levels tests.test_trade_preview`.
+- Flask test-client verification passed for `/?desktop=1`, `/desktop/window_state`, `/desktop/window_state/<state_id>`, and `/desktop/window/price`.
+- Normal browser smoke passed on `http://127.0.0.1:5019/` with HTTP 200.
+- pywebview wrapper smoke passed on `http://127.0.0.1:5020/`; it loaded `/?desktop=1`, `/load_settings`, `/trade/journal`, `/expirations/SPY`, and `/token_health`, then auto-closed and left no listener on the smoke port.
+
+Tricky parts / findings:
+
+- The desktop route intentionally starts as a minimal independent price chart surface rather than a full copy of the legacy popup document. It proves the important seam: the child window can fetch explicit state from the server and request `/update_price` directly without `window.opener`.
+- The existing browser price popout still uses the legacy blank-document `window.open` path. That is intentional until the desktop route and future shell behavior are mature enough to replace it.
+- The in-memory window state is short-lived and process-local. That is enough for the current in-process wrapper model, but Phase 3 should preserve the same route contract if it moves to a stronger native shell.
+- Local Flask listener smoke required sandbox approval again. The first sandboxed normal launch failed with `Operation not permitted`; the approved launch on port `5019` worked.
+- `ezoptionsschwab.py` still emits the pre-existing compile-time `SyntaxWarning` for an invalid escape sequence inside the large dashboard template; compilation succeeds.
+
+Suggested next-session prompt:
+
+```text
+We are in /Users/scottmunger/Desktop/Trading/Dashboards/GEX-Dashboard.
+
+Read AGENTS.md first, then read docs/DESKTOP_APP_WRAPPER_IMPLEMENTATION_PLAN.md.
+
+Continue from the Phase 2 Handoff dated 2026-05-04. Phase 2 added passive desktop detection, the /desktop/window_state endpoint, first-class /desktop/window/price and /desktop/window/chart/<chart_id> routes, openDashboardWindow(kind, params), and a narrow pywebview DashboardWindowBridge. The browser window.open('', ...) + window.opener popout path was intentionally kept working for normal browser launches.
+
+Goal: start Phase 3 only, PySide6 Shell. Do not do a sanity check of completed Phase 1 or Phase 2 beyond the normal branch/worktree confirmation and whatever local context you need for Phase 3 implementation.
+
+Constraints:
+- Wrapper/shell/window-seam work only. Do not change analytics formulas, chart calculations, flow/alert logic, Schwab order endpoints, order JSON, preview/place/cancel safety gates, or trading behavior.
+- Keep ezoptionsschwab.py runnable directly with python3 ezoptionsschwab.py.
+- Keep desktop_launcher.py working unless the new PySide6 launcher deliberately supplements it.
+- Do not redesign the UI.
+- No JS framework introduction.
+- Leave Trading_from_dashboard.txt alone unless explicitly asked.
+- Preserve the existing browser window.open behavior while the desktop shell matures.
+
+Start by confirming:
+git branch -a
+git log --oneline main..HEAD
+git status --short
+
+Recommended Phase 3 target:
+- Add optional PySide6 dependency handling, preferably in requirements-desktop.txt.
+- Add a PySide6 launcher, likely desktop_app.py, that reuses the existing in-process Werkzeug server model first.
+- Use QWebEngineView / QWebEngineProfile with persistent local storage/cookies/cache under the existing desktop app support directory.
+- Load the main dashboard as /?desktop=1.
+- Route new-window requests through QWebEngineView.createWindow or a custom QWebEnginePage so desktop windows load Flask routes, especially /desktop/window/price.
+- Add only minimal native app/window controls needed for Phase 3, such as New Price Chart Window, Reload, and Quit/Stop Server.
+- Keep the route-backed price chart state contract from Phase 2: pass explicit state through /desktop/window_state rather than window.opener.
+- Smoke test normal browser launch, pywebview launcher launch, and PySide6 launcher launch.
+
+Verification:
+python3 -m py_compile ezoptionsschwab.py
+python3 -m py_compile desktop_launcher.py
+python3 -m py_compile desktop_app.py if added
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview if tests exist
+Smoke normal browser launch, pywebview wrapper launch, and PySide6 wrapper launch.
+```
 
 ### Phase 3: PySide6 Shell
 

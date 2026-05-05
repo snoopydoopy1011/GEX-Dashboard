@@ -12,6 +12,7 @@ import collections
 import os
 import atexit
 import re
+import secrets
 
 # python.org Python on macOS ships without a default CA bundle unless
 # "Install Certificates.command" has been run, so ssl.create_default_context()
@@ -52,6 +53,9 @@ TRADE_JOURNAL_MEDIA_DIR = os.path.join(BASE_DIR, 'Screenshots', 'trade_journal')
 TRADE_JOURNAL_MEDIA_MAX_BYTES = 8 * 1024 * 1024
 MAX_RETAINED_SESSION_DATES = 2
 _retention_lock = threading.Lock()
+_DESKTOP_WINDOW_STATE_TTL_SECONDS = 6 * 60 * 60
+_desktop_window_states = {}
+_desktop_window_state_lock = threading.Lock()
 
 
 def sqlite_connect(db_path=None, timeout=10, retries=2, retry_delay=0.25):
@@ -10433,8 +10437,549 @@ def fetch_options_for_multiple_dates(ticker, dates, exposure_metric="Open Intere
 
     return combined_calls, combined_puts
 
+
+def _cleanup_desktop_window_states(now=None):
+    now = now or time.time()
+    expired = [
+        state_id for state_id, record in _desktop_window_states.items()
+        if now - record.get('created_at', 0) > _DESKTOP_WINDOW_STATE_TTL_SECONDS
+    ]
+    for state_id in expired:
+        _desktop_window_states.pop(state_id, None)
+
+
+@app.route('/desktop/window_state', methods=['POST'])
+def create_desktop_window_state():
+    """Store a short-lived desktop window payload for wrapper-owned windows."""
+    if request.content_length and request.content_length > 200_000:
+        return jsonify({'error': 'Window state is too large'}), 413
+
+    payload = request.get_json(silent=True) or {}
+    kind = str(payload.get('kind') or '').strip().lower()
+    if kind not in {'price', 'chart'}:
+        return jsonify({'error': 'Unsupported desktop window kind'}), 400
+
+    state = payload.get('state') or {}
+    if not isinstance(state, dict):
+        return jsonify({'error': 'Desktop window state must be an object'}), 400
+
+    state_id = secrets.token_urlsafe(18)
+    now = time.time()
+    with _desktop_window_state_lock:
+        _cleanup_desktop_window_states(now)
+        _desktop_window_states[state_id] = {
+            'kind': kind,
+            'state': state,
+            'created_at': now,
+        }
+
+    return jsonify({'state_id': state_id, 'expires_in': _DESKTOP_WINDOW_STATE_TTL_SECONDS})
+
+
+@app.route('/desktop/window_state/<state_id>')
+def get_desktop_window_state(state_id):
+    with _desktop_window_state_lock:
+        _cleanup_desktop_window_states()
+        record = _desktop_window_states.get(state_id)
+
+    if not record:
+        return jsonify({'error': 'Desktop window state not found'}), 404
+
+    return jsonify({
+        'kind': record.get('kind'),
+        'state': record.get('state') or {},
+        'created_at': record.get('created_at'),
+    })
+
+
+_DESKTOP_PRICE_WINDOW_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Price Chart - EzOptions</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        :root {
+            --bg-0:#0B0E11; --bg-1:#151A21; --bg-2:#1E242D; --bg-3:#262D38;
+            --border:#2A313B; --border-strong:#3A424F;
+            --fg-0:#E5E7EB; --fg-1:#9CA3AF; --fg-2:#6B7280;
+            --call:#10B981; --put:#EF4444; --accent:#3B82F6;
+            --warn:#F59E0B; --info:#3B82F6; --ok:#10B981; --gold:#D4AF37;
+            --font-ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
+            --font-mono:"SF Mono","JetBrains Mono",Menlo,monospace;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg-0);
+            color: var(--fg-0);
+            font-family: var(--font-ui);
+            height: 100vh;
+            overflow: hidden;
+        }
+        .window {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            min-width: 0;
+        }
+        .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-height: 38px;
+            padding: 6px 10px;
+            background: var(--bg-1);
+            border-bottom: 1px solid var(--border);
+            flex: 0 0 auto;
+        }
+        .title {
+            font-size: 13px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .meta,
+        .status {
+            color: var(--fg-1);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .status {
+            margin-left: auto;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .status.error { color: var(--put); }
+        .chart-shell {
+            flex: 1 1 auto;
+            min-height: 0;
+            position: relative;
+            background: var(--bg-0);
+        }
+        #price-chart {
+            position: absolute;
+            inset: 0;
+        }
+        .ohlc-tooltip {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            z-index: 5;
+            display: none;
+            padding: 6px 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-1);
+            color: var(--fg-0);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            line-height: 1.5;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .up { color: var(--call); }
+        .down { color: var(--put); }
+    </style>
+</head>
+<body>
+    <div class="window">
+        <div class="toolbar">
+            <div class="title" id="chart-title">Price Chart</div>
+            <div class="meta" id="chart-meta"></div>
+            <div class="status" id="chart-status">Loading window state...</div>
+        </div>
+        <div class="chart-shell">
+            <div id="price-chart"></div>
+            <div class="ohlc-tooltip" id="ohlc-tooltip"></div>
+        </div>
+    </div>
+    <script>
+        window.GEX_DESKTOP = true;
+        window.GEX_DESKTOP_WINDOW = 'price';
+        const DESKTOP_STATE_ID = {{ state_id|tojson }};
+
+        let currentState = null;
+        let chart = null;
+        let candleSeries = null;
+        let volumeSeries = null;
+        let priceLines = [];
+        let lastCandles = [];
+        let eventSource = null;
+        let streamTicker = null;
+
+        function token(name) {
+            return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        }
+
+        function showStatus(message, isError) {
+            const el = document.getElementById('chart-status');
+            if (!el) return;
+            el.textContent = message || '';
+            el.classList.toggle('error', !!isError);
+        }
+
+        function parseBool(value, fallback) {
+            if (value == null || value === '') return !!fallback;
+            return String(value).toLowerCase() === 'true' || value === '1';
+        }
+
+        function queryState() {
+            const q = new URLSearchParams(window.location.search);
+            const levels = q.get('levels_types');
+            return {
+                ticker: q.get('ticker') || '',
+                timeframe: q.get('timeframe') || '1',
+                lookback_days: q.get('lookback_days') ? parseInt(q.get('lookback_days'), 10) : null,
+                rvol_lookback_days: q.get('rvol_lookback_days') ? parseInt(q.get('rvol_lookback_days'), 10) : 10,
+                call_color: q.get('call_color') || token('--call'),
+                put_color: q.get('put_color') || token('--put'),
+                levels_types: levels ? levels.split(',').filter(Boolean) : [],
+                levels_count: q.get('levels_count') ? parseInt(q.get('levels_count'), 10) : 3,
+                use_heikin_ashi: parseBool(q.get('use_heikin_ashi'), false),
+                strike_range: q.get('strike_range') ? parseFloat(q.get('strike_range')) : 0.1,
+                highlight_max_level: parseBool(q.get('highlight_max_level'), false),
+                max_level_color: q.get('max_level_color') || token('--accent'),
+                coloring_mode: q.get('coloring_mode') || 'Linear Intensity',
+                top_oi_count: q.get('top_oi_count') ? parseInt(q.get('top_oi_count'), 10) : 5,
+                gate_alerts: parseBool(q.get('gate_alerts'), true),
+            };
+        }
+
+        function normalizeState(state) {
+            const src = state && typeof state === 'object' ? state : {};
+            const normalized = Object.assign(queryState(), src);
+            normalized.ticker = String(normalized.ticker || '').trim().toUpperCase();
+            normalized.timeframe = String(normalized.timeframe || '1');
+            normalized.call_color = normalized.call_color || token('--call');
+            normalized.put_color = normalized.put_color || token('--put');
+            normalized.levels_types = Array.isArray(normalized.levels_types)
+                ? normalized.levels_types : [];
+            normalized.levels_count = parseInt(normalized.levels_count, 10) || 3;
+            normalized.strike_range = Number(normalized.strike_range) || 0.1;
+            normalized.top_oi_count = parseInt(normalized.top_oi_count, 10) || 5;
+            return normalized;
+        }
+
+        async function loadWindowState() {
+            if (!DESKTOP_STATE_ID) return normalizeState(queryState());
+            const response = await fetch('/desktop/window_state/' + encodeURIComponent(DESKTOP_STATE_ID));
+            const data = await response.json();
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'Could not load desktop window state');
+            }
+            if (data.kind && data.kind !== 'price' && data.kind !== 'chart') {
+                throw new Error('Desktop window state is not a price window');
+            }
+            return normalizeState(data.state || {});
+        }
+
+        function updateTitle() {
+            const ticker = currentState && currentState.ticker ? currentState.ticker : 'Price';
+            const tf = currentState && currentState.timeframe ? currentState.timeframe : '1';
+            document.title = ticker + ' Price Chart - EzOptions';
+            document.getElementById('chart-title').textContent = ticker + ' Price Chart';
+            document.getElementById('chart-meta').textContent = tf + 'm';
+        }
+
+        function formatTime(time) {
+            try {
+                return new Date(time * 1000).toLocaleString('en-US', {
+                    timeZone: 'America/New_York',
+                    month: 'short',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false,
+                }) + ' ET';
+            } catch (e) {
+                return String(time);
+            }
+        }
+
+        function ensureChart(priceData) {
+            if (chart) return;
+            const el = document.getElementById('price-chart');
+            const bg = token('--bg-0');
+            const grid = token('--border');
+            const text = token('--fg-1');
+            chart = LightweightCharts.createChart(el, {
+                autoSize: true,
+                layout: { background: { color: bg }, textColor: text, fontFamily: token('--font-ui') },
+                grid: { vertLines: { color: grid }, horzLines: { color: grid } },
+                crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                rightPriceScale: { borderColor: grid, scaleMargins: { top: 0.04, bottom: 0.15 } },
+                timeScale: { borderColor: grid, timeVisible: true, secondsVisible: false },
+                handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
+                handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+            });
+            candleSeries = chart.addCandlestickSeries({
+                upColor: priceData.call_color || token('--call'),
+                downColor: priceData.put_color || token('--put'),
+                wickUpColor: priceData.call_color || token('--call'),
+                wickDownColor: priceData.put_color || token('--put'),
+                borderVisible: false,
+            });
+            volumeSeries = chart.addHistogramSeries({
+                priceFormat: { type: 'volume' },
+                priceScaleId: 'volume',
+                lastValueVisible: false,
+                priceLineVisible: false,
+            });
+            chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.88, bottom: 0 } });
+            chart.subscribeCrosshairMove(showCrosshairTooltip);
+        }
+
+        function showCrosshairTooltip(param) {
+            const tip = document.getElementById('ohlc-tooltip');
+            if (!tip || !param || !param.time || !param.seriesData || !candleSeries) {
+                if (tip) tip.style.display = 'none';
+                return;
+            }
+            const bar = param.seriesData.get(candleSeries);
+            if (!bar) {
+                tip.style.display = 'none';
+                return;
+            }
+            const cls = bar.close >= bar.open ? 'up' : 'down';
+            const change = bar.open ? ((bar.close - bar.open) / bar.open * 100).toFixed(2) : '0.00';
+            const fmt = value => value != null ? Number(value).toFixed(2) : '--';
+            tip.innerHTML =
+                '<div>' + formatTime(param.time) + '</div>' +
+                '<span class="' + cls + '">O <b>' + fmt(bar.open) + '</b> H <b>' + fmt(bar.high) +
+                '</b> L <b>' + fmt(bar.low) + '</b> C <b>' + fmt(bar.close) + '</b> ' +
+                (Number(change) >= 0 ? '+' : '') + change + '%</span>';
+            tip.style.display = 'block';
+        }
+
+        function lineStyle(name) {
+            const map = {
+                dashed: LightweightCharts.LineStyle.Dashed,
+                dotted: LightweightCharts.LineStyle.Dotted,
+                large_dashed: LightweightCharts.LineStyle.LargeDashed,
+            };
+            return map[name] || LightweightCharts.LineStyle.Solid;
+        }
+
+        function clearLines() {
+            if (!candleSeries) return;
+            priceLines.forEach(line => {
+                try { candleSeries.removePriceLine(line); } catch (e) {}
+            });
+            priceLines = [];
+        }
+
+        function addLine(price, color, title, width, style) {
+            if (!candleSeries || typeof price !== 'number' || !isFinite(price)) return;
+            try {
+                priceLines.push(candleSeries.createPriceLine({
+                    price: price,
+                    color: color || token('--accent'),
+                    lineWidth: width || 1,
+                    lineStyle: lineStyle(style),
+                    lineVisible: true,
+                    axisLabelVisible: true,
+                    title: title || '',
+                }));
+            } catch (e) {}
+        }
+
+        function renderLines(priceData) {
+            clearLines();
+            (priceData.exposure_levels || []).forEach(level => {
+                addLine(
+                    Number(level.price),
+                    level.color || token('--accent'),
+                    level.label || level.type || '',
+                    level.line_width || 1,
+                    level.dash_style || 'solid'
+                );
+            });
+            (priceData.expected_moves || []).forEach(move => {
+                addLine(Number(move.upper), token('--warn'), 'EM Upper', 1, 'dashed');
+                addLine(Number(move.lower), token('--warn'), 'EM Lower', 1, 'dashed');
+            });
+            if (priceData.previous_day_close != null) {
+                addLine(Number(priceData.previous_day_close), token('--fg-1'), 'Prev Close', 1, 'dotted');
+            }
+        }
+
+        function renderPriceChart(priceData) {
+            const data = priceData || {};
+            const candles = data.candles || [];
+            if (!candles.length) {
+                showStatus(data.error || 'No price data', true);
+                return;
+            }
+            ensureChart(data);
+            candleSeries.applyOptions({
+                upColor: data.call_color || token('--call'),
+                downColor: data.put_color || token('--put'),
+                wickUpColor: data.call_color || token('--call'),
+                wickDownColor: data.put_color || token('--put'),
+            });
+            candleSeries.setData(candles);
+            volumeSeries.setData(data.volume || []);
+            lastCandles = candles.slice();
+            renderLines(data);
+            chart.timeScale().fitContent();
+            showStatus('Loaded ' + candles.length + ' candles');
+        }
+
+        async function fetchPriceSnapshot() {
+            if (!currentState || !currentState.ticker) {
+                showStatus('Ticker is missing for this price window', true);
+                return;
+            }
+            showStatus('Loading ' + currentState.ticker + '...');
+            const response = await fetch('/update_price', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(currentState),
+            });
+            const data = await response.json();
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'Price request failed');
+            }
+            const priceData = typeof data.price === 'string' ? JSON.parse(data.price) : data.price;
+            renderPriceChart(priceData);
+        }
+
+        function bucketSeconds() {
+            const tf = parseInt((currentState && currentState.timeframe) || '1', 10);
+            return (isFinite(tf) && tf > 0 ? tf : 1) * 60;
+        }
+
+        function applyRealtimeQuote(last) {
+            if (!candleSeries || !lastCandles.length || typeof last !== 'number') return;
+            const bucket = bucketSeconds();
+            const nowSec = Math.floor(Date.now() / 1000);
+            const bucketStart = Math.floor(nowSec / bucket) * bucket;
+            const lastBar = lastCandles[lastCandles.length - 1];
+            let nextBar = null;
+            if (lastBar.time === bucketStart) {
+                nextBar = {
+                    time: lastBar.time,
+                    open: lastBar.open,
+                    high: Math.max(lastBar.high, last),
+                    low: Math.min(lastBar.low, last),
+                    close: last,
+                    volume: lastBar.volume || 0,
+                };
+                lastCandles[lastCandles.length - 1] = nextBar;
+            } else if (bucketStart > lastBar.time) {
+                nextBar = { time: bucketStart, open: last, high: last, low: last, close: last, volume: 0 };
+                lastCandles.push(nextBar);
+            }
+            if (nextBar) {
+                try { candleSeries.update(nextBar); } catch (e) {}
+            }
+        }
+
+        function applyRealtimeCandle(candle) {
+            if (!candleSeries || !candle || !candle.time) return;
+            const bucket = bucketSeconds();
+            const bucketStart = Math.floor(candle.time / bucket) * bucket;
+            const idx = lastCandles.findIndex(bar => bar.time === bucketStart);
+            let merged = null;
+            if (idx >= 0) {
+                const existing = lastCandles[idx];
+                merged = {
+                    time: bucketStart,
+                    open: existing.volume ? existing.open : candle.open,
+                    high: Math.max(existing.high, candle.high),
+                    low: Math.min(existing.low, candle.low),
+                    close: candle.close,
+                    volume: (existing.volume || 0) + (candle.volume || 0),
+                };
+                lastCandles[idx] = merged;
+            } else {
+                merged = {
+                    time: bucketStart,
+                    open: candle.open,
+                    high: candle.high,
+                    low: candle.low,
+                    close: candle.close,
+                    volume: candle.volume || 0,
+                };
+                lastCandles.push(merged);
+                lastCandles.sort((a, b) => a.time - b.time);
+            }
+            try { candleSeries.update(merged); } catch (e) {}
+            try {
+                if (volumeSeries) {
+                    const up = merged.close >= merged.open;
+                    volumeSeries.update({
+                        time: merged.time,
+                        value: merged.volume || 0,
+                        color: up ? (currentState.call_color || token('--call')) : (currentState.put_color || token('--put')),
+                    });
+                }
+            } catch (e) {}
+        }
+
+        function connectStream(ticker) {
+            if (!ticker) return;
+            const upper = ticker.toUpperCase();
+            if (eventSource && streamTicker === upper && eventSource.readyState !== 2) return;
+            if (eventSource) {
+                try { eventSource.close(); } catch (e) {}
+            }
+            eventSource = new EventSource('/price_stream/' + encodeURIComponent(upper));
+            streamTicker = upper;
+            eventSource.onmessage = event => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'quote') applyRealtimeQuote(msg.last);
+                    else if (msg.type === 'candle') applyRealtimeCandle(msg);
+                } catch (e) {}
+            };
+            eventSource.onerror = () => showStatus('Stream retrying for ' + upper);
+        }
+
+        async function boot() {
+            try {
+                currentState = await loadWindowState();
+                updateTitle();
+                await fetchPriceSnapshot();
+                connectStream(currentState.ticker);
+                setInterval(() => {
+                    fetchPriceSnapshot().catch(error => showStatus(error.message, true));
+                }, 60000);
+            } catch (error) {
+                showStatus(error.message || String(error), true);
+            }
+        }
+
+        window.addEventListener('beforeunload', () => {
+            if (eventSource) {
+                try { eventSource.close(); } catch (e) {}
+            }
+        });
+        boot();
+    </script>
+</body>
+</html>
+'''
+
+
+@app.route('/desktop/window/price')
+def desktop_price_window():
+    state_id = (request.args.get('state') or '').strip()
+    return render_template_string(_DESKTOP_PRICE_WINDOW_TEMPLATE, state_id=state_id)
+
+
+@app.route('/desktop/window/chart/<chart_id>')
+def desktop_chart_window(chart_id):
+    if str(chart_id).lower() in {'price', 'price-chart'}:
+        return desktop_price_window()
+    return jsonify({'error': 'Unsupported desktop chart window'}), 404
+
+
 @app.route('/')
 def index():
+    desktop_mode = request.args.get('desktop') == '1'
     return render_template_string('''
 <!DOCTYPE html>
 <html>
@@ -10443,6 +10988,7 @@ def index():
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
+    <script>window.GEX_DESKTOP = {{ desktop_mode|tojson }};</script>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
@@ -21225,7 +21771,43 @@ def index():
         const popoutWindows = {}; // Map of chartId -> Window reference
         const popoutSvg = '<svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 1h3v3M13 1L8 6M5 2H2v10h10V9"/></svg>';
 
+        function hasDesktopWindowBridge() {
+            return !!(window.GEX_DESKTOP && window.pywebview && window.pywebview.api &&
+                typeof window.pywebview.api.open_window === 'function');
+        }
+
+        function openDashboardWindow(kind, params) {
+            if (!hasDesktopWindowBridge()) return Promise.resolve(false);
+            const state = params && typeof params === 'object' ? params : {};
+            return fetch('/desktop/window_state', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ kind, state }),
+            })
+            .then(response => response.json().then(data => ({ response, data })))
+            .then(({ response, data }) => {
+                if (!response.ok || data.error) {
+                    throw new Error(data.error || 'Could not create desktop window state');
+                }
+                return window.pywebview.api.open_window(kind, {
+                    state_id: data.state_id,
+                    ticker: state.ticker || '',
+                    chart_id: state.chart_id || '',
+                });
+            })
+            .then(() => true);
+        }
+
         function openPopoutChart(chartId) {
+            if (chartId === 'price-chart' && hasDesktopWindowBridge()) {
+                const params = (typeof buildPricePayload === 'function') ? buildPricePayload() : {};
+                openDashboardWindow('price', params).catch(error => {
+                    console.warn('Desktop price window failed:', error);
+                    showError('Could not open desktop price window.');
+                });
+                return;
+            }
+
             // If already open and not closed, focus it
             if (popoutWindows[chartId] && !popoutWindows[chartId].closed) {
                 popoutWindows[chartId].focus();
@@ -40852,7 +41434,7 @@ def index():
     </script>
 </body>
 </html>
-    ''')
+    ''', desktop_mode=desktop_mode)
 
 @app.route('/expirations/<ticker>')
 def get_expirations(ticker):

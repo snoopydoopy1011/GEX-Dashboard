@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -27,6 +28,53 @@ DEFAULT_WIDTH = 1440
 DEFAULT_HEIGHT = 960
 DEFAULT_MIN_SIZE = (1024, 720)
 READY_TIMEOUT_SECONDS = 30.0
+
+
+class DashboardWindowBridge:
+    """Small JS API exposed to pywebview pages for route-backed windows."""
+
+    def __init__(self, webview, base_url: str):
+        self._webview = webview
+        self._base_url = base_url.rstrip("/")
+
+    def open_window(self, kind: str, params: dict | None = None) -> dict:
+        params = params or {}
+        url = self._window_url(kind, params)
+        title = self._window_title(kind, params)
+        kwargs = {
+            "width": 1100,
+            "height": 760,
+            "min_size": (900, 600),
+            "js_api": self,
+        }
+        self._webview.create_window(
+            title,
+            url,
+            **_supported_kwargs(self._webview.create_window, kwargs),
+        )
+        return {"ok": True, "url": url}
+
+    def _window_url(self, kind: str, params: dict) -> str:
+        normalized = (kind or "").strip().lower()
+        query = {"desktop": "1"}
+        state_id = params.get("state_id") or params.get("state")
+        if state_id:
+            query["state"] = str(state_id)
+        if normalized in {"price", "price-chart"}:
+            path = "/desktop/window/price"
+        elif normalized == "chart":
+            chart_id = str(params.get("chart_id") or "price-chart").strip() or "price-chart"
+            path = f"/desktop/window/chart/{urllib.parse.quote(chart_id)}"
+        else:
+            raise ValueError(f"Unsupported desktop window kind: {kind}")
+        return f"{self._base_url}{path}?{urllib.parse.urlencode(query)}"
+
+    def _window_title(self, kind: str, params: dict) -> str:
+        normalized = (kind or "").strip().lower()
+        ticker = str(params.get("ticker") or "").strip().upper()
+        if normalized in {"price", "price-chart"}:
+            return f"{ticker + ' ' if ticker else ''}Price Chart"
+        return DEFAULT_TITLE
 
 
 class DashboardServer:
@@ -128,12 +176,19 @@ def desktop_storage_path() -> str:
     return str(path)
 
 
-def create_window(webview, url: str, title: str, width: int, height: int):
+def desktop_dashboard_url(url: str) -> str:
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{urllib.parse.urlencode({'desktop': '1'})}"
+
+
+def create_window(webview, url: str, title: str, width: int, height: int, js_api=None):
     kwargs = {
         "width": width,
         "height": height,
         "min_size": DEFAULT_MIN_SIZE,
     }
+    if js_api is not None:
+        kwargs["js_api"] = js_api
     return webview.create_window(title, url, **_supported_kwargs(webview.create_window, kwargs))
 
 
@@ -296,7 +351,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         url = server.start()
         print(f"GEX Dashboard desktop wrapper serving {url}")
-        window = create_window(webview, url, args.title, args.width, args.height)
+        bridge = DashboardWindowBridge(webview, url)
+        window = create_window(
+            webview,
+            desktop_dashboard_url(url),
+            args.title,
+            args.width,
+            args.height,
+            js_api=bridge,
+        )
         start_webview(
             webview,
             window,
