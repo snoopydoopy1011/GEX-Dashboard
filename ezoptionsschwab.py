@@ -31,7 +31,7 @@ import schwabdev
 from dotenv import load_dotenv
 import pytz
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from scipy.stats import norm
 import warnings
 import json
@@ -122,6 +122,114 @@ def sqlite_connect(db_path=None, timeout=10, retries=2, retry_delay=0.25):
                 raise
             time.sleep(retry_delay * (attempt + 1))
     raise last_error
+
+
+def _env_flag_enabled(name):
+    return str(os.getenv(name, '')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _perf_trace_enabled():
+    return _env_flag_enabled('GEX_PERF_TRACE')
+
+
+def _perf_key(name):
+    return re.sub(r'[^A-Za-z0-9_]+', '_', str(name or '').strip()).strip('_').lower() or 'span'
+
+
+def _perf_value(value):
+    if isinstance(value, bool):
+        return '1' if value else '0'
+    if isinstance(value, float):
+        return f'{value:.3f}'.rstrip('0').rstrip('.')
+    text = str(value)
+    return re.sub(r'\s+', '_', text)[:120]
+
+
+def _perf_response_bytes(response):
+    try:
+        length = response.calculate_content_length()
+        if length is not None:
+            return int(length)
+    except Exception:
+        pass
+    try:
+        return len(response.get_data())
+    except Exception:
+        return None
+
+
+class _PerfTrace:
+    def __init__(self, route, **meta):
+        self.enabled = _perf_trace_enabled()
+        self.route = route
+        self.started = time.perf_counter()
+        self.meta = {}
+        self.spans = []
+        if self.enabled:
+            for key, value in meta.items():
+                self.add(key, value)
+
+    def add(self, key, value):
+        if self.enabled and value is not None:
+            self.meta[_perf_key(key)] = value
+
+    @contextmanager
+    def span(self, name):
+        if not self.enabled:
+            yield
+            return
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter() - started) * 1000
+            self.spans.append((_perf_key(name), elapsed))
+
+    def finish(self, response=None, status=None, error=None):
+        if not self.enabled:
+            return response
+        total_ms = (time.perf_counter() - self.started) * 1000
+        if status is None and response is not None:
+            status = getattr(response, 'status_code', None)
+        bytes_len = _perf_response_bytes(response) if response is not None else None
+        span_totals = collections.OrderedDict()
+        for name, elapsed in self.spans:
+            span_totals[name] = span_totals.get(name, 0.0) + elapsed
+        fields = [
+            '[perf]',
+            f'route={self.route}',
+            f'total_ms={total_ms:.1f}',
+        ]
+        for key, value in self.meta.items():
+            fields.append(f'{key}={_perf_value(value)}')
+        if status is not None:
+            fields.append(f'status={status}')
+        if bytes_len is not None:
+            fields.append(f'bytes={bytes_len}')
+        for name, elapsed in span_totals.items():
+            fields.append(f'{name}_ms={elapsed:.1f}')
+        if error:
+            fields.append(f'error={_perf_value(error)}')
+        print(' '.join(fields), flush=True)
+        return response
+
+
+def _perf_jsonify(perf, payload, status=None):
+    response = jsonify(payload)
+    if status is not None:
+        response.status_code = status
+    perf.finish(response, status=status)
+    return response
+
+
+def _perf_finish_response(perf, response, error=None):
+    if isinstance(response, tuple):
+        status = response[1] if len(response) > 1 and isinstance(response[1], int) else None
+        perf.finish(response[0], status=status, error=error)
+        return response
+    perf.finish(response, error=error)
+    return response
+    return response
 
 # Global error handlers for Flask
 @app.errorhandler(404)
@@ -1066,6 +1174,29 @@ except Exception as e:
     client = None
 
 # ── Real-time Price Streamer ─────────────────────────────────────────────────
+OPTION_QUOTE_STREAM_FIELDS = "0,2,3,4,8,9,10,20,27,28,29,30,31,37,38,39"
+
+
+def _stream_float(value):
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _stream_int(value):
+    try:
+        parsed = int(float(value))
+    except Exception:
+        return None
+    return parsed
+
+
+def _normalize_stream_contract_symbol(symbol):
+    return str(symbol or '').strip()
+
+
 class PriceStreamer:
     """Manages a single schwabdev streaming websocket for real-time price data.
     Feeds per-ticker queues that are consumed by the /price_stream SSE endpoint.
@@ -1075,6 +1206,8 @@ class PriceStreamer:
         self._lock = threading.Lock()
         self._queues = {}       # ticker (upper) -> list[queue.Queue]
         self._subscribed = set()  # tickers with active stream subscriptions
+        self._option_queues = {}  # exact Schwab option symbol -> list[queue.Queue]
+        self._option_subscribed = set()
         self._started = False
 
     def _handler(self, message):
@@ -1140,6 +1273,32 @@ class PriceStreamer:
                             continue
                         payload = json.dumps({'type': 'quote', 'last': float(last)})
                         self._push(ticker, payload)
+                elif service == 'LEVELONE_OPTIONS':
+                    for item in msg.get('content', []):
+                        symbol = _normalize_stream_contract_symbol(item.get('key') or item.get('0'))
+                        if not symbol:
+                            continue
+                        payload = json.dumps({
+                            'type': 'option_quote',
+                            'contract_symbol': symbol,
+                            'bid': _stream_float(item.get('2')),
+                            'ask': _stream_float(item.get('3')),
+                            'last': _stream_float(item.get('4')),
+                            'volume': _stream_int(item.get('8')),
+                            'open_interest': _stream_int(item.get('9')),
+                            'iv': _stream_float(item.get('10')),
+                            'strike': _stream_float(item.get('20')),
+                            'dte': _stream_float(item.get('27')),
+                            'delta': _stream_float(item.get('28')),
+                            'gamma': _stream_float(item.get('29')),
+                            'theta': _stream_float(item.get('30')),
+                            'vega': _stream_float(item.get('31')),
+                            'mark': _stream_float(item.get('37')),
+                            'quote_time': _stream_int(item.get('38')),
+                            'trade_time': _stream_int(item.get('39')),
+                            'received_at': int(time.time() * 1000),
+                        })
+                        self._push_option(symbol, payload)
         except Exception as e:
             print(f"[PriceStreamer] handler error: {e}")
 
@@ -1153,6 +1312,21 @@ class PriceStreamer:
                 # Desktop WebEngine can stop reading SSE while the main thread is
                 # busy. Keep the stream live by replacing stale ticks instead of
                 # replaying a large backlog later.
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except queue.Empty:
+                    pass
+                except queue.Full:
+                    pass
+
+    def _push_option(self, symbol, payload):
+        with self._lock:
+            qs = list(self._option_queues.get(symbol, []))
+        for q in qs:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
                 try:
                     q.get_nowait()
                     q.put_nowait(payload)
@@ -1206,6 +1380,49 @@ class PriceStreamer:
                 except ValueError:
                     pass
 
+    def subscribe_option(self, contract_symbol, q):
+        """Register a client SSE queue for one exact Schwab option symbol."""
+        contract_symbol = _normalize_stream_contract_symbol(contract_symbol)
+        if not contract_symbol:
+            return
+        self._ensure_started()
+        needs_sub = False
+        with self._lock:
+            if contract_symbol not in self._option_queues:
+                self._option_queues[contract_symbol] = []
+            self._option_queues[contract_symbol].append(q)
+            if contract_symbol not in self._option_subscribed:
+                self._option_subscribed.add(contract_symbol)
+                needs_sub = True
+        if needs_sub and self._started and self._stream:
+            try:
+                self._stream.send(self._stream.level_one_options(contract_symbol, OPTION_QUOTE_STREAM_FIELDS, command="ADD"))
+                print(f"[PriceStreamer] Subscribed to option {contract_symbol}")
+            except Exception as e:
+                print(f"[PriceStreamer] Option subscribe error for {contract_symbol}: {e}")
+
+    def unsubscribe_option_queue(self, contract_symbol, q):
+        """Remove a selected option SSE queue and unsubscribe when no clients remain."""
+        contract_symbol = _normalize_stream_contract_symbol(contract_symbol)
+        should_unsub = False
+        with self._lock:
+            if contract_symbol in self._option_queues:
+                try:
+                    self._option_queues[contract_symbol].remove(q)
+                except ValueError:
+                    pass
+                if not self._option_queues[contract_symbol]:
+                    self._option_queues.pop(contract_symbol, None)
+                    if contract_symbol in self._option_subscribed:
+                        self._option_subscribed.remove(contract_symbol)
+                        should_unsub = True
+        if should_unsub and self._started and self._stream:
+            try:
+                self._stream.send(self._stream.level_one_options(contract_symbol, OPTION_QUOTE_STREAM_FIELDS, command="UNSUBS"))
+                print(f"[PriceStreamer] Unsubscribed from option {contract_symbol}")
+            except Exception as e:
+                print(f"[PriceStreamer] Option unsubscribe error for {contract_symbol}: {e}")
+
     def stop(self):
         with self._lock:
             if self._stream and self._started:
@@ -1215,6 +1432,8 @@ class PriceStreamer:
                     pass
                 self._stream = None
                 self._started = False
+                self._option_subscribed.clear()
+                self._option_queues.clear()
 
 
 price_streamer = PriceStreamer()
@@ -20721,6 +20940,74 @@ def index():
         let pendingRealtimeQuoteFrame = null;
         let pendingPlotlyPriceLine = null;
         let lastPlotlyPriceLineUpdateAt = 0;
+        const GEX_PERF_TRACE_FROM_SERVER = {{ 'true' if gex_perf_trace else 'false' }};
+        const GEX_PERF_TRACE_KEY = 'gexPerfTrace';
+        let gexPerfSeq = 0;
+        let gexLongTaskObserverStarted = false;
+
+        function isGexPerfTraceEnabled() {
+            if (GEX_PERF_TRACE_FROM_SERVER) return true;
+            try {
+                return localStorage.getItem(GEX_PERF_TRACE_KEY) === '1' ||
+                       localStorage.getItem('gex.perfTrace') === '1';
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function gexPerfDetailText(detail) {
+            if (!detail || typeof detail !== 'object') return '';
+            return Object.keys(detail)
+                .filter(key => detail[key] !== undefined && detail[key] !== null)
+                .map(key => String(key).replace(/[^A-Za-z0-9_]+/g, '_') + '=' + String(detail[key]).replace(/\s+/g, '_').slice(0, 80))
+                .join(' ');
+        }
+
+        function gexPerfStart(name, detail) {
+            if (!isGexPerfTraceEnabled() || !window.performance || !performance.mark) return null;
+            ensureGexLongTaskObserver();
+            const id = 'gex-perf-' + (++gexPerfSeq) + '-' + String(name).replace(/[^A-Za-z0-9_]+/g, '_');
+            try { performance.mark(id + '-start'); } catch (e) {}
+            return { id, name, detail: detail || {}, started: performance.now() };
+        }
+
+        function gexPerfEnd(token, detail) {
+            if (!token || !window.performance) return;
+            if (token.ended) return;
+            token.ended = true;
+            const merged = Object.assign({}, token.detail || {}, detail || {});
+            let duration = Number.isFinite(token.started) ? (performance.now() - token.started) : null;
+            try {
+                performance.mark(token.id + '-end');
+                performance.measure(token.id, token.id + '-start', token.id + '-end');
+                const entries = performance.getEntriesByName(token.id);
+                const entry = entries && entries[entries.length - 1];
+                if (entry && Number.isFinite(entry.duration)) duration = entry.duration;
+                performance.clearMarks(token.id + '-start');
+                performance.clearMarks(token.id + '-end');
+                performance.clearMeasures(token.id);
+            } catch (e) {}
+            const parts = ['[perf]', 'span=' + token.name, 'duration_ms=' + (Number.isFinite(duration) ? duration.toFixed(1) : '0')];
+            const extra = gexPerfDetailText(merged);
+            if (extra) parts.push(extra);
+            console.log(parts.join(' '));
+        }
+
+        function ensureGexLongTaskObserver() {
+            if (gexLongTaskObserverStarted || !isGexPerfTraceEnabled() || typeof PerformanceObserver === 'undefined') return;
+            try {
+                const observer = new PerformanceObserver(list => {
+                    list.getEntries().forEach(entry => {
+                        console.log('[perf] span=browser_long_task duration_ms=' + entry.duration.toFixed(1) + ' start_ms=' + entry.startTime.toFixed(1));
+                    });
+                });
+                observer.observe({ entryTypes: ['longtask'] });
+                gexLongTaskObserverStarted = true;
+            } catch (e) {
+                gexLongTaskObserverStarted = true;
+            }
+        }
+        ensureGexLongTaskObserver();
 
         // ── Chart visibility (replaces the deleted .chart-selector checkbox row) ──
         // Source of truth for which secondary charts render. Defaults below mirror the
@@ -21194,6 +21481,7 @@ def index():
 
         function updateAllPlotlyPriceLines(price) {
             if (!Number.isFinite(price)) return;
+            const plotlyLinePerf = gexPerfStart('updateAllPlotlyPriceLines');
             const priceStr = price.toFixed(2);
             const numericAnnotationRe = /^-?\\d+(?:\\.\\d+)?$/;
 
@@ -21256,6 +21544,7 @@ def index():
             if (cpLine) {
                 cpLine.textContent = '$' + priceStr;
             }
+            gexPerfEnd(plotlyLinePerf, { price: priceStr });
         }
 
         function tvGetSessionCandlePriceRange() {
@@ -21619,11 +21908,15 @@ def index():
          * Bucket boundaries follow the selected timeframe.
          */
         function applyRealtimeQuote(last) {
+            const realtimeQuotePerf = gexPerfStart('applyRealtimeQuote');
             // Track live price and throttle Plotly relayout work.
             livePrice = last;
             schedulePlotlyPriceLineUpdate(last);
 
-            if (!tvCandleSeries || !tvLastCandles.length) return;
+            if (!tvCandleSeries || !tvLastCandles.length) {
+                gexPerfEnd(realtimeQuotePerf, { seeded: false });
+                return;
+            }
             const nowSec = Math.floor(Date.now() / 1000);
             const bucketStart = tvBucketStartForUnixSec(nowSec);
             const lastCandle = tvLastCandles[tvLastCandles.length - 1];
@@ -21684,6 +21977,7 @@ def index():
                 scheduleTVSessionCalendarOverlayDraw();
                 tvResolveDeferredSessionFocus();
             }
+            gexPerfEnd(realtimeQuotePerf, { price: last });
         }
 
         /**
@@ -22694,6 +22988,7 @@ def index():
                 return; // Skip if an update is already in progress
             }
             
+            const updatePerf = gexPerfStart('updateData');
             updateInProgress = true;
             
             const ticker = document.getElementById('ticker').value;
@@ -22719,13 +23014,15 @@ def index():
                 _lastSessionLevels = null;
                 _lastSessionLevelsMeta = null;
                 _lastStats0dte = null;
+                disconnectTradeSelectedQuoteStream();
+                resetTradeSelectedQuoteOverride();
                 clearTopOILines();
                 clearKeyLevels();
                 clearSessionLevels();
                 // Reset zoom on the next render
-            tvLastCandles = [];
-            tvIndicatorCandles = [];
-            tvVwapCandles = [];
+                tvLastCandles = [];
+                tvIndicatorCandles = [];
+                tvVwapCandles = [];
                 tvCurrentDayStartTime = 0;
                 tvForceSessionFocus = true;
                 // Disconnect the price stream so it reconnects on the new ticker
@@ -22737,6 +23034,7 @@ def index():
             if (expiry.length === 0) {
                 console.warn('No expiry selected, skipping update');
                 updateInProgress = false;
+                gexPerfEnd(updatePerf, { skipped: 'no_expiry' });
                 return;
             }
             const showCalls = document.getElementById('show_calls').checked;
@@ -22791,6 +23089,7 @@ def index():
                 fetchPriceHistory(tickerChanged || !tvLastCandles.length);
             }
             
+            const updateFetchPerf = gexPerfStart('fetch:/update', { ticker, expiries: expiry.length });
             fetch('/update', {
                 method: 'POST',
                 headers: {
@@ -22825,7 +23124,10 @@ def index():
                     ...visibleCharts
                 })
             })
-            .then(response => response.json())
+            .then(response => {
+                gexPerfEnd(updateFetchPerf, { status: response.status });
+                return response.json();
+            })
             .then(data => {
                 if (data.error) {
                     showError(data.error);
@@ -22854,6 +23156,7 @@ def index():
                 }
             })
             .catch(error => {
+                gexPerfEnd(updateFetchPerf, { error: true });
                 showError('Network Error: Could not connect to the server.');
                 if (isStreaming) {
                     toggleStreaming();
@@ -22862,6 +23165,7 @@ def index():
             })
             .finally(() => {
                 updateInProgress = false;
+                gexPerfEnd(updatePerf, { ticker, expiries: expiry.length });
             });
         }
 
@@ -31656,6 +31960,12 @@ def index():
             strikeRangePct: 2,
             payload: null,
             selectedSymbol: '',
+            liveSelectedQuote: null,
+            liveQuoteSymbol: '',
+            liveQuoteStreamStatus: '',
+            liveQuoteEventSource: null,
+            liveQuoteRenderPending: false,
+            liveQuoteLastErrorAt: 0,
             pendingContractScrollSymbol: '',
             loading: false,
             requestKey: '',
@@ -32593,10 +32903,35 @@ def index():
             };
             restore();
         }
+        function resetTradeSelectedQuoteOverride(symbol = '') {
+            tradeRailState.liveSelectedQuote = null;
+            tradeRailState.liveQuoteSymbol = '';
+        }
+        function mergeTradeSelectedLiveQuote(contract) {
+            if (!contract) return contract;
+            const live = tradeRailState.liveSelectedQuote || null;
+            if (!live || live.contract_symbol !== contract.contract_symbol) return contract;
+            const merged = Object.assign({}, contract);
+            ['bid', 'ask', 'last', 'mark', 'volume', 'open_interest', 'iv', 'strike', 'dte', 'delta', 'gamma', 'theta', 'vega', 'quote_time', 'trade_time'].forEach(key => {
+                if (live[key] !== undefined && live[key] !== null) merged[key] = live[key];
+            });
+            const bid = Number(merged.bid);
+            const ask = Number(merged.ask);
+            if (Number.isFinite(bid) && bid > 0 && Number.isFinite(ask) && ask > 0 && ask >= bid) {
+                merged.mid = (bid + ask) / 2;
+                merged.spread = ask - bid;
+                merged.spread_pct = merged.mid > 0 ? ((ask - bid) / merged.mid * 100) : merged.spread_pct;
+            } else if (merged.mark != null) {
+                merged.mid = merged.mark;
+            }
+            merged.quote_age_seconds = undefined;
+            merged.live_quote = true;
+            return merged;
+        }
         function getSelectedTradeContract() {
             const payload = tradeRailState.payload || {};
             const contracts = Array.isArray(payload.contracts) ? payload.contracts : [];
-            return contracts.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || null;
+            return mergeTradeSelectedLiveQuote(contracts.find(row => row.contract_symbol === tradeRailState.selectedSymbol) || null);
         }
         function getTradeContractAnchorRow(rows, spot, optionType = tradeRailState.optionType) {
             if (!Array.isArray(rows) || !rows.length || !Number.isFinite(spot)) return rows && rows[0] ? rows[0] : null;
@@ -32748,6 +33083,9 @@ def index():
             }
             tradeRailState.optionType = contract.option_type === 'PUT' ? 'PUT' : 'CALL';
             tradeRailState.expiry = contract.expiry || tradeRailState.expiry;
+            if (tradeRailState.selectedSymbol !== contract.contract_symbol) {
+                resetTradeSelectedQuoteOverride(contract.contract_symbol);
+            }
             tradeRailState.selectedSymbol = contract.contract_symbol;
             tradeRailState.pendingContractScrollSymbol = '';
             clearTradeLimitPrice();
@@ -32757,7 +33095,84 @@ def index():
             tradeRailState.ordersRequestKey = '';
             invalidateTradePreview(message);
             renderTradeRail();
+            syncTradeSelectedQuoteStream();
             return true;
+        }
+        function scheduleTradeActiveTraderRender() {
+            if (tradeRailState.liveQuoteRenderPending) return;
+            tradeRailState.liveQuoteRenderPending = true;
+            requestAnimationFrame(() => {
+                tradeRailState.liveQuoteRenderPending = false;
+                renderTradeActiveTrader();
+            });
+        }
+        function disconnectTradeSelectedQuoteStream() {
+            const source = tradeRailState.liveQuoteEventSource;
+            tradeRailState.liveQuoteEventSource = null;
+            tradeRailState.liveQuoteStreamStatus = '';
+            if (source) {
+                source.__gexIntentionalClose = true;
+                try { source.close(); } catch (e) {}
+            }
+        }
+        function shouldStreamSelectedTradeQuote() {
+            if (tradeRailState.liveQuoteLastErrorAt && Date.now() - tradeRailState.liveQuoteLastErrorAt < 5000) return false;
+            return !!(
+                tradeRailState.selectedSymbol &&
+                !isTradeRailCollapsed() &&
+                !tradeRailState.activeTraderCollapsed &&
+                window.EventSource
+            );
+        }
+        function syncTradeSelectedQuoteStream() {
+            const symbol = String(tradeRailState.selectedSymbol || '').trim();
+            if (!shouldStreamSelectedTradeQuote()) {
+                disconnectTradeSelectedQuoteStream();
+                return;
+            }
+            const existing = tradeRailState.liveQuoteEventSource;
+            if (existing && tradeRailState.liveQuoteSymbol === symbol && existing.readyState !== 2) return;
+            disconnectTradeSelectedQuoteStream();
+            resetTradeSelectedQuoteOverride(symbol);
+            tradeRailState.liveQuoteStreamStatus = 'connecting';
+            try {
+                const url = '/trade/quote_stream/' + encodeURIComponent(symbol) + '?ticker=' + encodeURIComponent(getTradeRailTicker());
+                const source = new EventSource(url);
+                tradeRailState.liveQuoteEventSource = source;
+                tradeRailState.liveQuoteSymbol = symbol;
+                source.onmessage = event => {
+                    try {
+                        const msg = JSON.parse(event.data || '{}');
+                        if (msg.type === 'connected') {
+                            tradeRailState.liveQuoteStreamStatus = 'connected';
+                            tradeRailState.liveQuoteLastErrorAt = 0;
+                            return;
+                        }
+                        if (msg.type === 'heartbeat') return;
+                        if (msg.type !== 'option_quote' || msg.contract_symbol !== tradeRailState.selectedSymbol) return;
+                        tradeRailState.liveSelectedQuote = msg;
+                        tradeRailState.liveQuoteStreamStatus = 'live';
+                        tradeRailState.liveQuoteLastErrorAt = 0;
+                        scheduleTradeActiveTraderRender();
+                    } catch (e) {
+                        console.warn('Selected option quote stream parse failed', e);
+                    }
+                };
+                source.onerror = () => {
+                    if (source.__gexIntentionalClose) return;
+                    tradeRailState.liveQuoteStreamStatus = 'fallback';
+                    tradeRailState.liveQuoteLastErrorAt = Date.now();
+                    if (tradeRailState.liveQuoteEventSource === source) {
+                        tradeRailState.liveQuoteEventSource = null;
+                        tradeRailState.liveQuoteSymbol = '';
+                    }
+                    try { source.close(); } catch (e) {}
+                };
+            } catch (e) {
+                tradeRailState.liveQuoteStreamStatus = 'fallback';
+                tradeRailState.liveQuoteLastErrorAt = Date.now();
+                console.warn('Selected option quote stream unavailable', e);
+            }
         }
         function invalidateTradePreview(message = '') {
             tradeRailState.preview = null;
@@ -33463,7 +33878,12 @@ def index():
             if (rows) rows.innerHTML = buildTradeActiveBracketRowsHtml(selected);
         }
         function buildTradeActiveLadderHtml(selected, markers = null) {
-            if (!selected) return '<div class="trade-empty">Select a contract to show the price ladder.</div>';
+            const ladderPerf = gexPerfStart('buildTradeActiveLadderHtml', { selected: !!selected });
+            const finishLadderPerf = (html, detail) => {
+                gexPerfEnd(ladderPerf, detail);
+                return html;
+            };
+            if (!selected) return finishLadderPerf('<div class="trade-empty">Select a contract to show the price ladder.</div>', { empty: true });
             const bid = Number(selected.bid);
             const ask = Number(selected.ask);
             const mid = Number(selected.mid == null ? selected.mark : selected.mid);
@@ -33473,7 +33893,7 @@ def index():
             const ladderMarkers = markers || getTradeLadderMarkersForSelected(selected);
             const markerPrices = ladderMarkers.map(marker => Number(marker.price)).filter(v => Number.isFinite(v) && v > 0);
             const values = [bid, ask, mid, mark, last].concat(markerPrices).filter(v => Number.isFinite(v) && v > 0);
-            if (!values.length) return '<div class="trade-empty">No valid quote ladder for the selected contract.</div>';
+            if (!values.length) return finishLadderPerf('<div class="trade-empty">No valid quote ladder for the selected contract.</div>', { empty: true });
             const viewport = ensureTradeLadderViewport(selected, ladderMarkers);
             const tick = viewport.tick || getTradeLadderTick(values[0]);
             const visibleRows = viewport.visibleRows || 25;
@@ -33504,7 +33924,7 @@ def index():
                 rowMap.set(basisRowPrice.toFixed(2), basisRowPrice);
             }
             const rows = Array.from(rowMap.values()).sort((a, b) => b - a);
-            return rows.map(price => {
+            return finishLadderPerf(rows.map(price => {
                 const nearBid = Number.isFinite(bid) && Math.abs(price - bid) < tick / 2 + 0.0001;
                 const nearAsk = Number.isFinite(ask) && Math.abs(price - ask) < tick / 2 + 0.0001;
                 const nearLimit = Number.isFinite(limit) && Math.abs(price - limit) < tick / 2 + 0.0001;
@@ -33573,7 +33993,7 @@ def index():
                     '<span class="' + sellCellClasses + '" data-trade-ladder-action="SELL_TO_CLOSE" title="' + _escapeHtml('Stage sell limit @ ' + fmtTradePrice(price)) + '">' + sellMarkers + '</span>' +
                     '<span class="' + pnlClasses + '" title="' + _escapeHtml(pnlTitle) + '">' + _escapeHtml(Number.isFinite(pnl) ? fmtTradeSignedMoney(pnl) : '—') + '</span>' +
                 '</div>';
-            }).join('');
+            }).join(''), { rows: rows.length, markers: ladderMarkers.length });
         }
         function fmtTradeScalpTargetDollars(value) {
             const n = Number(value);
@@ -33607,9 +34027,11 @@ def index():
             if (refreshOverlay) tvRefreshOverlayLevelPrices();
         }
         function syncTradeScalpTargetLines(targets = null) {
+            const scalpLinePerf = gexPerfStart('syncTradeScalpTargetLines');
             clearTradeScalpTargetLines(false);
             if (!tradeRailState.scalpTargetLinesVisible || !tvCandleSeries || !window.LightweightCharts) {
                 tvRefreshOverlayLevelPrices();
+                gexPerfEnd(scalpLinePerf, { visible: !!tradeRailState.scalpTargetLinesVisible, skipped: true });
                 return;
             }
             const resolvedTargets = targets || getTradeScalpTargets(getSelectedTradeContract());
@@ -33651,6 +34073,7 @@ def index():
                 }
             });
             tvRefreshOverlayLevelPrices();
+            gexPerfEnd(scalpLinePerf, { lines: tvScalpTargetLines.length });
         }
         function renderTradeScalpTargets() {
             const panel = document.querySelector('[data-trade-scalp-target-panel]');
@@ -33708,7 +34131,9 @@ def index():
                 renderTradeScalpTargets();
                 return;
             }
+            const activeTraderPerf = gexPerfStart('renderTradeActiveTrader');
             const selected = getSelectedTradeContract();
+            syncTradeSelectedQuoteStream();
             const position = getSelectedTradePosition();
             const mode = getTradeFastModeState(selected);
             const toggle = panel.querySelector('[data-trade-active-toggle]');
@@ -33743,8 +34168,9 @@ def index():
                 toggle.setAttribute('aria-expanded', tradeRailState.activeTraderCollapsed ? 'false' : 'true');
             }
             if (note) note.textContent = tradeRailState.activeTraderCollapsed ? 'Collapsed' : (tradeRailState.activeTraderArmed ? 'Auto-send armed' : 'Fast scalps');
+            const quoteSourceText = selected && selected.live_quote ? ' · Live' : '';
             const quoteText = selected
-                ? 'B ' + fmtTradePrice(selected.bid) + ' / M ' + fmtTradePrice(selected.mid == null ? selected.mark : selected.mid) + ' / A ' + fmtTradePrice(selected.ask) + ' · Limit ' + (tradeRailState.limitPrice ? fmtTradePrice(tradeRailState.limitPrice) : '—')
+                ? 'B ' + fmtTradePrice(selected.bid) + ' / M ' + fmtTradePrice(selected.mid == null ? selected.mark : selected.mid) + ' / A ' + fmtTradePrice(selected.ask) + quoteSourceText + ' · Limit ' + (tradeRailState.limitPrice ? fmtTradePrice(tradeRailState.limitPrice) : '—')
                 : 'Bid / Ask unavailable';
             if (contractEl) {
                 const side = selected && selected.option_type === 'PUT' ? 'P' : 'C';
@@ -33861,6 +34287,7 @@ def index():
             }
             renderTradeModeBadge();
             renderTradeScalpTargets();
+            gexPerfEnd(activeTraderPerf, { selected: !!selected });
         }
         function renderTradeBracketTemplateOptions() {
             const input = document.querySelector('[data-trade-bracket-template]');
@@ -35601,6 +36028,7 @@ def index():
         function renderTradeRail() {
             const rail = document.getElementById('trade-rail');
             if (!rail) return;
+            const tradeRailPerf = gexPerfStart('renderTradeRail');
             preserveTradeRailScroll(() => {
                 renderTradeHelperCompact();
                 renderTradeAccounts();
@@ -35644,6 +36072,7 @@ def index():
                     tradeRailState.selectedSymbol = nextSelection.contract_symbol;
                     tradeRailState.pendingContractScrollSymbol = nextSelection.contract_symbol;
                     if (previousSymbol !== tradeRailState.selectedSymbol) {
+                        resetTradeSelectedQuoteOverride(tradeRailState.selectedSymbol);
                         clearTradeLimitPrice();
                         tradeRailState.accountDetails = null;
                         tradeRailState.accountRequestKey = '';
@@ -35705,6 +36134,8 @@ def index():
                     });
                 });
             });
+            gexPerfEnd(tradeRailPerf);
+            syncTradeSelectedQuoteStream();
         }
         function requestTradeChain(options = {}) {
             const ticker = getTradeRailTicker();
@@ -35728,6 +36159,7 @@ def index():
             tradeRailState.requestKey = key;
             tradeRailState.lastChainRequestAt = now;
             renderTradeRail();
+            const tradeChainPerf = gexPerfStart('fetch:/trade_chain', { ticker, expiries: selectedExpiry.length, force: !!options.force });
             fetch('/trade_chain', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -35738,7 +36170,10 @@ def index():
                     contract_type: 'ALL',
                 }),
             })
-            .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, data: d })))
+            .then(r => {
+                gexPerfEnd(tradeChainPerf, { status: r.status });
+                return r.json().then(d => ({ ok: r.ok, status: r.status, data: d }));
+            })
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Trade chain request failed');
                 tradeRailState.payload = data;
@@ -35751,6 +36186,7 @@ def index():
                 renderTradeRail();
             })
             .catch(err => {
+                gexPerfEnd(tradeChainPerf, { error: true });
                 tradeRailState.loading = false;
                 tradeRailState.payload = null;
                 const list = document.querySelector('[data-trade-chain-list]');
@@ -36941,6 +37377,8 @@ def index():
                 btn.addEventListener('click', () => {
                     tradeRailState.optionType = btn.dataset.tradeType === 'PUT' ? 'PUT' : 'CALL';
                     tradeRailState.selectedSymbol = '';
+                    resetTradeSelectedQuoteOverride();
+                    disconnectTradeSelectedQuoteStream();
                     clearTradeLimitPrice();
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
@@ -36955,6 +37393,8 @@ def index():
                 expirySelect.addEventListener('change', () => {
                     tradeRailState.expiry = expirySelect.value || '';
                     tradeRailState.selectedSymbol = '';
+                    resetTradeSelectedQuoteOverride();
+                    disconnectTradeSelectedQuoteStream();
                     clearTradeLimitPrice();
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
@@ -36969,6 +37409,8 @@ def index():
                 rangeInput.addEventListener('change', () => {
                     tradeRailState.strikeRangePct = Number(rangeInput.value) || 2;
                     tradeRailState.selectedSymbol = '';
+                    resetTradeSelectedQuoteOverride();
+                    disconnectTradeSelectedQuoteStream();
                     clearTradeLimitPrice();
                     tradeRailState.accountDetails = null;
                     tradeRailState.accountRequestKey = '';
@@ -37169,7 +37611,9 @@ def index():
                 requestTradeAccounts();
                 requestTradeChain();
                 scheduleTradeOrderPolling();
+                syncTradeSelectedQuoteStream();
             } else {
+                disconnectTradeSelectedQuoteStream();
                 stopTradeOrderPolling();
             }
             scheduleTradeRailResizeRefresh();
@@ -37563,6 +38007,7 @@ def index():
         function renderStrikeRailPanel(force = false) {
             const target = getStrikeRailTarget();
             if (!target || isGexColumnCollapsed()) return;
+            const strikeRailPerf = gexPerfStart('renderStrikeRailPanel', { tab: activeStrikeRailTab, force: !!force });
             let payload = activeStrikeRailTab === 'gex'
                 ? _lastGexPanelJson
                 : (lastData && lastData[activeStrikeRailTab]);
@@ -37570,6 +38015,7 @@ def index():
                 payload = _strikeRailLastPayloadByTab[activeStrikeRailTab] || null;
                 if (!payload) {
                     renderStrikeRailEmpty((STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike Inspect') + ' data loads with the next refresh.');
+                    gexPerfEnd(strikeRailPerf, { empty: true });
                     return;
                 }
             }
@@ -37589,6 +38035,7 @@ def index():
                         scheduleGexPanelSync();
                     }
                     updateStrikeInspectContext();
+                    gexPerfEnd(strikeRailPerf, { unchanged: true });
                     return;
                 }
                 const fig = activeStrikeRailTab === 'gex' ? (typeof payload === 'string' ? JSON.parse(payload) : payload)
@@ -37611,9 +38058,14 @@ def index():
                 _strikeRailLastPayloadByTab[activeStrikeRailTab] = payload;
                 const renderToken = ++_strikeRailRenderToken;
                 const renderer = hasMountedPlot ? Plotly.react : Plotly.newPlot;
+                const plotPerf = gexPerfStart('Plotly.react', { chart: 'strike_rail', tab: activeStrikeRailTab, new_plot: !hasMountedPlot });
                 renderer(target, fig.data || [], fig.layout || {}, config)
                     .then(() => {
-                        if (renderToken !== _strikeRailRenderToken) return;
+                        gexPerfEnd(plotPerf, { chart: 'strike_rail', tab: activeStrikeRailTab });
+                        if (renderToken !== _strikeRailRenderToken) {
+                            gexPerfEnd(strikeRailPerf, { superseded: true });
+                            return;
+                        }
                         target.__strikeRailState = {
                             tab: activeStrikeRailTab,
                             payloadKey,
@@ -37622,8 +38074,14 @@ def index():
                         try { Plotly.Plots.resize(target); } catch (e) {}
                         updateStrikeInspectContext();
                         syncGexPanelYAxisToTV();
+                        gexPerfEnd(strikeRailPerf, { rendered: true });
+                    })
+                    .catch(() => {
+                        gexPerfEnd(plotPerf, { chart: 'strike_rail', tab: activeStrikeRailTab, error: true });
+                        gexPerfEnd(strikeRailPerf, { error: true });
                     });
             } catch (e) {
+                gexPerfEnd(strikeRailPerf, { error: true });
                 console.warn('Strike Inspect render failed', activeStrikeRailTab, e);
                 renderStrikeRailEmpty('Could not render ' + (STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike Inspect') + '.');
             }
@@ -39405,12 +39863,16 @@ def index():
             _priceHistoryLastMs = now;
             _priceHistoryLastKey = key;
             _priceHistoryInFlight = true;
+            const priceFetchPerf = gexPerfStart('fetch:/update_price', { ticker: payload.ticker, timeframe: payload.timeframe, force: !!force });
             fetch('/update_price', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: key
             })
-            .then(r => r.json())
+            .then(r => {
+                gexPerfEnd(priceFetchPerf, { status: r.status });
+                return r.json();
+            })
             .then(priceResp => {
                 _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
                 _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
@@ -39431,11 +39893,15 @@ def index():
                 renderTraderStats(priceResp ? (priceResp.trader_stats || null) : null);
                 redrawGexScope();
             })
-            .catch(err => console.error('Error fetching price chart:', err))
+            .catch(err => {
+                gexPerfEnd(priceFetchPerf, { error: true });
+                console.error('Error fetching price chart:', err);
+            })
             .finally(() => { _priceHistoryInFlight = false; });
         }
 
         function updateCharts(data, topOiContextKey = getTopOIContextKey()) {
+            const updateChartsPerf = gexPerfStart('updateCharts');
             // Save scroll position before any DOM changes
             savedScrollPosition = window.scrollY || window.pageYOffset;
 
@@ -39603,10 +40069,21 @@ def index():
                                 style: {width: "100%", height: "100%"}
                             };
                             
+                            const plotPerf = gexPerfStart('Plotly.react', { chart: key });
                             if (charts[key]) {
-                                Plotly.react(`${key}-chart`, chartData.data, chartData.layout, config);
+                                const plotPromise = Plotly.react(`${key}-chart`, chartData.data, chartData.layout, config);
+                                if (plotPromise && typeof plotPromise.then === 'function') {
+                                    plotPromise.then(() => gexPerfEnd(plotPerf, { chart: key })).catch(() => gexPerfEnd(plotPerf, { chart: key, error: true }));
+                                } else {
+                                    gexPerfEnd(plotPerf, { chart: key });
+                                }
                             } else {
                                 charts[key] = Plotly.newPlot(`${key}-chart`, chartData.data, chartData.layout, config);
+                                if (charts[key] && typeof charts[key].then === 'function') {
+                                    charts[key].then(() => gexPerfEnd(plotPerf, { chart: key, new_plot: true })).catch(() => gexPerfEnd(plotPerf, { chart: key, new_plot: true, error: true }));
+                                } else {
+                                    gexPerfEnd(plotPerf, { chart: key, new_plot: true });
+                                }
                             }
                         }
                     } catch (error) {
@@ -39647,6 +40124,7 @@ def index():
             requestAnimationFrame(() => {
                 window.scrollTo(0, savedScrollPosition);
             });
+            gexPerfEnd(updateChartsPerf);
         }
         
         function updatePriceInfo(info) {
@@ -41559,7 +42037,7 @@ def index():
     </script>
 </body>
 </html>
-    ''', desktop_mode=desktop_mode, plotly_js_cdn_url=PLOTLY_JS_CDN_URL)
+    ''', desktop_mode=desktop_mode, plotly_js_cdn_url=PLOTLY_JS_CDN_URL, gex_perf_trace=_perf_trace_enabled())
 
 @app.route('/expirations/<ticker>')
 def get_expirations(ticker):
@@ -41573,13 +42051,17 @@ def get_expirations(ticker):
 @app.route('/trade_chain', methods=['POST'])
 def trade_chain():
     """Read-only contract picker snapshot built from the cached option chain."""
+    perf = _PerfTrace('/trade_chain')
     data = request.get_json(silent=True) or {}
     ticker = format_ticker(data.get('ticker'))
+    perf.add('ticker', ticker)
     if not ticker:
-        return jsonify({'error': 'Missing ticker'}), 400
-    cached = _options_cache.get(ticker)
+        return _perf_jsonify(perf, {'error': 'Missing ticker'}, 400)
+    with perf.span('cache_lookup'):
+        cached = _options_cache.get(ticker)
+    perf.add('cache_hit', bool(cached))
     if not cached:
-        return jsonify({'error': 'No cached option chain for ticker. Run a normal chain update first.'}), 409
+        return _perf_jsonify(perf, {'error': 'No cached option chain for ticker. Run a normal chain update first.'}, 409)
 
     expiry = data.get('expiry', data.get('expiries'))
     if isinstance(expiry, str):
@@ -41601,19 +42083,23 @@ def trade_chain():
         strike_range = float(data.get('strike_range', 0.02))
     except Exception:
         strike_range = 0.02
+    perf.add('selected_expiries', len(selected_expiries))
+    perf.add('strike_range', strike_range)
 
-    payload = build_trading_chain_payload(
-        ticker=ticker,
-        calls=cached.get('calls'),
-        puts=cached.get('puts'),
-        S=cached.get('S'),
-        selected_expiries=selected_expiries,
-        strike_range=strike_range,
-        contract_type=contract_type,
-    )
+    with perf.span('build_trading_chain_payload'):
+        payload = build_trading_chain_payload(
+            ticker=ticker,
+            calls=cached.get('calls'),
+            puts=cached.get('puts'),
+            S=cached.get('S'),
+            selected_expiries=selected_expiries,
+            strike_range=strike_range,
+            contract_type=contract_type,
+        )
+    perf.add('contracts', len(payload.get('contracts') or []))
     if not payload.get('contracts'):
         payload['warnings'] = sorted(set((payload.get('warnings') or []) + ['No contracts matched the cached chain filters.']))
-    return jsonify(payload)
+    return _perf_jsonify(perf, payload)
 
 
 @app.route('/trade/accounts', methods=['GET'])
@@ -41641,47 +42127,55 @@ def trade_accounts():
 @app.route('/trade/account_details', methods=['POST'])
 def trade_account_details():
     """Read-only account balances and positions for the selected trading rail account."""
+    perf = _PerfTrace('/trade/account_details')
     client_error = _require_schwab_client()
     if client_error:
-        return _trade_api_error(client_error, 503)
+        return _perf_finish_response(perf, _trade_api_error(client_error, 503), error='client_unavailable')
     data = request.get_json(silent=True) or {}
     account_hash = str(data.get('account_hash') or data.get('accountHash') or '').strip()
     if not account_hash:
-        return _trade_api_error('Missing account hash.', 400)
+        return _perf_finish_response(perf, _trade_api_error('Missing account hash.', 400), error='missing_account')
     ticker = format_ticker(data.get('ticker') or '')
     contract_symbol = str(data.get('contract_symbol') or data.get('contractSymbol') or '').strip()
+    perf.add('ticker', ticker)
+    perf.add('contract_symbol', bool(contract_symbol))
     try:
-        response = client.account_details(account_hash, fields='positions')
+        with perf.span('schwab_call'):
+            response = client.account_details(account_hash, fields='positions')
     except Exception as e:
-        return _trade_api_error('Account details lookup failed.', 502, e)
+        return _perf_finish_response(perf, _trade_api_error('Account details lookup failed.', 502, e), error='schwab_call')
     if not getattr(response, 'ok', False):
-        return _trade_api_error(
+        return _perf_finish_response(perf, _trade_api_error(
             f"Account details lookup failed with Schwab status {getattr(response, 'status_code', 'unknown')}.",
             502,
             getattr(response, 'reason', None),
+        ), error='schwab_status')
+    with perf.span('payload_normalize'):
+        payload = build_trade_account_details_payload(
+            _safe_response_json(response) or {},
+            account_hash=account_hash,
+            ticker=ticker,
+            contract_symbol=contract_symbol,
         )
-    payload = build_trade_account_details_payload(
-        _safe_response_json(response) or {},
-        account_hash=account_hash,
-        ticker=ticker,
-        contract_symbol=contract_symbol,
-    )
-    return jsonify(payload)
+    return _perf_jsonify(perf, payload)
 
 
 @app.route('/trade/orders', methods=['POST'])
 def trade_orders():
     """Read-only open/recent orders for the selected trading rail account."""
+    perf = _PerfTrace('/trade/orders')
     client_error = _require_schwab_client()
     if client_error:
-        return _trade_api_error(client_error, 503)
+        return _perf_finish_response(perf, _trade_api_error(client_error, 503), error='client_unavailable')
     data = request.get_json(silent=True) or {}
     account_hash = str(data.get('account_hash') or data.get('accountHash') or '').strip()
     if not account_hash:
-        return _trade_api_error('Missing account hash.', 400)
+        return _perf_finish_response(perf, _trade_api_error('Missing account hash.', 400), error='missing_account')
 
     ticker = format_ticker(data.get('ticker') or '')
     contract_symbol = str(data.get('contract_symbol') or data.get('contractSymbol') or '').strip()
+    perf.add('ticker', ticker)
+    perf.add('contract_symbol', bool(contract_symbol))
     now_utc = datetime.now(pytz.UTC)
     from_time = data.get('from_entered_time') or data.get('fromEnteredTime')
     to_time = data.get('to_entered_time') or data.get('toEnteredTime')
@@ -41697,31 +42191,36 @@ def trade_orders():
     status = data.get('status')
     if status is not None:
         status = str(status or '').strip().upper() or None
+    perf.add('status_filter', status or 'all')
 
     try:
-        response = client.account_orders(
-            account_hash,
-            from_time,
-            to_time,
-            maxResults=max_results,
-            status=status,
-        )
+        with perf.span('schwab_call'):
+            response = client.account_orders(
+                account_hash,
+                from_time,
+                to_time,
+                maxResults=max_results,
+                status=status,
+            )
     except Exception as e:
-        return _trade_api_error('Order lookup failed.', 502, e)
+        return _perf_finish_response(perf, _trade_api_error('Order lookup failed.', 502, e), error='schwab_call')
     if not getattr(response, 'ok', False):
-        return _trade_api_error(
+        return _perf_finish_response(perf, _trade_api_error(
             f"Order lookup failed with Schwab status {getattr(response, 'status_code', 'unknown')}.",
             502,
             getattr(response, 'reason', None),
-        )
+        ), error='schwab_status')
 
-    return jsonify({
+    with perf.span('payload_normalize'):
+        orders = _normalize_trade_orders(_redact_trade_payload(_safe_response_json(response)), ticker=ticker, contract_symbol=contract_symbol)
+    perf.add('orders', len(orders))
+    return _perf_jsonify(perf, {
         'account_hash': account_hash,
         'ticker': ticker,
         'contract_symbol': contract_symbol,
         'from_entered_time': from_time,
         'to_entered_time': to_time,
-        'orders': _normalize_trade_orders(_redact_trade_payload(_safe_response_json(response)), ticker=ticker, contract_symbol=contract_symbol),
+        'orders': orders,
         'warnings': [],
     })
 
@@ -42265,19 +42764,22 @@ def trade_replace_order():
 
 @app.route('/update', methods=['POST'])
 def update():
+    perf = _PerfTrace('/update')
     data = request.get_json()
     ticker = data.get('ticker')
     expiry = data.get('expiry')  # This can now be a list or single value
     
     ticker = format_ticker(ticker) 
+    perf.add('ticker', ticker)
     if not ticker or not expiry:
-        return jsonify({'error': 'Missing ticker or expiry'}), 400
+        return _perf_jsonify(perf, {'error': 'Missing ticker or expiry'}, 400)
     
     # Handle both single expiry and multiple expiries
     if isinstance(expiry, list):
         expiry_dates = expiry
     else:
         expiry_dates = [expiry]
+    perf.add('selected_expiries', len(expiry_dates))
         
     try:
         # Setting: use volume or OI for exposure weighting
@@ -42291,27 +42793,32 @@ def update():
             calculate_in_notional = bool(cin_val)
 
         # Fetch options data for multiple dates
-        if len(expiry_dates) == 1:
-            calls, puts = fetch_options_for_date(ticker, expiry_dates[0], exposure_metric=exposure_metric, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
-        else:
-            calls, puts = fetch_options_for_multiple_dates(ticker, expiry_dates, exposure_metric=exposure_metric, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
+        with perf.span('fetch_chain'):
+            if len(expiry_dates) == 1:
+                calls, puts = fetch_options_for_date(ticker, expiry_dates[0], exposure_metric=exposure_metric, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
+            else:
+                calls, puts = fetch_options_for_multiple_dates(ticker, expiry_dates, exposure_metric=exposure_metric, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
         
         if calls.empty and puts.empty:
-            return jsonify({'error': 'No options data found'})
+            return _perf_jsonify(perf, {'error': 'No options data found'})
             
         # Get current price
-        S = get_current_price(ticker)
+        with perf.span('get_current_price'):
+            S = get_current_price(ticker)
         if S is None:
-            return jsonify({'error': 'Could not fetch current price'})
+            return _perf_jsonify(perf, {'error': 'Could not fetch current price'})
 
         # Cache options data so /update_price can use it without re-fetching
-        _options_cache[ticker] = {'calls': calls.copy(), 'puts': puts.copy(), 'S': S}
+        with perf.span('options_cache_copy'):
+            _options_cache[ticker] = {'calls': calls.copy(), 'puts': puts.copy(), 'S': S}
         
         # Get strike range
         strike_range = float(data.get('strike_range', 0.1))
+        perf.add('strike_range', strike_range)
         
         # Store interval data
-        store_interval_data(ticker, S, strike_range, calls, puts)
+        with perf.span('store_interval_data'):
+            store_interval_data(ticker, S, strike_range, calls, puts)
         
         # Check if this is the first access of the day for this ticker and clear centroid data if needed
         est = pytz.timezone('US/Eastern')
@@ -42324,24 +42831,26 @@ def update():
                 today = current_time_est.strftime('%Y-%m-%d')
                 market_open_timestamp = int(current_time_est.replace(hour=9, minute=30, second=0, microsecond=0).timestamp())
                 
-                with closing(sqlite_connect()) as conn:
-                    with closing(conn.cursor()) as cursor:
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM centroid_data 
-                            WHERE ticker = ? AND date = ? AND timestamp < ?
-                        ''', (ticker, today, market_open_timestamp))
-                        
-                        pre_market_count = cursor.fetchone()[0]
-                        if pre_market_count > 0:
-                            # Clear pre-market centroid data for a fresh session
+                with perf.span('centroid_market_open_cleanup'):
+                    with closing(sqlite_connect()) as conn:
+                        with closing(conn.cursor()) as cursor:
                             cursor.execute('''
-                                DELETE FROM centroid_data 
+                                SELECT COUNT(*) FROM centroid_data
                                 WHERE ticker = ? AND date = ? AND timestamp < ?
                             ''', (ticker, today, market_open_timestamp))
-                            conn.commit()
+
+                            pre_market_count = cursor.fetchone()[0]
+                            if pre_market_count > 0:
+                                # Clear pre-market centroid data for a fresh session
+                                cursor.execute('''
+                                    DELETE FROM centroid_data
+                                    WHERE ticker = ? AND date = ? AND timestamp < ?
+                                ''', (ticker, today, market_open_timestamp))
+                                conn.commit()
         
         # Store centroid data
-        store_centroid_data(ticker, S, calls, puts)
+        with perf.span('store_centroid_data'):
+            store_centroid_data(ticker, S, calls, puts)
         
         # Clear centroid data at the end of the day
         current_time = datetime.now()
@@ -42411,16 +42920,18 @@ def update():
         response = {}
 
         try:
-            response['top_oi'] = compute_top_oi_strikes(calls, puts, n=top_oi_count)
+            with perf.span('compute_top_oi_strikes'):
+                response['top_oi'] = compute_top_oi_strikes(calls, puts, n=top_oi_count)
         except Exception as e:
             print(f"[top_oi] build failed: {e}")
             response['top_oi'] = {'calls': [], 'puts': [], 'both': []}
 
         try:
-            response['strike_profiles'] = create_strike_profile_payload(
-                calls, puts, S, strike_range,
-                selected_expiries=expiry_dates,
-            )
+            with perf.span('create_strike_profile_payload'):
+                response['strike_profiles'] = create_strike_profile_payload(
+                    calls, puts, S, strike_range,
+                    selected_expiries=expiry_dates,
+                )
         except Exception as e:
             print(f"[strike_profiles] build failed: {e}")
             response['strike_profiles'] = {}
@@ -42429,52 +42940,65 @@ def update():
         # NOTE: price chart is handled by /update_price (separate concurrent request)
 
         if data.get('show_gamma', True):
-            response['gamma'] = create_exposure_chart(calls, puts, "GEX", "Gamma Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, show_abs_gex_area=show_abs_gex, abs_gex_opacity=abs_gex_opacity, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_gamma'):
+                response['gamma'] = create_exposure_chart(calls, puts, "GEX", "Gamma Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, show_abs_gex_area=show_abs_gex, abs_gex_opacity=abs_gex_opacity, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_delta', True):
-            response['delta'] = create_exposure_chart(calls, puts, "DEX", "Delta Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_delta'):
+                response['delta'] = create_exposure_chart(calls, puts, "DEX", "Delta Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_vanna', True):
-            response['vanna'] = create_exposure_chart(calls, puts, "VEX", "Vanna Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_vanna'):
+                response['vanna'] = create_exposure_chart(calls, puts, "VEX", "Vanna Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_charm', True):
-            response['charm'] = create_exposure_chart(calls, puts, "Charm", "Charm Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_charm'):
+                response['charm'] = create_exposure_chart(calls, puts, "Charm", "Charm Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_speed', True):
-            response['speed'] = create_exposure_chart(calls, puts, "Speed", "Speed Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_speed'):
+                response['speed'] = create_exposure_chart(calls, puts, "Speed", "Speed Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_vomma', True):
-            response['vomma'] = create_exposure_chart(calls, puts, "Vomma", "Vomma Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_vomma'):
+                response['vomma'] = create_exposure_chart(calls, puts, "Vomma", "Vomma Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
 
         if data.get('show_color', True):
-            response['color'] = create_exposure_chart(calls, puts, "Color", "Color Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_color'):
+                response['color'] = create_exposure_chart(calls, puts, "Color", "Color Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_volume', False):
-            response['volume'] = create_volume_chart(call_volume, put_volume, use_range, call_color, put_color, expiry_dates)
+            with perf.span('chart_volume'):
+                response['volume'] = create_volume_chart(call_volume, put_volume, use_range, call_color, put_color, expiry_dates)
         
         if data.get('show_options_volume', True):
-            response['options_volume'] = create_options_volume_chart(
-                calls, puts, S, strike_range,
-                call_color, put_color, coloring_mode,
-                ov_show_calls, ov_show_puts, ov_show_net,
-                expiry_dates, strike_rail_horizontal,
-                highlight_max_level=highlight_max_level,
-                max_level_color=max_level_color,
-                max_level_mode=max_level_mode,
-                show_totals=ov_show_totals
-            )
+            with perf.span('chart_options_volume'):
+                response['options_volume'] = create_options_volume_chart(
+                    calls, puts, S, strike_range,
+                    call_color, put_color, coloring_mode,
+                    ov_show_calls, ov_show_puts, ov_show_net,
+                    expiry_dates, strike_rail_horizontal,
+                    highlight_max_level=highlight_max_level,
+                    max_level_color=max_level_color,
+                    max_level_mode=max_level_mode,
+                    show_totals=ov_show_totals
+                )
         
         if data.get('show_open_interest', True):
-            response['open_interest'] = create_open_interest_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_open_interest'):
+                response['open_interest'] = create_open_interest_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_premium', True):
-            response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+            with perf.span('chart_premium'):
+                response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_large_trades', True):
-            response['large_trades'] = create_large_trades_table(calls, puts, S, strike_range, call_color, put_color, expiry_dates, ticker=ticker)
+            with perf.span('create_large_trades_table'):
+                response['large_trades'] = create_large_trades_table(calls, puts, S, strike_range, call_color, put_color, expiry_dates, ticker=ticker)
         
         if data.get('show_centroid', False):
-            response['centroid'] = create_centroid_chart(ticker, call_color, put_color, expiry_dates)
+            with perf.span('chart_centroid'):
+                response['centroid'] = create_centroid_chart(ticker, call_color, put_color, expiry_dates)
 
         
         # Add volume data to response
@@ -42489,93 +43013,94 @@ def update():
         
         # Get fresh quote data
         try:
-            # Use appropriate base ticker for market tickers
-            if ticker == "MARKET":
-                quote_ticker = "$SPX"
-            elif ticker == "MARKET2":
-                quote_ticker = "SPY"
-            else:
-                quote_ticker = ticker
+            with perf.span('quote_expected_move'):
+                # Use appropriate base ticker for market tickers
+                if ticker == "MARKET":
+                    quote_ticker = "$SPX"
+                elif ticker == "MARKET2":
+                    quote_ticker = "SPY"
+                else:
+                    quote_ticker = ticker
 
-            quote_response = client.quote(quote_ticker)
-            if not quote_response.ok:
-                raise Exception(f"Failed to fetch quote for display: {quote_response.status_code} {quote_response.reason}")
-            quote_data = quote_response.json()
-            ticker_data = quote_data.get(quote_ticker, {})
-            quote = ticker_data.get('quote', {})
-            quote_open = (
-                quote.get('openPrice')
-                or quote.get('regularMarketOpen')
-                or quote.get('open')
-            )
+                quote_response = client.quote(quote_ticker)
+                if not quote_response.ok:
+                    raise Exception(f"Failed to fetch quote for display: {quote_response.status_code} {quote_response.reason}")
+                quote_data = quote_response.json()
+                ticker_data = quote_data.get(quote_ticker, {})
+                quote = ticker_data.get('quote', {})
+                quote_open = (
+                    quote.get('openPrice')
+                    or quote.get('regularMarketOpen')
+                    or quote.get('open')
+                )
 
-            # --- Expected Move Range pinned at 09:30 ET open ---
-            expected_move_range = None
-            live_straddle = None
-            pinned_snapshot = get_pinned_expected_move(
-                calls, puts, S, ticker, selected_expiries=expiry_dates, open_spot=quote_open
-            )
-            if pinned_snapshot:
-                expected_move_range = {
-                    'lower': round(pinned_snapshot['lower'], 2),
-                    'upper': round(pinned_snapshot['upper'], 2),
-                    'move': round(pinned_snapshot['move'], 2),
-                    'open_spot': round(pinned_snapshot['open_spot'], 2),
-                    'atm_strike': (
-                        round(pinned_snapshot['atm_strike'], 2)
-                        if pinned_snapshot.get('atm_strike') is not None else None
-                    ),
-                    'pinned': bool(pinned_snapshot.get('pinned')),
-                    'source': pinned_snapshot.get('source'),
-                }
+                # --- Expected Move Range pinned at 09:30 ET open ---
+                expected_move_range = None
+                live_straddle = None
+                pinned_snapshot = get_pinned_expected_move(
+                    calls, puts, S, ticker, selected_expiries=expiry_dates, open_spot=quote_open
+                )
+                if pinned_snapshot:
+                    expected_move_range = {
+                        'lower': round(pinned_snapshot['lower'], 2),
+                        'upper': round(pinned_snapshot['upper'], 2),
+                        'move': round(pinned_snapshot['move'], 2),
+                        'open_spot': round(pinned_snapshot['open_spot'], 2),
+                        'atm_strike': (
+                            round(pinned_snapshot['atm_strike'], 2)
+                            if pinned_snapshot.get('atm_strike') is not None else None
+                        ),
+                        'pinned': bool(pinned_snapshot.get('pinned')),
+                        'source': pinned_snapshot.get('source'),
+                    }
 
-            # --- Live ATM straddle (recomputed every tick) ---
-            live_snapshot = calculate_expected_move_snapshot(
-                calls, puts, S, selected_expiries=expiry_dates
-            )
-            if live_snapshot:
-                live_move = float(live_snapshot['move'])
-                live_straddle = {
-                    'atm_strike': round(live_snapshot['atm_strike'], 2),
-                    'mid': round(live_move, 2),
-                    'pct_of_spot': round(live_move / S * 100, 3) if S else None,
-                }
+                # --- Live ATM straddle (recomputed every tick) ---
+                live_snapshot = calculate_expected_move_snapshot(
+                    calls, puts, S, selected_expiries=expiry_dates
+                )
+                if live_snapshot:
+                    live_move = float(live_snapshot['move'])
+                    live_straddle = {
+                        'atm_strike': round(live_snapshot['atm_strike'], 2),
+                        'mid': round(live_move, 2),
+                        'pct_of_spot': round(live_move / S * 100, 3) if S else None,
+                    }
 
-            if quote_response.ok:
-                # compute high/low diffs relative to current price
-                high_price = quote.get('highPrice', S)
-                low_price  = quote.get('lowPrice', S)
-                high_diff = high_price - S
-                low_diff  = low_price - S
-                high_diff_pct = (high_diff / S * 100) if S else 0
-                low_diff_pct  = (low_diff  / S * 100) if S else 0
+                if quote_response.ok:
+                    # compute high/low diffs relative to current price
+                    high_price = quote.get('highPrice', S)
+                    low_price  = quote.get('lowPrice', S)
+                    high_diff = high_price - S
+                    low_diff  = low_price - S
+                    high_diff_pct = (high_diff / S * 100) if S else 0
+                    low_diff_pct  = (low_diff  / S * 100) if S else 0
 
-                # Pct bounds reference the open spot (or current spot pre-pin) so
-                # the headline ±X.XX% stays static once the band is locked.
-                if expected_move_range:
-                    anchor = expected_move_range.get('open_spot') or S
-                    if anchor:
-                        expected_move_range['lower_pct'] = round(((expected_move_range['lower'] - anchor) / anchor * 100), 2)
-                        expected_move_range['upper_pct'] = round(((expected_move_range['upper'] - anchor) / anchor * 100), 2)
+                    # Pct bounds reference the open spot (or current spot pre-pin) so
+                    # the headline ±X.XX% stays static once the band is locked.
+                    if expected_move_range:
+                        anchor = expected_move_range.get('open_spot') or S
+                        if anchor:
+                            expected_move_range['lower_pct'] = round(((expected_move_range['lower'] - anchor) / anchor * 100), 2)
+                            expected_move_range['upper_pct'] = round(((expected_move_range['upper'] - anchor) / anchor * 100), 2)
 
-                response['price_info'] = {
-                    'current_price': S,
-                    'high': high_price,
-                    'low': low_price,
-                    'high_diff': round(high_diff, 2),
-                    'high_diff_pct': round(high_diff_pct, 2),
-                    'low_diff': round(low_diff, 2),
-                    'low_diff_pct': round(low_diff_pct, 2),
-                    'net_change': quote.get('netChange', 0),
-                    'net_percent': quote.get('netPercentChange', 0),
-                    'call_volume': call_volume,
-                    'put_volume': put_volume,
-                    'total_volume': total_volume,
-                    'call_percentage': call_percentage,
-                    'put_percentage': put_percentage,
-                    'expected_move_range': expected_move_range,
-                    'live_straddle': live_straddle,
-                }
+                    response['price_info'] = {
+                        'current_price': S,
+                        'high': high_price,
+                        'low': low_price,
+                        'high_diff': round(high_diff, 2),
+                        'high_diff_pct': round(high_diff_pct, 2),
+                        'low_diff': round(low_diff, 2),
+                        'low_diff_pct': round(low_diff_pct, 2),
+                        'net_change': quote.get('netChange', 0),
+                        'net_percent': quote.get('netPercentChange', 0),
+                        'call_volume': call_volume,
+                        'put_volume': put_volume,
+                        'total_volume': total_volume,
+                        'call_percentage': call_percentage,
+                        'put_percentage': put_percentage,
+                        'expected_move_range': expected_move_range,
+                        'live_straddle': live_straddle,
+                    }
         except Exception as e:
             print(f"Error fetching quote data: {e}")
             response['price_info'] = {
@@ -42597,12 +43122,12 @@ def update():
                 'live_straddle': None,
             }
         
-        return jsonify(response)
+        return _perf_jsonify(perf, response)
         
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return _perf_jsonify(perf, {'error': str(e)}, 500)
 
 @app.route('/update_price', methods=['POST'])
 def update_price():
@@ -42610,12 +43135,14 @@ def update_price():
     Runs concurrently with /update so the price chart is never blocked
     by the heavier options-chain computations.
     """
+    perf = _PerfTrace('/update_price')
     data = request.get_json()
     ticker = data.get('ticker')
     expiry = data.get('expiry')
     ticker = format_ticker(ticker)
+    perf.add('ticker', ticker)
     if not ticker:
-        return jsonify({'error': 'Missing ticker'}), 400
+        return _perf_jsonify(perf, {'error': 'Missing ticker'}, 400)
     try:
         if isinstance(expiry, list):
             selected_expiries = expiry
@@ -42623,6 +43150,7 @@ def update_price():
             selected_expiries = [expiry]
         else:
             selected_expiries = []
+        perf.add('selected_expiries', len(selected_expiries))
         timeframe = int(data.get('timeframe', 1))
         lookback_days = data.get('lookback_days')
         rvol_lookback_days = data.get('rvol_lookback_days')
@@ -42631,6 +43159,7 @@ def update_price():
         exposure_levels_types = data.get('levels_types', [])
         exposure_levels_count = int(data.get('levels_count', 3))
         strike_range = float(data.get('strike_range', 0.1))
+        perf.add('strike_range', strike_range)
         use_heikin_ashi = data.get('use_heikin_ashi', False)
         highlight_max_level = data.get('highlight_max_level', False)
         max_level_color = data.get('max_level_color', '#800080')
@@ -42654,20 +43183,22 @@ def update_price():
         else:
             gate_alerts = bool(gate_val)
 
-        price_data = get_price_history(ticker, timeframe=timeframe, lookback_days=lookback_days)
+        with perf.span('get_price_history'):
+            price_data = get_price_history(ticker, timeframe=timeframe, lookback_days=lookback_days)
         session_levels = None
         session_levels_meta = None
         if session_level_config.get('enabled'):
             try:
-                session_candles = price_data.get('candles') if timeframe == 1 else None
-                if not session_candles:
-                    session_candles = get_session_level_candles(ticker)
-                session_levels = compute_session_levels(
-                    session_candles,
-                    timezone='US/Eastern',
-                    config=session_level_config,
-                )
-                session_levels_meta = (session_levels or {}).get('meta')
+                with perf.span('compute_session_levels'):
+                    session_candles = price_data.get('candles') if timeframe == 1 else None
+                    if not session_candles:
+                        session_candles = get_session_level_candles(ticker)
+                    session_levels = compute_session_levels(
+                        session_candles,
+                        timezone='US/Eastern',
+                        config=session_level_config,
+                    )
+                    session_levels_meta = (session_levels or {}).get('meta')
             except Exception as e:
                 print(f"[session_levels] build failed: {e}")
                 session_levels = None
@@ -42680,26 +43211,27 @@ def update_price():
         calls = cached.get('calls')
         puts = cached.get('puts')
 
-        price_chart = prepare_price_chart_data(
-            price_data=price_data,
-            calls=calls,
-            puts=puts,
-            exposure_levels_types=exposure_levels_types,
-            exposure_levels_count=exposure_levels_count,
-            call_color=call_color,
-            put_color=put_color,
-            strike_range=strike_range,
-            use_heikin_ashi=use_heikin_ashi,
-            highlight_max_level=highlight_max_level,
-            max_level_color=max_level_color,
-            coloring_mode=coloring_mode,
-            ticker=ticker,
-            selected_expiries=selected_expiries,
-            timeframe=timeframe,
-            rvol_lookback_days=rvol_lookback_days,
-            volume_profile_settings=volume_profile_settings,
-            tpo_profile_settings=tpo_profile_settings,
-        )
+        with perf.span('prepare_price_chart_data'):
+            price_chart = prepare_price_chart_data(
+                price_data=price_data,
+                calls=calls,
+                puts=puts,
+                exposure_levels_types=exposure_levels_types,
+                exposure_levels_count=exposure_levels_count,
+                call_color=call_color,
+                put_color=put_color,
+                strike_range=strike_range,
+                use_heikin_ashi=use_heikin_ashi,
+                highlight_max_level=highlight_max_level,
+                max_level_color=max_level_color,
+                coloring_mode=coloring_mode,
+                ticker=ticker,
+                selected_expiries=selected_expiries,
+                timeframe=timeframe,
+                rvol_lookback_days=rvol_lookback_days,
+                volume_profile_settings=volume_profile_settings,
+                tpo_profile_settings=tpo_profile_settings,
+            )
         # Inject timeframe so the popout candle-close timer knows the selected interval
         try:
             import json as _json
@@ -42718,30 +43250,31 @@ def update_price():
         quote_open = None
         if calls is not None and puts is not None and S_for_panel is not None:
             try:
-                cached_em_key = _expected_move_cache_key(
-                    ticker,
-                    datetime.now(pytz.timezone('US/Eastern')).date(),
-                    selected_expiries,
-                )
-                cached_em = _SESSION_EM_BASELINE.get(cached_em_key)
-                if cached_em:
-                    pinned_em_snapshot = cached_em
-                else:
-                    quote_response = client.quote(quote_ticker)
-                    if quote_response.ok:
-                        quote_data = quote_response.json()
-                        ticker_data = quote_data.get(quote_ticker, {})
-                        quote = ticker_data.get('quote', {})
-                        quote_open = (
-                            quote.get('openPrice')
-                            or quote.get('regularMarketOpen')
-                            or quote.get('open')
-                        )
-                    pinned_em_snapshot = get_pinned_expected_move(
-                        calls, puts, S_for_panel, ticker,
-                        selected_expiries=selected_expiries,
-                        open_spot=quote_open,
+                with perf.span('pinned_expected_move'):
+                    cached_em_key = _expected_move_cache_key(
+                        ticker,
+                        datetime.now(pytz.timezone('US/Eastern')).date(),
+                        selected_expiries,
                     )
+                    cached_em = _SESSION_EM_BASELINE.get(cached_em_key)
+                    if cached_em:
+                        pinned_em_snapshot = cached_em
+                    else:
+                        quote_response = client.quote(quote_ticker)
+                        if quote_response.ok:
+                            quote_data = quote_response.json()
+                            ticker_data = quote_data.get(quote_ticker, {})
+                            quote = ticker_data.get('quote', {})
+                            quote_open = (
+                                quote.get('openPrice')
+                                or quote.get('regularMarketOpen')
+                                or quote.get('open')
+                            )
+                        pinned_em_snapshot = get_pinned_expected_move(
+                            calls, puts, S_for_panel, ticker,
+                            selected_expiries=selected_expiries,
+                            open_spot=quote_open,
+                        )
             except Exception as e:
                 print(f"[expected_move] pinned chart EM build failed: {e}")
                 pinned_em_snapshot = None
@@ -42750,29 +43283,33 @@ def update_price():
                 # refresh loop as well as the heavier /update loop. This avoids
                 # gaps when the chart stays alive but the main payload path is
                 # delayed or skipped late in the session.
-                store_interval_data(ticker, S_for_panel, strike_range, calls, puts)
+                with perf.span('store_interval_data'):
+                    store_interval_data(ticker, S_for_panel, strike_range, calls, puts)
             except Exception as e:
                 print(f"[interval_data] price-path store failed: {e}")
             try:
-                gex_panel = create_gex_side_panel(
-                    calls, puts, S_for_panel, strike_range=strike_range,
-                    call_color=call_color, put_color=put_color,
-                )
+                with perf.span('create_gex_side_panel'):
+                    gex_panel = create_gex_side_panel(
+                        calls, puts, S_for_panel, strike_range=strike_range,
+                        call_color=call_color, put_color=put_color,
+                    )
             except Exception as e:
                 print(f"[gex_panel] build failed: {e}")
                 gex_panel = None
             try:
-                key_levels = compute_key_levels(
-                    calls, puts, S_for_panel,
-                    selected_expiries=selected_expiries,
-                    strike_range=strike_range,
-                )
-                key_levels = apply_expected_move_snapshot_to_key_levels(key_levels, pinned_em_snapshot)
+                with perf.span('compute_key_levels'):
+                    key_levels = compute_key_levels(
+                        calls, puts, S_for_panel,
+                        selected_expiries=selected_expiries,
+                        strike_range=strike_range,
+                    )
+                    key_levels = apply_expected_move_snapshot_to_key_levels(key_levels, pinned_em_snapshot)
             except Exception as e:
                 print(f"[key_levels] build failed: {e}")
                 key_levels = None
             try:
-                top_oi = compute_top_oi_strikes(calls, puts, n=top_oi_count)
+                with perf.span('compute_top_oi_strikes'):
+                    top_oi = compute_top_oi_strikes(calls, puts, n=top_oi_count)
             except Exception as e:
                 print(f"[top_oi] cached build failed: {e}")
                 top_oi = {'calls': [], 'puts': [], 'both': []}
@@ -42785,19 +43322,20 @@ def update_price():
                     selected_expiries=selected_expiries,
                     scope_label='all',
                 )
-                trader_stats = compute_trader_stats(
-                    calls, puts, S_for_panel, strike_range=strike_range,
-                    selected_expiries=selected_expiries,
-                    delta_adjusted=delta_adjusted,
-                    calculate_in_notional=calculate_in_notional,
-                    ticker=ticker,
-                    gate_strike_alerts=gate_alerts,
-                    scope_id=full_scope_id,
-                    price_data=price_data,
-                    timeframe=timeframe,
-                    expected_move_snapshot=pinned_em_snapshot,
-                )
-                trader_stats = apply_expected_move_snapshot_to_stats(trader_stats, pinned_em_snapshot)
+                with perf.span('compute_trader_stats_full'):
+                    trader_stats = compute_trader_stats(
+                        calls, puts, S_for_panel, strike_range=strike_range,
+                        selected_expiries=selected_expiries,
+                        delta_adjusted=delta_adjusted,
+                        calculate_in_notional=calculate_in_notional,
+                        ticker=ticker,
+                        gate_strike_alerts=gate_alerts,
+                        scope_id=full_scope_id,
+                        price_data=price_data,
+                        timeframe=timeframe,
+                        expected_move_snapshot=pinned_em_snapshot,
+                    )
+                    trader_stats = apply_expected_move_snapshot_to_stats(trader_stats, pinned_em_snapshot)
             except Exception as e:
                 print(f"[trader_stats] build failed: {e}")
                 trader_stats = None
@@ -42816,35 +43354,37 @@ def update_price():
                         selected_expiries=[nearest_exp],
                         scope_label=f'expiry:{nearest_exp}',
                     )
-                    key_levels_0dte = compute_key_levels(
-                        c0, p0, S_for_panel,
-                        selected_expiries=[nearest_exp],
-                        strike_range=strike_range,
-                    )
-                    pinned_em_0dte = get_pinned_expected_move(
-                        c0, p0, S_for_panel, ticker,
-                        selected_expiries=[nearest_exp],
-                        open_spot=quote_open,
-                    )
-                    key_levels_0dte = apply_expected_move_snapshot_to_key_levels(key_levels_0dte, pinned_em_0dte)
-                    stats_0dte = compute_trader_stats(
-                        c0, p0, S_for_panel,
-                        strike_range=strike_range,
-                        selected_expiries=[nearest_exp],
-                        delta_adjusted=delta_adjusted,
-                        calculate_in_notional=calculate_in_notional,
-                        ticker=ticker,
-                        gate_strike_alerts=gate_alerts,
-                        scope_id=nearest_scope_id,
-                        price_data=price_data,
-                        timeframe=timeframe,
-                        expected_move_snapshot=pinned_em_0dte,
-                    )
-                    stats_0dte = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
+                    with perf.span('compute_key_levels_0dte'):
+                        key_levels_0dte = compute_key_levels(
+                            c0, p0, S_for_panel,
+                            selected_expiries=[nearest_exp],
+                            strike_range=strike_range,
+                        )
+                        pinned_em_0dte = get_pinned_expected_move(
+                            c0, p0, S_for_panel, ticker,
+                            selected_expiries=[nearest_exp],
+                            open_spot=quote_open,
+                        )
+                        key_levels_0dte = apply_expected_move_snapshot_to_key_levels(key_levels_0dte, pinned_em_0dte)
+                    with perf.span('compute_trader_stats_0dte'):
+                        stats_0dte = compute_trader_stats(
+                            c0, p0, S_for_panel,
+                            strike_range=strike_range,
+                            selected_expiries=[nearest_exp],
+                            delta_adjusted=delta_adjusted,
+                            calculate_in_notional=calculate_in_notional,
+                            ticker=ticker,
+                            gate_strike_alerts=gate_alerts,
+                            scope_id=nearest_scope_id,
+                            price_data=price_data,
+                            timeframe=timeframe,
+                            expected_move_snapshot=pinned_em_0dte,
+                        )
+                        stats_0dte = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
             except Exception as e:
                 print(f"[0dte_bundle] build failed: {e}")
 
-        return jsonify({
+        return _perf_jsonify(perf, {
             'price': price_chart,
             'gex_panel': gex_panel,
             'key_levels': key_levels,
@@ -42858,7 +43398,7 @@ def update_price():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return _perf_jsonify(perf, {'error': str(e)}, 500)
 
 
 @app.route('/save_settings', methods=['POST'])
@@ -42919,6 +43459,49 @@ def price_stream(ticker):
         headers={
             'Cache-Control': 'no-cache',
             'X-Accel-Buffering': 'no',   # disable Nginx buffering if behind a proxy
+            'Connection': 'keep-alive',
+        }
+    )
+
+
+@app.route('/trade/quote_stream/<path:contract_symbol>')
+def trade_quote_stream(contract_symbol):
+    """SSE stream for one selected option contract quote.
+
+    This is a quote fast lane for the Active Trader ladder. It validates the
+    symbol against the cached chain when a ticker query param is supplied, then
+    subscribes to Schwab LEVELONE_OPTIONS for that exact contract symbol.
+    """
+    contract_symbol = _normalize_stream_contract_symbol(contract_symbol)
+    ticker = format_ticker(request.args.get('ticker') or '')
+    if not contract_symbol:
+        return jsonify({'error': 'Missing contract symbol'}), 400
+    if ticker and not _find_cached_trade_contract(ticker, contract_symbol):
+        return jsonify({'error': 'Selected contract is not in the latest cached trading chain.'}), 404
+
+    client_queue = queue.Queue(maxsize=20)
+    price_streamer.subscribe_option(contract_symbol, client_queue)
+
+    def generate():
+        try:
+            yield 'data: ' + json.dumps({'type': 'connected', 'contract_symbol': contract_symbol}) + '\n\n'
+            while True:
+                try:
+                    payload = client_queue.get(timeout=20)
+                    yield f'data: {payload}\n\n'
+                except queue.Empty:
+                    yield 'data: ' + json.dumps({'type': 'heartbeat', 'contract_symbol': contract_symbol}) + '\n\n'
+        except GeneratorExit:
+            pass
+        finally:
+            price_streamer.unsubscribe_option_queue(contract_symbol, client_queue)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
             'Connection': 'keep-alive',
         }
     )
