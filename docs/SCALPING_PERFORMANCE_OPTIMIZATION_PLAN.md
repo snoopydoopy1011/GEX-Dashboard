@@ -1,10 +1,11 @@
 # GEX Dashboard - Scalping Performance Optimization Plan
 
-**Status:** Plan only - no implementation started  
+**Status:** Implementation in progress - Stages 0, 1, and 2 complete on `codex/scalping-performance-plan`
 **Created:** 2026-05-05  
+**Last updated:** 2026-05-05
 **Primary file:** `ezoptionsschwab.py`  
 **Target user workflow:** 0-1 DTE SPY option scalping with Active Trader ladder open  
-**Recommended branch:** `codex/scalping-performance-optimization`
+**Active branch:** `codex/scalping-performance-plan`
 
 ---
 
@@ -13,6 +14,58 @@
 The dashboard has grown into a large single-file Flask + Plotly + Lightweight Charts app. The user still sees lag in the dashboard and especially in the Active Trader ladder while scalping 0-1 DTE SPY options. The goal of this effort is to validate the suspected bottlenecks with timing data, look for any additional bottlenecks during testing, then implement targeted speedups without cutting major features unless the data proves a feature is too expensive for the scalping workflow.
 
 This is not an analytics redesign. Do not change GEX, DEX, Vanna, Charm, Flow, expected move, key level, contract helper, or order safety formulas. The focus is data freshness, fewer redundant calculations, less browser churn, and faster active-contract quote updates.
+
+---
+
+## 0.1 Implementation Log
+
+Completed on `codex/scalping-performance-plan`:
+
+- `e2a5b8c docs(perf): plan scalping dashboard speedup`
+  - Created this implementation plan.
+- `7c2ef28 perf: instrument scalping dashboard and stream option quotes`
+  - Added Stage 0 performance tracing behind `GEX_PERF_TRACE=1` and `localStorage.gexPerfTrace`.
+  - Server traces cover `/update`, `/update_price`, `/trade_chain`, `/trade/account_details`, and `/trade/orders`.
+  - Browser traces cover `updateData`, fetches, Plotly renders, Active Trader render/ladder work, selected quote apply work, and long tasks.
+  - Added the Stage 1 selected-contract option quote SSE endpoint at `/trade/quote_stream/<contract_symbol>`.
+  - Extended `PriceStreamer` to subscribe/unsubscribe exact Schwab option symbols through `schwabdev.Stream.level_one_options(..., command="ADD")` and `command="UNSUBS"`.
+  - Active Trader now merges live quotes only for the selected cached contract and disconnects/reconnects on selection, collapse, and ticker changes.
+- `e79a276 perf: request active strike rail payload only`
+  - Implemented Stage 2 request narrowing. The frontend sends `active_strike_rail_tab` and only one `show_<strike_rail_chart>` flag at a time for Strike Inspect Plotly payloads.
+  - Utility chart visibility remains separate from strike-rail tab visibility.
+  - Inactive Strike Inspect tabs keep using cached prior payloads and load fresh payloads on the next `/update` after tab selection.
+  - Server perf traces now include `active_strike_rail_tab`.
+
+Baseline findings collected before Stage 2:
+
+- `/trade_chain` cached path is usually about 8-18 ms, with occasional 40-58 ms ticks.
+- `/update_price` is about 1.1-3.3 s and is dominated by price history and trader stats work.
+- `/update` is mostly about 1.0-1.8 s, with spikes from Schwab chain/quote latency.
+- Active Trader render median is about 1.5 ms; ladder HTML is about 0.2 ms, so ladder rendering itself is not the main bottleneck.
+- Browser long tasks still occur, with a sampled median around 392 ms and max around 1019 ms.
+
+Validation already run for the implemented stages:
+
+```bash
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\n;\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+```
+
+Tricky parts to preserve:
+
+- Do not replace cached-chain contract validation. `/trade/quote_stream/<contract_symbol>` intentionally validates the selected symbol against the cached trade chain when `ticker` is supplied.
+- The selected option stream is a narrow Active Trader fast lane, not a replacement for `/update` or `/trade_chain`. `/trade_chain` remains the source for contract universe, volume/OI context, helper rankings, and order preview/place validation.
+- Live quote overrides must only apply when `msg.contract_symbol === tradeRailState.selectedSymbol`. Avoid stale stream events mutating a newly selected contract.
+- EventSource closes are marked intentional before `close()` so selection/collapse changes do not poison reconnect cooldowns.
+- Stage 2 depends on `_strikeRailLastPayloadByTab`; inactive tabs may temporarily show last-known data until the next `/update` after a tab switch.
+- `show_price: false` must remain after spreading the narrowed visibility payload into `/update`; price history still comes from `/update_price` and underlying SSE.
+- Any trading rail markup change must still be mirrored in `buildTradeRailHtml()`.
+- Any alerts/right-rail markup change must still be mirrored in `buildAlertsPanelHtml()`.
+
+Remaining implementation starts at Stage 3 unless new live-market measurements show a different bottleneck.
 
 ---
 
@@ -36,6 +89,8 @@ This is not an analytics redesign. Do not change GEX, DEX, Vanna, Charm, Flow, e
 These are findings from the read-only audit on 2026-05-05. Treat them as hypotheses until measured in a live or realistic session.
 
 ### F1 - Active Trader ladder is not fed by a fast option quote stream
+
+Status: Addressed by Stage 1 in `7c2ef28`; still needs live-market validation.
 
 Evidence anchors:
 
@@ -66,7 +121,7 @@ Validation:
 
 - Log the selected contract quote time, frontend receive time, and render time.
 - Compare ladder bid/ask age against Schwab quote timestamps from chain snapshots.
-- During market hours, compare chain-based ladder updates against a direct selected-contract quote stream if implemented in a prototype branch.
+- During market hours, compare chain-based ladder updates against the direct selected-contract quote stream.
 
 ### F2 - `/update_price` is heavier than the name implies
 
@@ -101,6 +156,8 @@ Validation:
 - Confirm whether `store_interval_data` in `/update_price` is still needed once `/update` is healthy, or whether it can be gated.
 
 ### F3 - `/update` builds many Plotly payloads every analytics tick
+
+Status: Addressed for Strike Inspect Plotly payloads by Stage 2 in `e79a276`; still needs payload-size and p95 validation.
 
 Evidence anchors:
 
@@ -214,11 +271,11 @@ Validation:
 
 ## 3. Measurement Plan Before Implementing Speedups
 
-Do this first in the new session. Do not optimize blind.
+Stage 0 instrumentation is implemented in `7c2ef28`. Continue to use it before and after each remaining optimization. Do not optimize blind.
 
 ### 3.1 Server timing instrumentation
 
-Add temporary instrumentation behind an env flag such as `GEX_PERF_TRACE=1`. Keep it easy to remove or leave disabled by default.
+Implemented behind `GEX_PERF_TRACE=1`. Keep it disabled by default.
 
 Recommended route-level metrics:
 
@@ -272,7 +329,7 @@ Useful output format:
 
 ### 3.2 Frontend timing instrumentation
 
-Add temporary `performance.mark` / `performance.measure` wrappers behind a local flag such as `localStorage.gexPerfTrace = "1"`.
+Implemented behind the server flag and the local flag `localStorage.gexPerfTrace = "1"`.
 
 Recommended frontend spans:
 
@@ -347,6 +404,8 @@ Implement in small stages. After each stage, rerun the relevant metrics and comp
 
 ### Stage 1 - Active contract option quote fast lane
 
+Status: Implemented in `7c2ef28`; needs live-market validation.
+
 Goal:
 
 Feed the Active Trader ladder from a selected-contract quote stream instead of waiting for the full option-chain cache loop.
@@ -412,6 +471,8 @@ Rollback:
 
 ### Stage 2 - Build only active strike-rail chart payloads
 
+Status: Implemented in `e79a276`; needs live-market before/after payload-size and p95 validation.
+
 Goal:
 
 Stop generating every strike-rail Plotly figure every analytics tick when only one strike-rail tab is visible.
@@ -446,6 +507,8 @@ Rollback:
 
 ### Stage 3 - Share flow pulse and alert intermediate results
 
+Status: Not started.
+
 Goal:
 
 Avoid duplicate flow-pulse scans from the same chain snapshot.
@@ -473,6 +536,8 @@ Rollback:
 - Return to independent function calls if shared context causes stale/mismatched flow alert behavior.
 
 ### Stage 4 - Throttle SQLite interval writes and cleanup
+
+Status: Not started.
 
 Goal:
 
@@ -507,6 +572,8 @@ Rollback:
 
 ### Stage 5 - Reduce Active Trader browser churn
 
+Status: Not started.
+
 Goal:
 
 Keep the ladder visually fresh while avoiding unnecessary DOM and chart-line work.
@@ -539,6 +606,8 @@ Rollback:
 - Re-enable current periodic render if stale UI state appears.
 
 ### Stage 6 - Separate fast and slow analytics cadence
+
+Status: Not started. Do this only after Stage 1 live quote behavior and Stage 2 payload reduction are validated.
 
 Goal:
 
@@ -652,16 +721,13 @@ sed -n '1,220p' docs/ORDER_ENTRY_RAIL_SCALPING_REPAIR_PLAN.md
 sed -n '1,220p' docs/ALERTS_RAIL_PHASE3_PLAN.md
 ```
 
-3. Start with Stage 0 instrumentation and baseline metrics before changing behavior.
+3. Do not redo Stages 0-2 unless validation shows a regression. Start remaining implementation at Stage 3, or collect live-market validation for Stage 1/2 first if the market is open.
 
 4. Implement one stage at a time. Commit each stage separately with timing results in the commit body.
 
 Recommended commit subjects:
 
 ```text
-chore(perf): add scalping baseline instrumentation
-feat(trade): stream selected option quotes to active ladder
-perf(update): build only active strike rail payload
 perf(flow): share pulse snapshot across stats and blotter
 perf(db): throttle interval writes and cleanup
 perf(trade): reduce active ladder render churn
