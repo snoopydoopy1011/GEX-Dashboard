@@ -10,6 +10,7 @@ import math
 import time
 import collections
 import os
+import sys
 import atexit
 import re
 import secrets
@@ -41,15 +42,57 @@ import copy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
-# Load environment variables
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_SUPPORT_DIR_NAME = 'GEX Dashboard'
+
+
+def _is_packaged_app():
+    return bool(getattr(sys, 'frozen', False))
+
+
+def _expand_user_path(path):
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def _default_dashboard_data_dir():
+    if _is_packaged_app():
+        return os.path.join(
+            os.path.expanduser('~'),
+            'Library',
+            'Application Support',
+            APP_SUPPORT_DIR_NAME,
+        )
+    return BASE_DIR
+
+
+def _resolve_dashboard_data_dir():
+    override = os.getenv('GEX_DASHBOARD_DATA_DIR')
+    if override:
+        return _expand_user_path(override)
+    return _expand_user_path(_default_dashboard_data_dir())
+
+
+def _dashboard_dotenv_path():
+    override_dir = os.getenv('GEX_DASHBOARD_DATA_DIR')
+    if override_dir:
+        return os.path.join(_expand_user_path(override_dir), '.env')
+    if _is_packaged_app():
+        return os.path.join(_default_dashboard_data_dir(), '.env')
+    return os.path.join(BASE_DIR, '.env')
+
+
+# Load environment variables before final path resolution so .env can opt into
+# GEX_DASHBOARD_DATA_DIR during dev runs without changing direct browser launch.
+load_dotenv(dotenv_path=_dashboard_dotenv_path())
+
+DATA_DIR = _resolve_dashboard_data_dir()
+DB_PATH = os.path.join(DATA_DIR, 'options_data.db')
+SETTINGS_PATH = os.path.join(DATA_DIR, 'settings.json')
+TRADE_JOURNAL_MEDIA_DIR = os.path.join(DATA_DIR, 'Screenshots', 'trade_journal')
 
 # Initialize Flask app
 app = Flask(__name__)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'options_data.db')
-TRADE_JOURNAL_MEDIA_DIR = os.path.join(BASE_DIR, 'Screenshots', 'trade_journal')
 TRADE_JOURNAL_MEDIA_MAX_BYTES = 8 * 1024 * 1024
 MAX_RETAINED_SESSION_DATES = 2
 _retention_lock = threading.Lock()
@@ -58,9 +101,16 @@ _desktop_window_states = {}
 _desktop_window_state_lock = threading.Lock()
 
 
+def _ensure_dashboard_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    return DATA_DIR
+
+
 def sqlite_connect(db_path=None, timeout=10, retries=2, retry_delay=0.25):
     if db_path is None:
         db_path = DB_PATH
+    if os.path.abspath(db_path) == os.path.abspath(DB_PATH):
+        _ensure_dashboard_data_dir()
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -5440,7 +5490,7 @@ def _record_trade_event_media(event_id, image_bytes, width=0, height=0, source='
         raise ValueError('Screenshot storage path is invalid.')
     with open(file_path, 'xb') as handle:
         handle.write(image_bytes)
-    relative_path = os.path.relpath(file_path, BASE_DIR)
+    relative_path = os.path.relpath(file_path, DATA_DIR)
     safe_metadata = _redact_trade_payload(copy.deepcopy(metadata if isinstance(metadata, dict) else {}))
     with closing(sqlite_connect()) as conn:
         with closing(conn.cursor()) as cursor:
@@ -42740,7 +42790,8 @@ def update_price():
 def save_settings():
     try:
         settings = request.get_json()
-        with open('settings.json', 'w') as f:
+        _ensure_dashboard_data_dir()
+        with open(SETTINGS_PATH, 'w') as f:
             json.dump(settings, f, indent=2)
         return jsonify({'success': True})
     except Exception as e:
@@ -42749,8 +42800,8 @@ def save_settings():
 @app.route('/load_settings')
 def load_settings():
     try:
-        if os.path.exists('settings.json'):
-            with open('settings.json', 'r') as f:
+        if os.path.exists(SETTINGS_PATH):
+            with open(SETTINGS_PATH, 'r') as f:
                 settings = json.load(f)
             return jsonify(settings)
         else:
@@ -42800,7 +42851,10 @@ def price_stream(ticker):
 
 def _get_token_db_path():
     """Return the path to the TokenManager SQLite database."""
-    return os.path.expanduser(os.getenv('SCHWAB_TOKENS_DB', '~/.schwabdev/tokens.db'))
+    override = os.getenv('SCHWAB_TOKENS_DB')
+    if override:
+        return _expand_user_path(override)
+    return os.path.expanduser('~/.schwabdev/tokens.db')
 
 
 def _read_token_db(db_path):

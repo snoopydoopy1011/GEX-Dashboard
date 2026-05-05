@@ -311,7 +311,7 @@ if QT_IMPORT_ERROR is None:
                 self.windows.remove(window)
             if not self.windows and not self._quitting:
                 self.shutdown()
-                QTimer.singleShot(0, self.qt_app.quit)
+                QTimer.singleShot(0, lambda: self.qt_app.exit(0))
 
         def quit(self) -> None:
             if self._quitting:
@@ -320,7 +320,7 @@ if QT_IMPORT_ERROR is None:
             for window in list(self.windows):
                 window.close()
             self.shutdown()
-            QTimer.singleShot(0, self.qt_app.quit)
+            QTimer.singleShot(0, lambda: self.qt_app.exit(0))
 
         def shutdown(self) -> None:
             if self._server_stopped:
@@ -439,4 +439,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    if getattr(sys, "frozen", False):
+        os._exit(exit_code)
+    raise SystemExit(exit_code)

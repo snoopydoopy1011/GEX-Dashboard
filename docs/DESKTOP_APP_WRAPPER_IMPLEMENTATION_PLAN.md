@@ -1,7 +1,7 @@
 # Desktop App Wrapper Implementation Plan
 
 **Created:** 2026-05-04
-**Status:** Phase 3 handoff complete; next phase is Phase 4 Packaging
+**Status:** Phase 4 packaging handoff complete; desktop wrapper phases implemented
 **Recommended first prototype:** pywebview launcher
 **Likely long-term wrapper:** PySide6 + `QWebEngineView`
 **Current app target:** `ezoptionsschwab.py` stays the dashboard runtime
@@ -588,6 +588,43 @@ Exit criteria:
 - Existing data is not lost.
 - Tokens remain readable.
 - Journal screenshots still save and open.
+
+### Phase 4 Handoff - 2026-05-05
+
+Accomplished:
+
+- Added a narrow path policy in `ezoptionsschwab.py`:
+  - Direct dev runs still use repo-local `.env`, `options_data.db`, `settings.json`, and `Screenshots/trade_journal`.
+  - Packaged/frozen runs use `~/Library/Application Support/GEX Dashboard/`.
+  - `GEX_DASHBOARD_DATA_DIR` overrides dashboard data in both modes.
+  - `SCHWAB_TOKENS_DB` still overrides Schwab token DB location; default remains `~/.schwabdev/tokens.db`.
+  - Existing repo-local user data is not moved automatically.
+- Added optional packaging dependency handling via `requirements-packaging.txt`; normal browser `requirements.txt` remains unchanged.
+- Added `packaging/gex_dashboard_macos.spec` for PyInstaller `--onedir --windowed` packaging of the PySide6 shell.
+- The spec explicitly collects PySide6 Qt WebEngine resources, translations, and key plugins needed by `QWebEngineView`.
+- Added `packaging/README.md` with build commands, data-location policy, and the exact broader PyInstaller fallback (`--collect-all PySide6`) if a future Qt WebEngine build misses resources.
+- Added `build/` and `dist/` to `.gitignore`.
+- Tightened packaged PySide6 shutdown by forcing the frozen process to exit after the normal controller cleanup path returns. This avoids leaving a packaged shell process resident after its windows and owned Flask server are already stopped.
+- Built `dist/GEX Dashboard.app` with PyInstaller 6.20.0 on macOS using the spec.
+
+Verification passed:
+
+- `python3 -m py_compile ezoptionsschwab.py`
+- `python3 -m py_compile desktop_launcher.py`
+- `python3 -m py_compile desktop_app.py`
+- `git diff --check`
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview`
+- Normal Flask/browser smoke on `http://127.0.0.1:5021/` returned HTTP 200 for `/` and `/token_health`, then the smoke server was stopped.
+- pywebview wrapper smoke on `http://127.0.0.1:5022/` loaded `/?desktop=1`, `/load_settings`, `/trade/journal`, `/token_health`, and `/expirations/SPY`, then auto-closed and left no listener.
+- PySide6 shell smoke on `http://127.0.0.1:5024/` loaded `/?desktop=1`, opened `/desktop/window/price` through `/desktop/window_state`, fetched child state, attempted `/update_price`, then auto-closed and left no listener.
+- Packaged app command-line smoke on `http://127.0.0.1:5025/` loaded `/?desktop=1`, opened the route-backed price window, fetched child state, attempted `/update_price`, exited cleanly, and left no listener.
+
+Tricky parts / findings:
+
+- Direct normal launch with the repo `.env` prompted for Schwab OAuth because the local refresh token was expired. Smoke runs used temporary `GEX_DASHBOARD_DATA_DIR` values to avoid touching live credentials or moving user data.
+- Temp-data smoke runs intentionally had no Schwab app credentials, so `/expirations/SPY` returned 400 and `/update_price` returned 500 after proving the route-backed window path. That is expected for no-client smoke.
+- PyInstaller built the app bundle but macOS ad-hoc signing reported `resource fork, Finder information, or similar detritus not allowed` due local protected provenance attributes. The bundle still launched from the command line for smoke testing. Distribution still needs a clean manual signing/notarization pass outside this local build-artifact caveat.
+- `ezoptionsschwab.py` still emits the pre-existing compile-time `SyntaxWarning` for an invalid escape sequence inside the large dashboard template; compilation succeeds.
 
 ## 7. Schwab OAuth / Token Handling
 
