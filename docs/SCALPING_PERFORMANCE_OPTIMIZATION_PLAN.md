@@ -39,6 +39,8 @@ Completed on `codex/scalping-performance-plan`:
   - Added a short-lived, content-keyed flow pulse snapshot cache so copied DataFrames from the same chain snapshot can reuse one `build_flow_pulse_snapshot` scan.
   - `compute_trader_stats`, the 0DTE stats bundle, and `create_large_trades_table` now accept shared pulse snapshots while preserving their output shapes.
   - Alert cooldown checks still run inside `compute_trader_stats` for each scope; the shared snapshot only replaces duplicate pulse construction.
+- `9a97c0d docs(perf): update scalping stage 3 progress`
+  - Recorded the Stage 3 implementation details, live validation notes, and Stage 4 starting point.
 
 Baseline findings collected before Stage 2:
 
@@ -74,6 +76,10 @@ Tricky parts to preserve:
 - Stage 2 depends on `_strikeRailLastPayloadByTab`; inactive tabs may temporarily show last-known data until the next `/update` after a tab switch.
 - `show_price: false` must remain after spreading the narrowed visibility payload into `/update`; price history still comes from `/update_price` and underlying SSE.
 - Stage 3's pulse cache is intentionally short-lived and keyed by chain content signatures rather than DataFrame identity so `/update` and `/update_price` can share copied snapshots without reusing stale flow.
+- Stage 3 stores up to 4,000 pulse rows in the shared snapshot because `build_flow_pulse_snapshot` already scans and sorts the full in-range chain; stats consumers slice to their top 5 and the flow blotter can still enrich up to 4,000 rows.
+- Stage 3 filters the shared pulse snapshot by `expiry_iso` before passing it to the 0DTE stats bundle; do not pass the unfiltered full-scope pulse into the nearest-expiry stats path.
+- Stage 3 must not move `_alert_cooldown_ok` out of `compute_trader_stats`; full-scope alerts and 0DTE alerts use different `scope_id` values and need independent cooldown decisions.
+- The shared pulse cache TTL is intentionally below the 8-second in-process history append threshold in `build_flow_pulse_snapshot`, so unchanged chain snapshots can still age into the history on later ticks.
 - Any trading rail markup change must still be mirrored in `buildTradeRailHtml()`.
 - Any alerts/right-rail markup change must still be mirrored in `buildAlertsPanelHtml()`.
 
