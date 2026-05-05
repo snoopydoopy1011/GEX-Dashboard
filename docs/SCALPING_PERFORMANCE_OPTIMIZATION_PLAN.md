@@ -1,6 +1,6 @@
 # GEX Dashboard - Scalping Performance Optimization Plan
 
-**Status:** Implementation in progress - Stages 0, 1, 2, 3, 4, and 5 complete on `codex/scalping-performance-plan`
+**Status:** Implementation complete through Stage 6 on `codex/scalping-performance-plan`; market-hours p95 follow-up still pending
 **Created:** 2026-05-05  
 **Last updated:** 2026-05-05
 **Primary file:** `ezoptionsschwab.py`  
@@ -45,10 +45,18 @@ Completed on `codex/scalping-performance-plan`:
   - Added in-process guards so `store_interval_data` skips duplicate writes for the same ticker/date/minute/strike-range/expiry-scope bucket unless forced.
   - Added a similar 5-minute guard for `store_centroid_data`.
   - Moved active-path `clear_old_data` calls behind an hourly in-process retention guard while preserving forced startup and end-of-day pruning.
+- `e623a88 docs(perf): update scalping stage 4 progress`
+  - Recorded Stage 4 validation and DB guard preservation notes.
 - `b423a67 perf(trade): reduce active ladder render churn`
   - Added Active Trader periodic render signatures so the 1-second tick skips when selected-contract live quote, preview TTL, account/order, and local intent state are unchanged.
   - Added scalp-target render and price-line signatures. Existing Lightweight Charts scalp target lines are now skipped or updated in place instead of being removed and recreated on every render.
   - Kept selected option quote stream updates requestAnimationFrame-batched and merged partial Schwab quote messages into the prior live selected quote so null partial fields do not flicker the ladder back to stale cached-chain values.
+- `5a5f147 docs(perf): update scalping stage 5 progress`
+  - Recorded Stage 5 browser smoke validation and remaining Stage 6 handoff.
+- `956c770 perf(update): separate fast quote and analytics cadence`
+  - Slowed the heavy `/update` analytics loop to 2.5 seconds in browser and 4 seconds in desktop while leaving selected option quote SSE, underlying price SSE, the 1-second Active Trader stale-check tick, account/order polling, and all order safety gates untouched.
+  - Added an independent open-rail trade-chain refresh timer so `/trade_chain` can keep its existing 2.5-second browser and 5-second desktop cadence instead of only refreshing after the slower `/update` loop.
+  - Promoted the `/update_price` 30-second historical snapshot throttle into `PRICE_HISTORY_REFRESH_MS` for explicit fast/slow cadence separation.
 
 Baseline findings collected before Stage 2:
 
@@ -72,6 +80,18 @@ Live validation collected before Stage 5 on 2026-05-05, with `GEX_PERF_TRACE=1`,
 - `/trade_chain`: n=10, median 5.7 ms, p95 6.5 ms, 58 contracts, 33.7 KB response.
 - Stage 4 DB guard timing showed the expected duplicate-write reduction: after the first `/update` sample, `store_interval_data_ms` was generally about 3.8-9.9 ms and `store_centroid_data_ms` about 0.3-2.2 ms; `/update_price` interval writes were about 2.7-5.5 ms.
 - Selected option quote streams were live for `SPY   260505C00724000` and `SPY   260505P00724000`. Both produced quote events without using preview/place endpoints.
+
+Stage 6 validation on 2026-05-05:
+
+- Required local validation passed after the code change:
+  - `python3 -m py_compile ezoptionsschwab.py`
+  - `git diff --check`
+  - `python3 -m unittest tests.test_session_levels tests.test_trade_preview`
+  - inline JS extraction from `app.test_client().get('/')`
+  - `node --check /tmp/gex-inline-scripts.js`
+- A traced local server started on `http://127.0.0.1:5017/`, and `/token_health` reported a valid access token and API OK.
+- Regular market hours had just ended at validation time, so no fresh live p95 sample, quote-stream ladder timing sample, browser long-task sample, preview, or live order test was collected.
+- No preview/place/live order endpoint was used.
 
 Validation already run for the implemented stages:
 
@@ -103,10 +123,12 @@ Tricky parts to preserve:
 - Schwab selected-option stream events can be partial. Preserve the live quote merge behavior so null fields in a later event do not erase the prior live bid/ask/last/mark.
 - Scalp target lines have two signatures: a context signature for selected symbol, basis, target profit, visibility, and quantity; and a full line signature that includes target line outputs. When only target prices move inside the same context, update existing price lines in place rather than recreating them.
 - The 1-second Active Trader interval should go through `renderTradeActiveTraderIfStale()`. Direct user actions and stream events can still call or schedule the full render immediately.
+- `DASHBOARD_UPDATE_INTERVAL_MS` now names the slower heavy analytics cadence: 2.5 seconds in browser, 4 seconds in desktop. Do not use it for selected option quotes, underlying price streaming, Active Trader periodic stale checks, account/order polling, or order safety validation.
+- `startTradeChainAutoRefresh()` keeps `/trade_chain` on the existing trade-chain cadence when the trading rail is open and Auto-Update is running. Keep it stopped when streaming is paused or the page unloads.
 - Any trading rail markup change must still be mirrored in `buildTradeRailHtml()`.
 - Any alerts/right-rail markup change must still be mirrored in `buildAlertsPanelHtml()`.
 
-Remaining implementation starts at Stage 6 only after the user accepts the Stage 1/2/5 live behavior and wants to slow the heavier analytics cadence.
+Remaining work is market-hours validation of the Stage 6 cadence: short p95 `/update`, `/update_price`, `/trade_chain`, selected option quote stream, and browser long-task samples with Active Trader open. No further implementation stage is started yet.
 
 ---
 
@@ -131,7 +153,7 @@ These are findings from the read-only audit on 2026-05-05. Treat them as hypothe
 
 ### F1 - Active Trader ladder is not fed by a fast option quote stream
 
-Status: Addressed by Stage 1 in `7c2ef28`; still needs live-market validation.
+Status: Addressed by Stage 1 in `7c2ef28`; SPY call/put live smoke validated before Stage 6. Broader market-hours p95 validation still pending.
 
 Evidence anchors:
 
@@ -149,9 +171,10 @@ Current behavior:
 - `/trade_chain` builds from `_options_cache`.
 - `_options_cache` is refreshed by the full `/update` option-chain path.
 - The frontend forces `/trade_chain` only every `TRADE_CHAIN_AUTO_REFRESH_MS`.
-- Current intervals are:
-  - browser shell: dashboard update 1000 ms, trade chain 2500 ms
-  - desktop shell: dashboard update 2000 ms, trade chain 5000 ms
+- Current Stage 6 intervals are:
+  - browser shell: heavy analytics update 2500 ms, trade chain 2500 ms, selected option quote via SSE
+  - desktop shell: heavy analytics update 4000 ms, trade chain 5000 ms, selected option quote via SSE
+  - Active Trader stale-check render tick remains 1000 ms and is signature-gated.
 
 Expected impact:
 
@@ -671,36 +694,38 @@ Rollback:
 
 ### Stage 6 - Separate fast and slow analytics cadence
 
-Status: Not started. Do this only after Stage 1 live quote behavior and Stage 2 payload reduction are validated.
+Status: Implemented in `956c770`; market-hours p95/browser validation still pending.
 
 Goal:
 
 Make the scalping-critical path fast while allowing heavier analytics to refresh at a less aggressive cadence.
 
-Plan:
+Implementation:
 
-- Keep selected option quote stream as fastest path.
-- Keep underlying price SSE as current fast path for candles/last price.
-- Consider changing full `/update` cadence after Stage 1:
-  - browser: from 1000 ms to 2000-3000 ms
-  - desktop: from 2000 ms to 3000-5000 ms
-- Keep flow/alerts cadence acceptable for the user. Do not slow alerts until measured.
-- Consider a user-facing "Scalp Mode" only after measuring. It could prioritize:
-  - active option stream
-  - price chart
-  - Active Trader
-  - nearest levels
-  - compact flow alerts
-  - deferred secondary Plotly payloads
+- Slowed the heavy `/update` analytics cadence:
+  - browser shell: 1000 ms to 2500 ms
+  - desktop shell: 2000 ms to 4000 ms
+- Kept selected option quote stream as the fastest Active Trader path.
+- Kept underlying price SSE as the fast candle/last-price path.
+- Left the 1-second Active Trader periodic stale-check tick intact.
+- Left account/order polling, preview-token binding, cached-contract validation, `ENABLE_LIVE_TRADING=1`, and `SELL_TO_CLOSE` caps untouched.
+- Added a separate open-rail trade-chain timer so the trading picker keeps the existing `/trade_chain` cadence:
+  - browser shell: 2500 ms
+  - desktop shell: 5000 ms
+- Kept `/update_price` historical snapshot refresh at 30000 ms and named that throttle `PRICE_HISTORY_REFRESH_MS`.
+- No formulas, chart math, flow math, expected-move logic, key-level logic, or order-entry safety logic changed.
 
 Validation:
 
-- Compare information freshness:
-  - active option quote: streaming
-  - underlying last price: streaming
-  - analytics stats: slower but stable
-  - flow alerts: still timely enough
-- Confirm user does not lose critical context for 0DTE scalps.
+- Required local validation passed:
+  - `python3 -m py_compile ezoptionsschwab.py`
+  - `git diff --check`
+  - `python3 -m unittest tests.test_session_levels tests.test_trade_preview`
+  - inline JS extraction from `app.test_client().get('/')`
+  - `node --check /tmp/gex-inline-scripts.js`
+- Traced local server started on port 5017 and `/token_health` returned a valid access token/API OK.
+- Market was closed during Stage 6 validation, so live p95 `/update`, `/update_price`, `/trade_chain`, selected quote stream, Active Trader browser console, and long-task comparisons still need the next market-hours session.
+- No preview/place/live order endpoint was used.
 
 Expected win:
 
@@ -709,6 +734,7 @@ Expected win:
 Rollback:
 
 - Restore previous intervals if alerts or analytics feel stale.
+- Remove the separate trade-chain timer if it causes unexpected duplicated picker refreshes, though requests remain min-interval guarded.
 
 ---
 
@@ -785,7 +811,7 @@ sed -n '1,220p' docs/ORDER_ENTRY_RAIL_SCALPING_REPAIR_PLAN.md
 sed -n '1,220p' docs/ALERTS_RAIL_PHASE3_PLAN.md
 ```
 
-3. Do not redo Stages 0-5 unless validation shows a regression. Start remaining implementation at Stage 6 only after confirming the user wants the heavier analytics cadence slowed.
+3. Do not redo Stages 0-6 unless validation shows a regression. The next useful work is market-hours p95/browser validation of the Stage 6 cadence with Active Trader open.
 
 4. Implement one stage at a time. Commit each stage separately with timing results in the commit body.
 
