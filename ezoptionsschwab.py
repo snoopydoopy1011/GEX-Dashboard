@@ -97,6 +97,11 @@ app = Flask(__name__)
 TRADE_JOURNAL_MEDIA_MAX_BYTES = 8 * 1024 * 1024
 MAX_RETAINED_SESSION_DATES = 2
 _retention_lock = threading.Lock()
+_retention_last_guard_key = None
+_db_write_guard_lock = threading.Lock()
+_interval_write_guard = {}
+_centroid_write_guard = {}
+_DB_WRITE_GUARD_MAX_ENTRIES = 512
 _DESKTOP_WINDOW_STATE_TTL_SECONDS = 6 * 60 * 60
 _desktop_window_states = {}
 _desktop_window_state_lock = threading.Lock()
@@ -122,6 +127,48 @@ def sqlite_connect(db_path=None, timeout=10, retries=2, retry_delay=0.25):
                 raise
             time.sleep(retry_delay * (attempt + 1))
     raise last_error
+
+
+def _write_guard_scope_signature(strike_range=None, *frames):
+    expiries = set()
+    for frame in frames:
+        if frame is None or not hasattr(frame, 'columns') or 'expiration_date' not in frame.columns:
+            continue
+        try:
+            values = pd.unique(frame['expiration_date'].dropna())
+        except Exception:
+            values = []
+        for value in values:
+            expiries.add(str(value))
+    rounded_range = None
+    if strike_range is not None:
+        try:
+            rounded_range = round(float(strike_range), 6)
+        except Exception:
+            rounded_range = str(strike_range)
+    return (rounded_range, tuple(sorted(expiries)))
+
+
+def _prune_write_guard_locked(guard):
+    if len(guard) <= _DB_WRITE_GUARD_MAX_ENTRIES:
+        return
+    for key in list(guard.keys())[:len(guard) - _DB_WRITE_GUARD_MAX_ENTRIES]:
+        guard.pop(key, None)
+
+
+def _reserve_db_write(guard, bucket_key, signature, force=False):
+    with _db_write_guard_lock:
+        if not force and guard.get(bucket_key) == signature:
+            return False
+        guard[bucket_key] = signature
+        _prune_write_guard_locked(guard)
+        return True
+
+
+def _rollback_db_write_reservation(guard, bucket_key, signature):
+    with _db_write_guard_lock:
+        if guard.get(bucket_key) == signature:
+            guard.pop(bucket_key, None)
 
 
 def _env_flag_enabled(name):
@@ -651,7 +698,7 @@ def get_stored_open_expected_move_snapshot(
     }
 
 # Function to store centroid data
-def store_centroid_data(ticker, price, calls, puts):
+def store_centroid_data(ticker, price, calls, puts, force=False):
     """Store call and put centroid data for 5-minute intervals during market hours only"""
     # Get current time in Eastern Time
     est = pytz.timezone('US/Eastern')
@@ -669,22 +716,10 @@ def store_centroid_data(ticker, price, calls, puts):
     
     current_time = int(current_time_est.timestamp())
     current_date = current_time_est.strftime('%Y-%m-%d')
-
-    # Keep the DB bounded to the two most recent session dates.
-    clear_old_data()
     
     # Round to nearest 5-minute interval (300 seconds)
     interval_timestamp = (current_time // 300) * 300
-    
-    # Delete existing data for this 5-minute interval to update with most recent data
-    with closing(sqlite_connect()) as conn:
-        with closing(conn.cursor()) as cursor:
-            cursor.execute('''
-                DELETE FROM centroid_data 
-                WHERE ticker = ? AND timestamp = ? AND date = ?
-            ''', (ticker, interval_timestamp, current_date))
-            conn.commit()
-    
+
     # Calculate centroids (volume-weighted average strike prices)
     call_centroid = 0
     put_centroid = 0
@@ -711,13 +746,29 @@ def store_centroid_data(ticker, price, calls, puts):
     
     # Only store if we have volume data
     if call_volume > 0 or put_volume > 0:
-        with closing(sqlite_connect()) as conn:
-            with closing(conn.cursor()) as cursor:
-                cursor.execute('''
-                    INSERT INTO centroid_data (ticker, timestamp, price, call_centroid, put_centroid, call_volume, put_volume, date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (ticker, interval_timestamp, price, call_centroid, put_centroid, call_volume, put_volume, current_date))
-                conn.commit()
+        bucket_key = (str(ticker or '').upper(), current_date, interval_timestamp)
+        signature = _write_guard_scope_signature(None, calls, puts)
+        if not _reserve_db_write(_centroid_write_guard, bucket_key, signature, force=force):
+            return
+        try:
+            # Keep the DB bounded to the two most recent session dates.
+            clear_old_data()
+
+            # Delete existing data for this 5-minute interval to update with most recent data
+            with closing(sqlite_connect()) as conn:
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute('''
+                        DELETE FROM centroid_data
+                        WHERE ticker = ? AND timestamp = ? AND date = ?
+                    ''', (ticker, interval_timestamp, current_date))
+                    cursor.execute('''
+                        INSERT INTO centroid_data (ticker, timestamp, price, call_centroid, put_centroid, call_volume, put_volume, date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (ticker, interval_timestamp, price, call_centroid, put_centroid, call_volume, put_volume, current_date))
+                    conn.commit()
+        except Exception:
+            _rollback_db_write_reservation(_centroid_write_guard, bucket_key, signature)
+            raise
 
 # Function to get centroid data
 def get_centroid_data(ticker, date=None):
@@ -860,33 +911,17 @@ def build_centroid_panel_payload(ticker, limit=24):
     }
 
 # Function to store interval data
-def store_interval_data(ticker, price, strike_range, calls, puts):
+def store_interval_data(ticker, price, strike_range, calls, puts, force=False):
     if not is_market_hours():
         return
     est = pytz.timezone('US/Eastern')
     current_time_est = datetime.now(est)
     current_time = int(current_time_est.timestamp())
     current_date = current_time_est.strftime('%Y-%m-%d')
-
-    # Keep the DB bounded to the two most recent session dates.
-    clear_old_data()
     
     # Store interval overlays at 1-minute resolution so they can be aggregated
     # to whatever candle timeframe the chart is using.
     interval_timestamp = (current_time // 60) * 60
-    
-    # Delete existing data for this 1-minute interval to update with most recent data
-    with closing(sqlite_connect()) as conn:
-        with closing(conn.cursor()) as cursor:
-            cursor.execute('''
-                DELETE FROM interval_data 
-                WHERE ticker = ? AND timestamp = ? AND date = ?
-            ''', (ticker, interval_timestamp, current_date))
-            cursor.execute('''
-                DELETE FROM interval_session_data
-                WHERE ticker = ? AND timestamp = ? AND date = ?
-            ''', (ticker, interval_timestamp, current_date))
-            conn.commit()
     
     # Calculate strike range boundaries
     min_strike = price * (1 - strike_range)
@@ -969,54 +1004,77 @@ def store_interval_data(ticker, price, strike_range, calls, puts):
         exposure_by_strike[strike] = cur
 
     expected_move_snapshot = calculate_expected_move_snapshot(calls, puts, price)
+
+    bucket_key = (str(ticker or '').upper(), current_date, interval_timestamp)
+    signature = _write_guard_scope_signature(strike_range, calls, puts)
+    if not _reserve_db_write(_interval_write_guard, bucket_key, signature, force=force):
+        return
     
     # Store data for each strike
-    with closing(sqlite_connect()) as conn:
-        with closing(conn.cursor()) as cursor:
-            for strike, exposure in exposure_by_strike.items():
-                abs_gex_total = abs(exposure.get('call_gamma',0)) + abs(exposure.get('put_gamma',0))
-                cursor.execute('''
-                    INSERT INTO interval_data (
-                        ticker, timestamp, price, strike, net_gamma, net_delta, net_vanna,
-                        net_charm, net_volume, call_volume, put_volume, net_speed, net_vomma,
-                        net_color, abs_gex_total, date
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    ticker,
-                    interval_timestamp,
-                    price,
-                    strike,
-                    exposure['gamma'],
-                    exposure['delta'],
-                    exposure['vanna'],
-                    exposure['charm'],
-                    exposure['volume'],
-                    exposure.get('call_volume', 0),
-                    exposure.get('put_volume', 0),
-                    exposure['speed'],
-                    exposure['vomma'],
-                    exposure['color'],
-                    abs_gex_total,
-                    current_date,
-                ))
+    try:
+        # Keep the DB bounded to the two most recent session dates.
+        clear_old_data()
 
-            if expected_move_snapshot:
+        with closing(sqlite_connect()) as conn:
+            with closing(conn.cursor()) as cursor:
+                # Replace the physical ticker/minute bucket with the latest
+                # selected scope that was allowed through the write guard.
                 cursor.execute('''
-                    INSERT INTO interval_session_data (
-                        ticker, timestamp, price, expected_move, expected_move_upper, expected_move_lower, date
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    ticker,
-                    interval_timestamp,
-                    price,
-                    expected_move_snapshot['move'],
-                    expected_move_snapshot['upper'],
-                    expected_move_snapshot['lower'],
-                    current_date,
-                ))
-            conn.commit()
+                    DELETE FROM interval_data
+                    WHERE ticker = ? AND timestamp = ? AND date = ?
+                ''', (ticker, interval_timestamp, current_date))
+                cursor.execute('''
+                    DELETE FROM interval_session_data
+                    WHERE ticker = ? AND timestamp = ? AND date = ?
+                ''', (ticker, interval_timestamp, current_date))
+
+                for strike, exposure in exposure_by_strike.items():
+                    abs_gex_total = abs(exposure.get('call_gamma',0)) + abs(exposure.get('put_gamma',0))
+                    cursor.execute('''
+                        INSERT INTO interval_data (
+                            ticker, timestamp, price, strike, net_gamma, net_delta, net_vanna,
+                            net_charm, net_volume, call_volume, put_volume, net_speed, net_vomma,
+                            net_color, abs_gex_total, date
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        ticker,
+                        interval_timestamp,
+                        price,
+                        strike,
+                        exposure['gamma'],
+                        exposure['delta'],
+                        exposure['vanna'],
+                        exposure['charm'],
+                        exposure['volume'],
+                        exposure.get('call_volume', 0),
+                        exposure.get('put_volume', 0),
+                        exposure['speed'],
+                        exposure['vomma'],
+                        exposure['color'],
+                        abs_gex_total,
+                        current_date,
+                    ))
+
+                if expected_move_snapshot:
+                    cursor.execute('''
+                        INSERT INTO interval_session_data (
+                            ticker, timestamp, price, expected_move, expected_move_upper, expected_move_lower, date
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        ticker,
+                        interval_timestamp,
+                        price,
+                        expected_move_snapshot['move'],
+                        expected_move_snapshot['upper'],
+                        expected_move_snapshot['lower'],
+                        current_date,
+                    ))
+                conn.commit()
+    except Exception:
+        _rollback_db_write_reservation(_interval_write_guard, bucket_key, signature)
+        raise
 
 # Function to get interval data
 def get_interval_data(ticker, date=None):
@@ -1078,12 +1136,18 @@ def get_last_session_date(ticker, table='interval_data'):
             return row[0] if row and row[0] else None
 
 # Function to clear old data
-def clear_old_data():
+def clear_old_data(force=False):
     """Keep only the most recent session dates in each SQLite history table."""
+    global _retention_last_guard_key
     tables = ('interval_data', 'centroid_data', 'interval_session_data')
     deleted_rows = {}
+    now_est = datetime.now(pytz.timezone('US/Eastern'))
+    guard_key = (now_est.strftime('%Y-%m-%d'), now_est.hour)
 
     with _retention_lock:
+        if not force and _retention_last_guard_key == guard_key:
+            return False
+
         with closing(sqlite_connect()) as conn:
             with closing(conn.cursor()) as cursor:
                 for table_name in tables:
@@ -1106,12 +1170,14 @@ def clear_old_data():
                     deleted_rows[table_name] = cursor.rowcount
 
                 conn.commit()
+        _retention_last_guard_key = guard_key
 
     if deleted_rows:
         print(
             'Pruned database history to the latest '
             f'{MAX_RETAINED_SESSION_DATES} session dates: {deleted_rows}'
         )
+    return True
 
 # Function to clear centroid data for new session
 def clear_centroid_session_data(ticker):
@@ -1132,7 +1198,7 @@ def clear_centroid_session_data(ticker):
 init_db()
 
 # Prune retained history on startup as well as on active writes.
-clear_old_data()
+clear_old_data(force=True)
 
 # Clear old data at the start of the day
 est = pytz.timezone('US/Eastern')
@@ -43040,7 +43106,7 @@ def update():
         # Clear centroid data at the end of the day
         current_time = datetime.now()
         if current_time.hour == 23 and current_time.minute == 59:
-            clear_old_data()
+            clear_old_data(force=True)
         
         # Get timeframe from request
         timeframe = int(data.get('timeframe', 1))
