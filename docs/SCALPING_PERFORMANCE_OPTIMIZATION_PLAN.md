@@ -1,6 +1,6 @@
 # GEX Dashboard - Scalping Performance Optimization Plan
 
-**Status:** Implementation in progress - Stages 0, 1, and 2 complete on `codex/scalping-performance-plan`
+**Status:** Implementation in progress - Stages 0, 1, 2, and 3 complete on `codex/scalping-performance-plan`
 **Created:** 2026-05-05  
 **Last updated:** 2026-05-05
 **Primary file:** `ezoptionsschwab.py`  
@@ -35,6 +35,10 @@ Completed on `codex/scalping-performance-plan`:
   - Utility chart visibility remains separate from strike-rail tab visibility.
   - Inactive Strike Inspect tabs keep using cached prior payloads and load fresh payloads on the next `/update` after tab selection.
   - Server perf traces now include `active_strike_rail_tab`.
+- `7556926 perf(flow): share pulse snapshot across stats and blotter`
+  - Added a short-lived, content-keyed flow pulse snapshot cache so copied DataFrames from the same chain snapshot can reuse one `build_flow_pulse_snapshot` scan.
+  - `compute_trader_stats`, the 0DTE stats bundle, and `create_large_trades_table` now accept shared pulse snapshots while preserving their output shapes.
+  - Alert cooldown checks still run inside `compute_trader_stats` for each scope; the shared snapshot only replaces duplicate pulse construction.
 
 Baseline findings collected before Stage 2:
 
@@ -43,6 +47,13 @@ Baseline findings collected before Stage 2:
 - `/update` is mostly about 1.0-1.8 s, with spikes from Schwab chain/quote latency.
 - Active Trader render median is about 1.5 ms; ladder HTML is about 0.2 ms, so ladder rendering itself is not the main bottleneck.
 - Browser long tasks still occur, with a sampled median around 392 ms and max around 1019 ms.
+
+Live validation collected before Stage 3:
+
+- `/update` with `active_strike_rail_tab=gex` and only `show_gamma=true` returned 150,767 bytes in 3.237 s and only ran `chart_gamma` among Strike Inspect chart builders.
+- `/trade_chain` cached SPY 0DTE path returned 58 contracts in 9.7 ms.
+- `/trade/quote_stream/SPY%20%20%20260505C00724000?ticker=SPY` returned 22 selected-contract quote events in 25 s with 144 ms median quote-time-to-receive latency.
+- A second live `/update` attempt hit Schwab `401 Unauthorized` after token expiry, so broader p95 sampling still needs a fresh token session.
 
 Validation already run for the implemented stages:
 
@@ -62,10 +73,11 @@ Tricky parts to preserve:
 - EventSource closes are marked intentional before `close()` so selection/collapse changes do not poison reconnect cooldowns.
 - Stage 2 depends on `_strikeRailLastPayloadByTab`; inactive tabs may temporarily show last-known data until the next `/update` after a tab switch.
 - `show_price: false` must remain after spreading the narrowed visibility payload into `/update`; price history still comes from `/update_price` and underlying SSE.
+- Stage 3's pulse cache is intentionally short-lived and keyed by chain content signatures rather than DataFrame identity so `/update` and `/update_price` can share copied snapshots without reusing stale flow.
 - Any trading rail markup change must still be mirrored in `buildTradeRailHtml()`.
 - Any alerts/right-rail markup change must still be mirrored in `buildAlertsPanelHtml()`.
 
-Remaining implementation starts at Stage 3 unless new live-market measurements show a different bottleneck.
+Remaining implementation starts at Stage 4 unless new live-market measurements show a different bottleneck.
 
 ---
 
@@ -157,7 +169,7 @@ Validation:
 
 ### F3 - `/update` builds many Plotly payloads every analytics tick
 
-Status: Addressed for Strike Inspect Plotly payloads by Stage 2 in `e79a276`; still needs payload-size and p95 validation.
+Status: Addressed for Strike Inspect Plotly payloads by Stage 2 in `e79a276`; live gamma-tab smoke validated before Stage 3, but broader payload-size and p95 sampling still needs a fresh token session.
 
 Evidence anchors:
 
@@ -190,17 +202,25 @@ Validation:
 
 ### F4 - Flow pulse work appears duplicated
 
+Status: Addressed by Stage 3 in `7556926`.
+
 Evidence anchors:
 
 - `build_flow_pulse_snapshot`
 - `compute_trader_stats`
 - `create_large_trades_table`
 
-Current behavior:
+Previous behavior:
 
 - `compute_trader_stats` builds `flow_pulse`.
 - `create_large_trades_table` separately calls `build_flow_pulse_snapshot(... top_n=4000)` to enrich the flow blotter.
-- Both run from the same chain snapshot during `/update`.
+- Both can run from the same chain snapshot across `/update` and `/update_price`.
+
+Current behavior:
+
+- A short-lived shared pulse snapshot cache keys by ticker, session date, spot, strike range, and chain content signatures.
+- `/update`, `/update_price`, `compute_trader_stats`, the 0DTE stats bundle, and `create_large_trades_table` can reuse the same-chain pulse rows.
+- Flow alerts and pulse alerts still run through the existing per-scope cooldown checks.
 
 Expected impact:
 
@@ -507,7 +527,7 @@ Rollback:
 
 ### Stage 3 - Share flow pulse and alert intermediate results
 
-Status: Not started.
+Status: Implemented in `7556926`.
 
 Goal:
 
@@ -515,17 +535,21 @@ Avoid duplicate flow-pulse scans from the same chain snapshot.
 
 Backend plan:
 
-- Build a per-request context object or local variable in `/update`.
-- Compute flow pulse once per ticker/scope/snapshot.
-- Pass the pulse snapshot into `compute_trader_stats` and `create_large_trades_table` instead of each function rebuilding it.
-- Keep output shape unchanged.
-- Preserve cooldown behavior for alerts.
+- Built a short-lived, content-keyed shared snapshot helper around `build_flow_pulse_snapshot`.
+- `/update` now builds or reuses one shared pulse snapshot before rendering the flow blotter.
+- `/update_price` now builds or reuses one shared pulse snapshot before rendering full and 0DTE stats.
+- `compute_trader_stats` and `create_large_trades_table` accept a precomputed pulse snapshot and fall back to the shared helper when none is supplied.
+- Output shape is unchanged.
+- Alert cooldown behavior is preserved because `compute_trader_stats` still owns alert creation and `_alert_cooldown_ok` calls per scope.
 
 Validation:
 
-- Confirm `flow_pulse`, live alerts, and flow blotter content match prior behavior for the same chain snapshot.
-- Confirm only one large `build_flow_pulse_snapshot` call happens per `/update`.
-- Run `python3 -m py_compile ezoptionsschwab.py`.
+- Synthetic smoke test monkeypatched `build_flow_pulse_snapshot` and confirmed original DataFrames plus copied DataFrames reused one build: `build_calls=1`, `hit2=True`.
+- `python3 -m py_compile ezoptionsschwab.py`
+- `git diff --check`
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview`
+- Extracted inline JS from `app.test_client().get('/')` to `/tmp/gex-inline-scripts.js`.
+- `node --check /tmp/gex-inline-scripts.js`
 
 Expected win:
 
@@ -721,7 +745,7 @@ sed -n '1,220p' docs/ORDER_ENTRY_RAIL_SCALPING_REPAIR_PLAN.md
 sed -n '1,220p' docs/ALERTS_RAIL_PHASE3_PLAN.md
 ```
 
-3. Do not redo Stages 0-2 unless validation shows a regression. Start remaining implementation at Stage 3, or collect live-market validation for Stage 1/2 first if the market is open.
+3. Do not redo Stages 0-3 unless validation shows a regression. Start remaining implementation at Stage 4, or collect additional live-market p95 sampling first if the token session is fresh.
 
 4. Implement one stage at a time. Commit each stage separately with timing results in the commit body.
 
