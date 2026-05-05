@@ -1,6 +1,6 @@
 # GEX Dashboard - Scalping Performance Optimization Plan
 
-**Status:** Implementation in progress - Stages 0, 1, 2, and 3 complete on `codex/scalping-performance-plan`
+**Status:** Implementation in progress - Stages 0, 1, 2, 3, and 4 complete on `codex/scalping-performance-plan`
 **Created:** 2026-05-05  
 **Last updated:** 2026-05-05
 **Primary file:** `ezoptionsschwab.py`  
@@ -41,6 +41,10 @@ Completed on `codex/scalping-performance-plan`:
   - Alert cooldown checks still run inside `compute_trader_stats` for each scope; the shared snapshot only replaces duplicate pulse construction.
 - `9a97c0d docs(perf): update scalping stage 3 progress`
   - Recorded the Stage 3 implementation details, live validation notes, and Stage 4 starting point.
+- `75ceafc perf(db): throttle interval writes and cleanup`
+  - Added in-process guards so `store_interval_data` skips duplicate writes for the same ticker/date/minute/strike-range/expiry-scope bucket unless forced.
+  - Added a similar 5-minute guard for `store_centroid_data`.
+  - Moved active-path `clear_old_data` calls behind an hourly in-process retention guard while preserving forced startup and end-of-day pruning.
 
 Baseline findings collected before Stage 2:
 
@@ -80,10 +84,14 @@ Tricky parts to preserve:
 - Stage 3 filters the shared pulse snapshot by `expiry_iso` before passing it to the 0DTE stats bundle; do not pass the unfiltered full-scope pulse into the nearest-expiry stats path.
 - Stage 3 must not move `_alert_cooldown_ok` out of `compute_trader_stats`; full-scope alerts and 0DTE alerts use different `scope_id` values and need independent cooldown decisions.
 - The shared pulse cache TTL is intentionally below the 8-second in-process history append threshold in `build_flow_pulse_snapshot`, so unchanged chain snapshots can still age into the history on later ticks.
+- Stage 4 keeps the existing delete/insert table semantics because `interval_data`, `interval_session_data`, and `centroid_data` do not have unique constraints or expiry-scope columns.
+- Stage 4 write guards track the latest physical ticker/time bucket signature, not every historical scope independently. If the user changes expiry scope inside the same minute, the new scope can still replace the current bucket.
+- `store_interval_data(..., force=True)` and `store_centroid_data(..., force=True)` bypass duplicate skipping and update the guard signature for the next normal call.
+- `clear_old_data(force=True)` is still used for startup and the end-of-day cleanup path; normal active writes run retention at most once per Eastern hour.
 - Any trading rail markup change must still be mirrored in `buildTradeRailHtml()`.
 - Any alerts/right-rail markup change must still be mirrored in `buildAlertsPanelHtml()`.
 
-Remaining implementation starts at Stage 4 unless new live-market measurements show a different bottleneck.
+Remaining implementation starts at Stage 5 unless new live-market measurements show a different bottleneck.
 
 ---
 
@@ -240,6 +248,8 @@ Validation:
 
 ### F5 - SQLite interval writes do repeated cleanup and delete/insert work
 
+Status: Addressed by Stage 4 in `75ceafc`; still needs live timing validation.
+
 Evidence anchors:
 
 - `store_interval_data`
@@ -249,10 +259,11 @@ Evidence anchors:
 
 Current behavior:
 
-- `store_interval_data` stores 1-minute data but can be called repeatedly within the same minute.
-- It calls `clear_old_data`, deletes the current minute rows, and reinserts all in-range strikes.
-- `store_centroid_data` stores 5-minute data and also calls `clear_old_data`.
-- `/update_price` may also call `store_interval_data`, so interval writes can happen through more than one path.
+- `store_interval_data` stores 1-minute data and now skips duplicate writes for the same ticker/date/minute/strike-range/expiry-scope signature unless forced.
+- It still uses delete/insert for the current physical ticker/minute bucket because the table schema has no unique key or expiry-scope column.
+- `store_centroid_data` stores 5-minute data and now skips duplicate writes for the same ticker/date/5-minute/expiry-scope signature unless forced.
+- `/update_price` may also call `store_interval_data`, but the duplicate guard lets it share the minute bucket already written by `/update`.
+- `clear_old_data` still runs on startup and forced end-of-day cleanup, but active write paths now hit retention at most once per Eastern hour.
 
 Expected impact:
 
@@ -567,7 +578,7 @@ Rollback:
 
 ### Stage 4 - Throttle SQLite interval writes and cleanup
 
-Status: Not started.
+Status: Implemented in `75ceafc`; live DB timing validation still needed.
 
 Goal:
 
@@ -575,22 +586,24 @@ Keep historical data intact while avoiding repeated delete/insert and retention 
 
 Backend plan:
 
-- Add a small in-process guard for interval writes:
-  - key by ticker, date, interval timestamp, strike range, and selected expiry scope if needed
-  - only write once per minute unless explicitly forced
-- Add a similar guard for centroid writes:
-  - only write once per 5-minute bucket unless forced
-- Move `clear_old_data` behind a once-per-session or once-per-hour guard.
-- Consider replacing delete/insert with `INSERT OR REPLACE` only if a unique index is added safely. This needs extra care because the current table uses an autoincrement id and no unique constraint.
+- Added a small in-process guard for interval writes:
+  - key by ticker, date, interval timestamp, strike range, and selected expiry scope
+  - only write once per matching minute signature unless explicitly forced
+- Added a similar guard for centroid writes:
+  - key by ticker, date, 5-minute timestamp, and selected expiry scope
+  - only write once per matching 5-minute signature unless explicitly forced
+- Moved normal active-path `clear_old_data` calls behind an hourly Eastern-time guard.
+- Kept delete/insert instead of `INSERT OR REPLACE` because the tables still use autoincrement ids and have no unique constraints.
 - Confirm `_fetch_vol_spike_data` still has enough fresh interval samples for flow alerts.
 
 Validation:
 
-- Confirm interval rows still appear once per strike per minute.
-- Confirm centroid rows still update as expected.
-- Confirm volume spike alerts still work after enough samples.
-- Compare DB timing before/after.
-- Run any alert tests and manual flow alert smoke checks.
+- `python3 -m py_compile ezoptionsschwab.py`
+- `git diff --check`
+- `python3 -m unittest tests.test_session_levels tests.test_trade_preview`
+- Extracted inline JS from `app.test_client().get('/')` to `/tmp/gex-inline-scripts.js`.
+- `node --check /tmp/gex-inline-scripts.js`
+- Live DB timing, interval row freshness, centroid row freshness, and volume-spike alert freshness still need a fresh Schwab token/live session.
 
 Expected win:
 
