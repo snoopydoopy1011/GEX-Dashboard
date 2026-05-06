@@ -10878,31 +10878,119 @@ def _build_options_cache_key(
 
 
 def _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms):
-    cached = _options_cache.get(ticker)
-    if not cached:
-        return None
-    meta = cached.get('meta') or {}
-    if meta.get('cache_key') != cache_key:
+    snapshot = _options_cache_snapshot_for_key(ticker, cache_key, now_ms)
+    if snapshot is None or not snapshot.get('cache_usable'):
         return None
     try:
-        fetched_at_ms = int(meta.get('fetched_at_ms') or 0)
+        fetched_at_ms = int(snapshot.get('fetched_at') or 0)
     except Exception:
         fetched_at_ms = 0
     if min_age_ms <= 0 or fetched_at_ms <= 0:
         return None
-    if now_ms - fetched_at_ms > min_age_ms:
+    if snapshot.get('cache_age_ms') is None or snapshot.get('cache_age_ms') > min_age_ms:
         return None
-    return {
-        'calls': cached.get('calls'),
-        'puts': cached.get('puts'),
-        'S': cached.get('S'),
+    snapshot.update({
         'cache_hit': True,
+        'fetched': False,
+        'stale': False,
+        'inflight': False,
+        'cache_stored': False,
+        'refresh_outcome': 'cache_hit',
+    })
+    return snapshot
+
+
+def _options_cache_snapshot_for_key(ticker, cache_key, now_ms=None):
+    cached = _options_cache.get(ticker)
+    if not cached:
+        return None
+    meta = cached.get('meta') or {}
+    cache_key_match = meta.get('cache_key') == cache_key
+    try:
+        fetched_at_ms = int(meta.get('fetched_at_ms') or 0)
+    except Exception:
+        fetched_at_ms = 0
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    cache_age_ms = max(0, now_ms - fetched_at_ms) if fetched_at_ms > 0 else None
+    calls = cached.get('calls')
+    puts = cached.get('puts')
+    has_calls = calls is not None and not getattr(calls, 'empty', True)
+    has_puts = puts is not None and not getattr(puts, 'empty', True)
+    cache_usable = bool(cache_key_match and cached.get('S') is not None and (has_calls or has_puts))
+    return {
+        'calls': calls,
+        'puts': puts,
+        'S': cached.get('S'),
+        'cache_hit': False,
         'fetched': False,
         'cache_key': cache_key,
         'fetched_at': fetched_at_ms,
         'meta': meta,
+        'cache_key_match': cache_key_match,
+        'cache_age_ms': cache_age_ms,
+        'cache_usable': cache_usable,
         'cache_stored': False,
     }
+
+
+def _stale_options_snapshot_for_key(ticker, cache_key, now_ms):
+    snapshot = _options_cache_snapshot_for_key(ticker, cache_key, now_ms)
+    if snapshot is None or not snapshot.get('cache_usable'):
+        return None
+    snapshot.update({
+        'cache_hit': False,
+        'fetched': False,
+        'stale': True,
+        'inflight': True,
+        'cache_stored': False,
+        'refresh_outcome': 'stale_inflight',
+    })
+    return snapshot
+
+
+def _annotate_options_cache_refresh_result(
+    result,
+    *,
+    min_age_ms=0,
+    lock_wait_ms=0.0,
+    lock_held_ms=0.0,
+    prior_snapshot=None,
+    outcome=None,
+):
+    if result is None:
+        result = {}
+    if outcome:
+        result['refresh_outcome'] = outcome
+    result['min_age_ms'] = min_age_ms
+    result['lock_wait_ms'] = float(lock_wait_ms or 0.0)
+    result['lock_held_ms'] = float(lock_held_ms or 0.0)
+    if prior_snapshot is not None:
+        result['prior_cache_key_match'] = bool(prior_snapshot.get('cache_key_match'))
+        result['prior_cache_usable'] = bool(prior_snapshot.get('cache_usable'))
+        result['prior_cache_age_ms'] = prior_snapshot.get('cache_age_ms')
+    else:
+        result['prior_cache_key_match'] = False
+        result['prior_cache_usable'] = False
+        result['prior_cache_age_ms'] = None
+    return result
+
+
+def _add_options_cache_refresh_perf(perf, result):
+    if perf is None or result is None:
+        return
+    perf.add('cache_refresh_outcome', result.get('refresh_outcome'))
+    perf.add('cache_refresh_stale', bool(result.get('stale')))
+    perf.add('cache_refresh_inflight', bool(result.get('inflight')))
+    perf.add('cache_refresh_key_match', bool(result.get('cache_key_match')))
+    perf.add('cache_refresh_cache_usable', bool(result.get('cache_usable')))
+    perf.add('cache_refresh_cache_age_ms', result.get('cache_age_ms'))
+    perf.add('cache_refresh_min_age_ms', result.get('min_age_ms'))
+    perf.add('cache_refresh_prior_key_match', bool(result.get('prior_cache_key_match')))
+    perf.add('cache_refresh_prior_usable', bool(result.get('prior_cache_usable')))
+    perf.add('cache_refresh_prior_age_ms', result.get('prior_cache_age_ms'))
+    perf.add('cache_refresh_lock_wait_ms', result.get('lock_wait_ms'))
+    perf.add('cache_refresh_lock_held_ms', result.get('lock_held_ms'))
 
 
 def refresh_options_cache_snapshot(
@@ -10936,12 +11024,52 @@ def refresh_options_cache_snapshot(
     except Exception:
         min_age_ms = 0
 
-    with _options_cache_refresh_lock:
+    now_ms = int(time.time() * 1000)
+    prior_snapshot = _options_cache_snapshot_for_key(ticker, cache_key, now_ms)
+    if not force:
+        cached_snapshot = _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms)
+        if cached_snapshot is not None:
+            result = _annotate_options_cache_refresh_result(
+                cached_snapshot,
+                min_age_ms=min_age_ms,
+                prior_snapshot=prior_snapshot,
+                outcome='cache_hit_prelock',
+            )
+            _add_options_cache_refresh_perf(perf, result)
+            return result
+
+    lock_wait_started = time.perf_counter()
+    acquired = _options_cache_refresh_lock.acquire(blocking=False)
+    if not acquired:
+        if not force:
+            stale_snapshot = _stale_options_snapshot_for_key(ticker, cache_key, now_ms)
+            if stale_snapshot is not None:
+                result = _annotate_options_cache_refresh_result(
+                    stale_snapshot,
+                    min_age_ms=min_age_ms,
+                    prior_snapshot=prior_snapshot,
+                    outcome='stale_inflight',
+                )
+                _add_options_cache_refresh_perf(perf, result)
+                return result
+        _options_cache_refresh_lock.acquire()
+    lock_wait_ms = (time.perf_counter() - lock_wait_started) * 1000
+    lock_held_started = time.perf_counter()
+    result = None
+    try:
         now_ms = int(time.time() * 1000)
         if not force:
             cached_snapshot = _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms)
             if cached_snapshot is not None:
-                return cached_snapshot
+                outcome = 'cache_hit_after_wait' if lock_wait_ms >= 1 else 'cache_hit_in_lock'
+                result = _annotate_options_cache_refresh_result(
+                    cached_snapshot,
+                    min_age_ms=min_age_ms,
+                    lock_wait_ms=lock_wait_ms,
+                    prior_snapshot=prior_snapshot,
+                    outcome=outcome,
+                )
+                return result
 
         with _maybe_perf_span(perf, 'fetch_chain'):
             if len(expiry_dates) == 1:
@@ -10986,7 +11114,7 @@ def refresh_options_cache_snapshot(
                 }
                 cache_stored = True
 
-        return {
+        result = {
             'calls': calls,
             'puts': puts,
             'S': S,
@@ -10996,7 +11124,37 @@ def refresh_options_cache_snapshot(
             'fetched_at': fetched_at_ms,
             'meta': meta,
             'cache_stored': cache_stored,
+            'stale': False,
+            'inflight': False,
+            'cache_key_match': True,
+            'cache_age_ms': 0,
+            'cache_usable': bool(cache_stored),
         }
+        result = _annotate_options_cache_refresh_result(
+            result,
+            min_age_ms=min_age_ms,
+            lock_wait_ms=lock_wait_ms,
+            prior_snapshot=prior_snapshot,
+            outcome='fetched_stored' if cache_stored else 'fetched_unusable',
+        )
+        return result
+    finally:
+        lock_held_ms = (time.perf_counter() - lock_held_started) * 1000
+        if result is not None:
+            result['lock_wait_ms'] = float(lock_wait_ms or 0.0)
+            result['lock_held_ms'] = float(lock_held_ms or 0.0)
+            _add_options_cache_refresh_perf(perf, result)
+        else:
+            _add_options_cache_refresh_perf(perf, {
+                'refresh_outcome': 'error',
+                'min_age_ms': min_age_ms,
+                'lock_wait_ms': float(lock_wait_ms or 0.0),
+                'lock_held_ms': float(lock_held_ms or 0.0),
+                'prior_cache_key_match': bool(prior_snapshot and prior_snapshot.get('cache_key_match')),
+                'prior_cache_usable': bool(prior_snapshot and prior_snapshot.get('cache_usable')),
+                'prior_cache_age_ms': prior_snapshot.get('cache_age_ms') if prior_snapshot else None,
+            })
+        _options_cache_refresh_lock.release()
 
 
 def _cleanup_desktop_window_states(now=None):
@@ -20574,10 +20732,7 @@ def index():
         function rvolKeyFromTime(tsSeconds) {
             // Lightweight Charts time is UTC seconds; convert to ET HH:MM.
             const d = new Date(tsSeconds * 1000);
-            const parts = new Intl.DateTimeFormat('en-US', {
-                timeZone: 'America/New_York', hour12: false,
-                hour: '2-digit', minute: '2-digit',
-            }).formatToParts(d);
+            const parts = TV_RVOL_KEY_FORMATTER.formatToParts(d);
             let hh = '00', mm = '00';
             for (const p of parts) {
                 if (p.type === 'hour') hh = p.value;
@@ -20650,10 +20805,58 @@ def index():
         }
         function indexVolumeMeta(volumeBars) {
             tvVolumeMetaByTime = {};
+            tvVolumePriorCumByTime = {};
+            tvLastCumVolumeMeta = null;
             if (!Array.isArray(volumeBars)) return;
             volumeBars.forEach(bar => {
-                if (bar && bar.time != null) tvVolumeMetaByTime[String(bar.time)] = bar;
+                if (!bar || bar.time == null) return;
+                const key = String(bar.time);
+                tvVolumeMetaByTime[key] = bar;
+                const cumVolume = Number(bar.cum_volume);
+                const value = Number(bar.value || 0);
+                if (Number.isFinite(cumVolume)) {
+                    tvVolumePriorCumByTime[key] = Math.max(0, cumVolume - (Number.isFinite(value) ? value : 0));
+                    if (!tvLastCumVolumeMeta || Number(bar.time) >= Number(tvLastCumVolumeMeta.time || 0)) {
+                        tvLastCumVolumeMeta = bar;
+                    }
+                }
             });
+        }
+        function getLiveCumulativeVolumeForBar(tsSeconds, value) {
+            const key = String(tsSeconds);
+            const prior = Number(tvVolumePriorCumByTime[key]);
+            const numericValue = Number(value || 0);
+            if (Number.isFinite(prior)) return prior + (Number.isFinite(numericValue) ? numericValue : 0);
+            if (
+                tvLastCumVolumeMeta &&
+                Number(tvLastCumVolumeMeta.time) < Number(tsSeconds) &&
+                tvDateKeyET(Number(tvLastCumVolumeMeta.time)) === tvDateKeyET(Number(tsSeconds))
+            ) {
+                const lastCum = Number(tvLastCumVolumeMeta.cum_volume);
+                if (Number.isFinite(lastCum)) return lastCum + (Number.isFinite(numericValue) ? numericValue : 0);
+            }
+            let running = 0;
+            for (let i = 0; i < tvLastCandles.length; i += 1) {
+                const b = tvLastCandles[i];
+                if (!b || !Number.isFinite(Number(b.time))) continue;
+                if (tvCurrentDayStartTime && b.time < tvCurrentDayStartTime) continue;
+                if (b.time > tsSeconds) break;
+                running += Number(b.volume || 0);
+            }
+            return running;
+        }
+        function updateLiveVolumeMeta(meta) {
+            if (!meta || meta.time == null) return;
+            const key = String(meta.time);
+            tvVolumeMetaByTime[key] = meta;
+            const cumVolume = Number(meta.cum_volume);
+            const value = Number(meta.value || 0);
+            if (Number.isFinite(cumVolume)) {
+                tvVolumePriorCumByTime[key] = Math.max(0, cumVolume - (Number.isFinite(value) ? value : 0));
+                if (!tvLastCumVolumeMeta || Number(meta.time) >= Number(tvLastCumVolumeMeta.time || 0)) {
+                    tvLastCumVolumeMeta = meta;
+                }
+            }
         }
         function ensureRvolMarkerLayer() {
             const container = document.getElementById('price-chart');
@@ -20852,6 +21055,13 @@ def index():
         let tvIndicatorEditorTargetKey = '';
         let tvCurrentDayStartTime = 0;  // unix seconds of current day's first candle (for daily VWAP)
         let tvLastPriceData = null;     // cache of full priceData for redraw
+        let tvLastPriceApplyContextKey = '';
+        let tvLastPriceApplyTailSignature = '';
+        let tvLastCandleStyleSignature = '';
+        let tvLastVolumeBars = [];
+        let tvLastVolumeBaselineBars = [];
+        let tvVolumePriorCumByTime = {};
+        let tvLastCumVolumeMeta = null;
         let tvVolumeProfilePayload = null;
         let tvTpoProfilePayload = null;
         let tvProfileOverlayPending = false;
@@ -20872,6 +21082,8 @@ def index():
         let tvScalpTargetLineRecords = [];
         let tvScalpTargetLineSignature = '';
         let tvScalpTargetLineContextSignature = '';
+        let tvLastRenderedKeyLevelsSignature = '';
+        let tvLastRenderedSessionLevelsSignature = '';
         let tvUserHLinePriceLines = new Map();
         let tvUserDrawingAxisLabelLines = new Map();
         let _lastTopOI     = null;
@@ -20933,6 +21145,12 @@ def index():
             month: 'short',
             day: 'numeric',
         });
+        const TV_RVOL_KEY_FORMATTER = new Intl.DateTimeFormat('en-US', {
+            timeZone: TV_ET_TIME_ZONE,
+            hour12: false,
+            hour: '2-digit',
+            minute: '2-digit',
+        });
         // Track the active ticker so we can reset chart state on ticker change
         let tvLastTicker = null;
         // When true, the next render will call fitContent() regardless of tvAutoRange
@@ -20962,6 +21180,7 @@ def index():
         let lastPlotlyPriceLineUpdateAt = 0;
         const GEX_PERF_TRACE_FROM_SERVER = {{ 'true' if gex_perf_trace else 'false' }};
         const GEX_PERF_TRACE_KEY = 'gexPerfTrace';
+        const GEX_PERF_TRACE_CAP_DEFAULT = 10000;
         let gexPerfSeq = 0;
         let gexLongTaskObserverStarted = false;
 
@@ -20975,6 +21194,124 @@ def index():
             }
         }
 
+        function getGexPerfTraceCap() {
+            try {
+                const raw = localStorage.getItem('gexPerfTraceCap');
+                const parsed = raw == null ? NaN : parseInt(raw, 10);
+                if (Number.isFinite(parsed)) return Math.max(1000, Math.min(50000, parsed));
+            } catch (e) {}
+            return GEX_PERF_TRACE_CAP_DEFAULT;
+        }
+
+        function normalizeGexPerfDetail(detail) {
+            const out = {};
+            if (!detail || typeof detail !== 'object') return out;
+            Object.keys(detail).forEach(key => {
+                const safeKey = String(key).replace(/[^A-Za-z0-9_]+/g, '_');
+                const value = detail[key];
+                if (value === undefined || value === null) return;
+                if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string') {
+                    out[safeKey] = value;
+                } else {
+                    try { out[safeKey] = JSON.parse(JSON.stringify(value)); }
+                    catch (e) { out[safeKey] = String(value); }
+                }
+            });
+            return out;
+        }
+
+        function pushGexPerfTraceEvent(event) {
+            if (!isGexPerfTraceEnabled()) return null;
+            const buffer = Array.isArray(window.gexPerfTraceEvents) ? window.gexPerfTraceEvents : [];
+            window.gexPerfTraceEvents = buffer;
+            const cap = getGexPerfTraceCap();
+            const row = Object.assign({
+                seq: ++gexPerfSeq,
+                ts: new Date().toISOString(),
+                page_ms: window.performance && performance.now ? Number(performance.now().toFixed(3)) : null,
+                url: window.location ? (window.location.pathname + window.location.search) : '',
+            }, event || {});
+            buffer.push(row);
+            if (buffer.length > cap) buffer.splice(0, buffer.length - cap);
+            return row;
+        }
+
+        window.gexPerfTraceEvents = Array.isArray(window.gexPerfTraceEvents) ? window.gexPerfTraceEvents : [];
+        window.clearGexPerfTrace = function() {
+            window.gexPerfTraceEvents = [];
+            return 0;
+        };
+        window.dumpGexPerfTrace = function(pretty) {
+            return JSON.stringify(window.gexPerfTraceEvents || [], null, pretty ? 2 : 0);
+        };
+        window.exportGexPerfTrace = function(options) {
+            const opts = (options && typeof options === 'object') ? options : {};
+            const events = (window.gexPerfTraceEvents || []).slice();
+            const payload = {
+                exported_at: new Date().toISOString(),
+                count: events.length,
+                page: window.location ? window.location.href : '',
+                user_agent: navigator.userAgent,
+                events,
+            };
+            if (opts.post) {
+                return fetch('/perf/browser_trace', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                }).then(response => response.json());
+            }
+            if (opts.download) {
+                const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'gex-browser-perf-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }
+            return payload;
+        };
+        function ensureGexPerfTraceExportControl() {
+            if (!isGexPerfTraceEnabled() || document.getElementById('gex-perf-export-control')) return;
+            const install = () => {
+                if (document.getElementById('gex-perf-export-control')) return;
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.id = 'gex-perf-export-control';
+                button.setAttribute('data-gex-perf-export', '');
+                button.textContent = 'Trace';
+                button.style.position = 'fixed';
+                button.style.left = '8px';
+                button.style.bottom = '8px';
+                button.style.zIndex = '99999';
+                button.style.padding = '4px 8px';
+                button.style.border = '1px solid var(--border)';
+                button.style.borderRadius = '6px';
+                button.style.background = 'var(--bg-1)';
+                button.style.color = 'var(--fg-1)';
+                button.style.fontSize = '11px';
+                button.style.opacity = '0.72';
+                button.addEventListener('click', () => {
+                    window.exportGexPerfTrace({ post: true })
+                        .then(result => {
+                            button.dataset.lastResult = JSON.stringify(result || {});
+                            console.log('[perf] browser_trace_export count=' + (result && result.count) + ' path=' + (result && result.jsonl_path || ''));
+                        })
+                        .catch(error => {
+                            button.dataset.lastResult = JSON.stringify({ error: String(error) });
+                            console.warn('[perf] browser_trace_export_error ' + String(error));
+                        });
+                });
+                document.body.appendChild(button);
+            };
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install, { once: true });
+            else install();
+        }
+        ensureGexPerfTraceExportControl();
+
         function gexPerfDetailText(detail) {
             if (!detail || typeof detail !== 'object') return '';
             return Object.keys(detail)
@@ -20986,7 +21323,7 @@ def index():
         function gexPerfStart(name, detail) {
             if (!isGexPerfTraceEnabled() || !window.performance || !performance.mark) return null;
             ensureGexLongTaskObserver();
-            const id = 'gex-perf-' + (++gexPerfSeq) + '-' + String(name).replace(/[^A-Za-z0-9_]+/g, '_');
+            const id = 'gex-perf-mark-' + (++gexPerfSeq) + '-' + String(name).replace(/[^A-Za-z0-9_]+/g, '_');
             try { performance.mark(id + '-start'); } catch (e) {}
             return { id, name, detail: detail || {}, started: performance.now() };
         }
@@ -21011,6 +21348,27 @@ def index():
             const extra = gexPerfDetailText(merged);
             if (extra) parts.push(extra);
             console.log(parts.join(' '));
+            pushGexPerfTraceEvent({
+                kind: 'span',
+                name: token.name,
+                duration_ms: Number.isFinite(duration) ? Number(duration.toFixed(3)) : 0,
+                detail: normalizeGexPerfDetail(merged),
+            });
+        }
+
+        function parseGexJsonResponse(response, routeName, detail) {
+            const status = response && response.status;
+            return response.text().then(text => {
+                const parsePerf = gexPerfStart('parse:' + routeName, Object.assign({ status, chars: text.length }, detail || {}));
+                try {
+                    const parsed = text ? JSON.parse(text) : {};
+                    gexPerfEnd(parsePerf, { ok: true });
+                    return parsed;
+                } catch (e) {
+                    gexPerfEnd(parsePerf, { error: true });
+                    throw e;
+                }
+            });
         }
 
         function ensureGexLongTaskObserver() {
@@ -21018,7 +21376,16 @@ def index():
             try {
                 const observer = new PerformanceObserver(list => {
                     list.getEntries().forEach(entry => {
-                        console.log('[perf] span=browser_long_task duration_ms=' + entry.duration.toFixed(1) + ' start_ms=' + entry.startTime.toFixed(1));
+                        const duration = Number(entry.duration || 0);
+                        const start = Number(entry.startTime || 0);
+                        console.log('[perf] span=browser_long_task duration_ms=' + duration.toFixed(1) + ' start_ms=' + start.toFixed(1));
+                        pushGexPerfTraceEvent({
+                            kind: 'longtask',
+                            name: 'browser_long_task',
+                            duration_ms: Number(duration.toFixed(3)),
+                            start_ms: Number(start.toFixed(3)),
+                            detail: {},
+                        });
                     });
                 });
                 observer.observe({ entryTypes: ['longtask'] });
@@ -21990,9 +22357,16 @@ def index():
          * of appending the raw 1-min bar (which would render as a tiny sliver).
          */
         function applyRealtimeCandle(candle) {
-            if (!tvCandleSeries) return;
+            const realtimeCandlePerf = gexPerfStart('applyRealtimeCandle');
+            if (!tvCandleSeries) {
+                gexPerfEnd(realtimeCandlePerf, { skipped: 'no_series' });
+                return;
+            }
             const bucketStart = tvBucketStartForUnixSec(candle.time);
-            if (!Number.isFinite(bucketStart)) return;
+            if (!Number.isFinite(bucketStart)) {
+                gexPerfEnd(realtimeCandlePerf, { skipped: 'bad_bucket' });
+                return;
+            }
 
             function rollInto(arr) {
                 const lastIdx = arr.length - 1;
@@ -22037,17 +22411,17 @@ def index():
             const displayBar = displayRoll.bar;
             rollInto(tvIndicatorCandles);
             rollInto(tvVwapCandles);
-            try { tvCandleSeries.update(tvToSeriesBar(displayBar)); } catch(e) {}
+            const latestDisplay = tvLastCandles[tvLastCandles.length - 1];
+            const isHistoricalUpdate = !!(latestDisplay && displayBar && Number(displayBar.time) < Number(latestDisplay.time));
+            try { tvCandleSeries.update(tvToSeriesBar(displayBar), isHistoricalUpdate); } catch(e) {}
             try {
                 const _isUp = displayBar.close >= displayBar.open;
                 const rvolKey = rvolKeyFromTime(displayBar.time);
                 const baseline = tvRvolBaseline[rvolKey];
                 const cumBaseline = tvRvolCumulativeBaseline[rvolKey];
-                const cumVolume = tvLastCandles
-                    .filter(b => (!tvCurrentDayStartTime || b.time >= tvCurrentDayStartTime) && b.time <= displayBar.time)
-                    .reduce((sum, b) => sum + Number(b.volume || 0), 0);
+                const cumVolume = getLiveCumulativeVolumeForBar(displayBar.time, displayBar.volume || 0);
                 const displayRvol = projectedRvolForLiveBar(displayBar.time, displayBar.volume || 0);
-                tvVolumeMetaByTime[String(displayBar.time)] = {
+                const liveVolumeMeta = {
                     time: displayBar.time,
                     value: displayBar.volume || 0,
                     is_up: _isUp,
@@ -22058,21 +22432,35 @@ def index():
                     cum_volume: cumVolume,
                     cum_rvol: cumBaseline ? cumVolume / cumBaseline : null,
                 };
-                updateCumRvolBadge(tvVolumeMetaByTime[String(displayBar.time)]);
+                updateLiveVolumeMeta(liveVolumeMeta);
+                updateCumRvolBadge(liveVolumeMeta);
                 tvVolumeSeries.update({
                     time:  displayBar.time,
                     value: displayBar.volume || 0,
                     color: rvolColorForLiveBar(displayBar.time, displayBar.volume || 0, _isUp, callColor, putColor),
-                });
+                }, isHistoricalUpdate);
                 if (tvVolumeBaselineSeries && tvRvolEnabled && baseline) {
-                    tvVolumeBaselineSeries.update({ time: displayBar.time, value: baseline });
+                    tvVolumeBaselineSeries.update({ time: displayBar.time, value: baseline }, isHistoricalUpdate);
                 }
                 scheduleRvolMarkerDraw();
             } catch(e) {}
-            if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
+            if (tvActiveInds.size > 0) {
+                clearTimeout(tvIndicatorRefreshTimer);
+                tvIndicatorRefreshTimer = setTimeout(() => applyIndicators(tvIndicatorCandles, tvActiveInds), 750);
+            } else {
+                applyTVAvwapDrawings();
+            }
             scheduleTVStrikeOverlayDraw();
             if (displayRoll.isNew) scheduleTVSessionCalendarOverlaySettleDraw();
             tvResolveDeferredSessionFocus();
+            gexPerfEnd(realtimeCandlePerf, {
+                mode: 'incremental',
+                historical: isHistoricalUpdate,
+                new_bar: !!displayRoll.isNew,
+                time: displayBar.time,
+                bars: tvLastCandles.length,
+                timeframe: tvBucketSec() / 60,
+            });
         }
 
         // --- Fullscreen chart support ---
@@ -23052,10 +23440,18 @@ def index():
                 clearTopOILines();
                 clearKeyLevels();
                 clearSessionLevels();
+                tvLastRenderedKeyLevelsSignature = '';
+                tvLastRenderedSessionLevelsSignature = '';
                 // Reset zoom on the next render
                 tvLastCandles = [];
                 tvIndicatorCandles = [];
                 tvVwapCandles = [];
+                tvLastPriceApplyContextKey = '';
+                tvLastPriceApplyTailSignature = '';
+                tvLastVolumeBars = [];
+                tvLastVolumeBaselineBars = [];
+                tvVolumePriorCumByTime = {};
+                tvLastCumVolumeMeta = null;
                 tvCurrentDayStartTime = 0;
                 tvForceSessionFocus = true;
                 // Disconnect the price stream so it reconnects on the new ticker
@@ -23169,43 +23565,48 @@ def index():
             })
             .then(response => {
                 gexPerfEnd(updateFetchPerf, { status: response.status });
-                return response.json();
+                return parseGexJsonResponse(response, '/update', { ticker, expiries: expiry.length });
             })
             .then(data => {
-                if (data.error) {
-                    showError(data.error);
-                    // Pause streaming on persistent error
-                    if (isStreaming) {
-                        toggleStreaming();
+                const updateApplyPerf = gexPerfStart('apply:/update', { ticker, expiries: expiry.length, error: !!(data && data.error) });
+                try {
+                    if (data.error) {
+                        showError(data.error);
+                        // Pause streaming on persistent error
+                        if (isStreaming) {
+                            toggleStreaming();
+                        }
+                        return;
                     }
-                    return;
-                }
-                
-                lastData = data;  // Update before rendering so popout windows get fresh data
-                _lastKeyLevels = data ? (data.key_levels || null) : null;
-                _lastKeyLevels0dte = data ? (data.key_levels_0dte || null) : null;
-                _lastStats0dte = data ? (data.stats_0dte || null) : null;
-                renderTraderStats(data ? (data.trader_stats || null) : null);
-                updateCharts(data, topOiContextKey);
-                updatePriceInfo(data.price_info);
-                redrawGexScope();
-                _lastAnalyticsCacheContextKey = analyticsCacheContextKey;
-                if (!isTradeRailCollapsed()) {
-                    requestTradeChain({
-                        force: true,
-                        minIntervalMs: shouldRefreshTradeChainCache ? 0 : TRADE_CHAIN_AUTO_REFRESH_MS,
-                        refreshCache: shouldRefreshTradeChainCache,
-                    });
-                }
-                // Options cache is now populated — refresh price levels immediately.
-                // This fixes the delay where levels were missing right after a ticker change
-                // because /update_price fired before the options chain was cached.
-                // Gate on ticker-change / first-load only: running this every tick
-                // forces a full setData rebuild at 1Hz, which flashes the candle and
-                // level lines as the axis snaps back to the historical-only snapshot.
-                if (shouldRefreshPriceLevels && isChartVisible('price')) {
-                    _priceHistoryLastKey = ''; // force cache-miss so fetchPriceHistory re-fetches
-                    fetchPriceHistory(true);
+
+                    lastData = data;  // Update before rendering so popout windows get fresh data
+                    _lastKeyLevels = data ? (data.key_levels || null) : null;
+                    _lastKeyLevels0dte = data ? (data.key_levels_0dte || null) : null;
+                    _lastStats0dte = data ? (data.stats_0dte || null) : null;
+                    renderTraderStats(data ? (data.trader_stats || null) : null);
+                    updateCharts(data, topOiContextKey);
+                    updatePriceInfo(data.price_info);
+                    redrawGexScope();
+                    _lastAnalyticsCacheContextKey = analyticsCacheContextKey;
+                    if (!isTradeRailCollapsed()) {
+                        requestTradeChain({
+                            force: true,
+                            minIntervalMs: shouldRefreshTradeChainCache ? 0 : TRADE_CHAIN_AUTO_REFRESH_MS,
+                            refreshCache: shouldRefreshTradeChainCache,
+                        });
+                    }
+                    // Options cache is now populated — refresh price levels immediately.
+                    // This fixes the delay where levels were missing right after a ticker change
+                    // because /update_price fired before the options chain was cached.
+                    // Gate on ticker-change / first-load only: running this every tick
+                    // forces a full setData rebuild at 1Hz, which flashes the candle and
+                    // level lines as the axis snaps back to the historical-only snapshot.
+                    if (shouldRefreshPriceLevels && isChartVisible('price')) {
+                        _priceHistoryLastKey = ''; // force cache-miss so fetchPriceHistory re-fetches
+                        fetchPriceHistory(true);
+                    }
+                } finally {
+                    gexPerfEnd(updateApplyPerf, { charts: true });
                 }
             })
             .catch(error => {
@@ -30630,6 +31031,161 @@ def index():
             flush();
         }
 
+        function tvNumericEqual(a, b) {
+            const na = Number(a || 0);
+            const nb = Number(b || 0);
+            if (!Number.isFinite(na) && !Number.isFinite(nb)) return true;
+            return Math.abs(na - nb) < 0.000001;
+        }
+
+        function tvSameCandleBar(a, b) {
+            if (!a || !b) return false;
+            return Number(a.time) === Number(b.time)
+                && tvNumericEqual(a.open, b.open)
+                && tvNumericEqual(a.high, b.high)
+                && tvNumericEqual(a.low, b.low)
+                && tvNumericEqual(a.close, b.close)
+                && tvNumericEqual(a.volume, b.volume);
+        }
+
+        function tvSameVolumeBar(a, b) {
+            if (!a || !b) return false;
+            return Number(a.time) === Number(b.time)
+                && tvNumericEqual(a.value, b.value)
+                && tvNumericEqual(a.baseline, b.baseline)
+                && tvNumericEqual(a.rvol, b.rvol)
+                && tvNumericEqual(a.cum_baseline, b.cum_baseline)
+                && tvNumericEqual(a.cum_volume, b.cum_volume)
+                && tvNumericEqual(a.cum_rvol, b.cum_rvol)
+                && String(a.color || '') === String(b.color || '')
+                && (a.is_up !== false) === (b.is_up !== false);
+        }
+
+        function tvPriceApplyContextKey(priceData, candles) {
+            const ticker = (document.getElementById('ticker')?.value || '').trim().toUpperCase();
+            const timeframe = String((document.getElementById('timeframe')?.value || priceData.timeframe || '1'));
+            const expiries = getSelectedExpiryValues().join(',');
+            const first = candles && candles.length ? Number(candles[0].time) : 0;
+            const currentDay = Number(priceData.current_day_start_time || 0);
+            return [
+                ticker,
+                timeframe,
+                expiries,
+                priceData.use_heikin_ashi ? 'ha' : 'raw',
+                priceData.call_color || callColor,
+                priceData.put_color || putColor,
+                tvRvolEnabled ? 'rvol_on' : 'rvol_off',
+                tvRvolLiveMode,
+                tvRvolBarMode,
+                tvRvolThreshold,
+                first,
+                currentDay,
+            ].join('|');
+        }
+
+        function tvTailSignature(candles, volumeBars) {
+            const last = candles && candles.length ? candles[candles.length - 1] : null;
+            const prev = candles && candles.length > 1 ? candles[candles.length - 2] : null;
+            const vol = volumeBars && volumeBars.length ? volumeBars[volumeBars.length - 1] : null;
+            return [
+                candles ? candles.length : 0,
+                prev ? prev.time : '',
+                last ? [last.time, last.open, last.high, last.low, last.close, last.volume].join(':') : '',
+                volumeBars ? volumeBars.length : 0,
+                vol ? [vol.time, vol.value, vol.cum_volume, vol.cum_rvol].join(':') : '',
+            ].join('|');
+        }
+
+        function safeTVSignature(value) {
+            try { return JSON.stringify(value || null); }
+            catch (e) { return String(value); }
+        }
+
+        function getKeyLevelsRenderSignature(levels) {
+            const vis = getChartVisibility();
+            return safeTVSignature({
+                levels,
+                scope: gexScope,
+                vis: {
+                    walls_2: vis.walls_2 !== false,
+                    hvl: vis.hvl !== false,
+                    em_2s: vis.em_2s !== false,
+                    live_gex_extrema: vis.live_gex_extrema !== false,
+                },
+                prefs: priceLevelPrefs,
+            });
+        }
+
+        function getSessionLevelsRenderSignature(levels, settings) {
+            return safeTVSignature({
+                levels,
+                settings,
+                prefs: priceLevelPrefs,
+            });
+        }
+
+        function tvFindSeriesTailStart(prevRows, nextRows, sameFn, maxTail = 12) {
+            if (!Array.isArray(prevRows) || !Array.isArray(nextRows) || !nextRows.length) return -1;
+            if (!prevRows.length) return 0;
+            if (nextRows.length < prevRows.length) return -1;
+            if (Number(prevRows[0].time) !== Number(nextRows[0].time)) return -1;
+            const minLen = Math.min(prevRows.length, nextRows.length);
+            const scanStart = Math.max(0, minLen - maxTail);
+            if (scanStart > 0 && !sameFn(prevRows[scanStart - 1], nextRows[scanStart - 1])) return -1;
+            let firstChanged = null;
+            for (let i = scanStart; i < minLen; i += 1) {
+                if (!sameFn(prevRows[i], nextRows[i])) {
+                    firstChanged = i;
+                    break;
+                }
+            }
+            if (firstChanged == null) {
+                return nextRows.length > prevRows.length ? Math.max(0, prevRows.length - 1) : Math.max(0, nextRows.length - 1);
+            }
+            return firstChanged;
+        }
+
+        function tvCanApplyPriceIncrementally(priceData, candles) {
+            if (!tvPriceChart || !tvCandleSeries || !tvVolumeSeries || !tvLastCandles.length) {
+                return { ok: false, reason: 'initial' };
+            }
+            if (!Array.isArray(candles) || !candles.length) return { ok: false, reason: 'empty' };
+            const contextKey = tvPriceApplyContextKey(priceData, candles);
+            if (contextKey !== tvLastPriceApplyContextKey) return { ok: false, reason: 'context' };
+            const tailStart = tvFindSeriesTailStart(tvLastCandles, candles, tvSameCandleBar, 12);
+            if (tailStart < 0) return { ok: false, reason: 'history' };
+            if (tailStart < Math.max(0, tvLastCandles.length - 12)) return { ok: false, reason: 'deep_tail' };
+            return { ok: true, tailStart, reason: 'tail' };
+        }
+
+        function tvUpdateSeriesTail(series, prevRows, nextRows, tailStart, mapFn) {
+            if (!series || !Array.isArray(nextRows) || !nextRows.length) return 0;
+            const start = Math.max(0, Math.min(Number(tailStart) || 0, nextRows.length - 1));
+            const prevLatestTime = prevRows && prevRows.length ? Number(prevRows[prevRows.length - 1].time) : -Infinity;
+            let applied = 0;
+            for (let i = start; i < nextRows.length; i += 1) {
+                const row = nextRows[i];
+                if (!row || row.time == null) continue;
+                const rowTime = Number(row.time);
+                if (rowTime < prevLatestTime) continue;
+                try {
+                    series.update(mapFn(row));
+                    applied += 1;
+                } catch (e) {
+                    return -1;
+                }
+            }
+            return applied;
+        }
+
+        function tvVolumeSeriesBar(bar) {
+            return {
+                time: bar.time,
+                value: bar.value || 0,
+                color: bar.color,
+            };
+        }
+
         function renderTVPriceChart(priceData) {
             const container = document.getElementById('price-chart');
             if (!container) return;
@@ -30874,16 +31430,30 @@ def index():
 
             // ── Every render: update data and overlays in place ───────────────
 
-            // Update candle colors in case they changed
-            tvCandleSeries.applyOptions({
-                upColor, downColor,
-                wickUpColor: upColor, wickDownColor: downColor,
-            });
+            const styleSignature = [upColor, downColor].join('|');
+            if (styleSignature !== tvLastCandleStyleSignature) {
+                tvCandleSeries.applyOptions({
+                    upColor, downColor,
+                    wickUpColor: upColor, wickDownColor: downColor,
+                });
+                tvLastCandleStyleSignature = styleSignature;
+            }
             syncStrikeOverlayControls();
 
             const isFirstRender = !tvLastCandles.length;
             const shouldFitAll = tvAutoRange || tvForceFit;
             const shouldFocusSession = !shouldFitAll && (isFirstRender || tvForceSessionFocus);
+            const volumeBars = priceData.volume || [];
+            const volumeBaselineBars = priceData.volume_baseline || [];
+            tvRvolBaseline = (priceData.rvol && priceData.rvol.baseline) || {};
+            tvRvolCumulativeBaseline = (priceData.rvol && priceData.rvol.cumulative_baseline) || {};
+            tvCurrentDayStartTime = priceData.current_day_start_time || 0;
+            const incrementalPlan = tvCanApplyPriceIncrementally(priceData, candles);
+            const tvSeriesApplyPerf = gexPerfStart('applyTVSeriesData', {
+                candidate: incrementalPlan.ok ? 'incremental' : 'full',
+                reason: incrementalPlan.reason,
+                bars: candles.length,
+            });
             // Clear the force-flags up-front so tvFocusCurrentSession() can
             // re-set tvForceSessionFocus to defer when today's data isn't ready
             // yet — without us clobbering it at the end of this render.
@@ -30910,23 +31480,96 @@ def index():
                 } catch (e) {}
             }
 
-            tvCandleSeries.setData(candles);
-            tvLastCandles = candles;
-            // Refresh RVOL baseline for live-bar coloring, then recolor the
-            // historical bars before handing them to the series.
-            tvRvolBaseline = (priceData.rvol && priceData.rvol.baseline) || {};
-            tvRvolCumulativeBaseline = (priceData.rvol && priceData.rvol.cumulative_baseline) || {};
-            tvCurrentDayStartTime = priceData.current_day_start_time || 0;
-            const volumeBars = priceData.volume || [];
-            applyRvolColors(volumeBars, callColor, putColor);
+            // Refresh RVOL coloring before handing volume bars to the chart.
+            if (incrementalPlan.ok) {
+                const volumeTailStart = tvFindSeriesTailStart(tvLastVolumeBars, volumeBars, tvSameVolumeBar, 12);
+                if (volumeTailStart >= 0) {
+                    const rvolStart = Math.max(0, Math.min(incrementalPlan.tailStart, volumeTailStart));
+                    applyRvolColors(volumeBars.slice(rvolStart), callColor, putColor);
+                } else {
+                    applyRvolColors(volumeBars, callColor, putColor);
+                }
+            } else {
+                applyRvolColors(volumeBars, callColor, putColor);
+            }
+            let chartApplyMode = 'full';
+            let chartApplyTail = 0;
+            let candleApplied = 0;
+            let volumeApplied = 0;
+            let baselineApplied = 0;
+            if (incrementalPlan.ok && !shouldFitAll && !shouldFocusSession) {
+                chartApplyMode = 'incremental';
+                chartApplyTail = incrementalPlan.tailStart;
+                const priorCandles = tvLastCandles;
+                const priorVolumeBars = tvLastVolumeBars;
+                const priorBaselineBars = tvLastVolumeBaselineBars;
+                candleApplied = tvUpdateSeriesTail(tvCandleSeries, priorCandles, candles, incrementalPlan.tailStart, tvToSeriesBar);
+                const volumeTailStart = tvFindSeriesTailStart(priorVolumeBars, volumeBars, tvSameVolumeBar, 12);
+                if (volumeTailStart >= 0) {
+                    volumeApplied = tvUpdateSeriesTail(tvVolumeSeries, priorVolumeBars, volumeBars, volumeTailStart, tvVolumeSeriesBar);
+                } else {
+                    try {
+                        tvVolumeSeries.setData(volumeBars);
+                        volumeApplied = volumeBars.length;
+                    } catch (e) {
+                        volumeApplied = -1;
+                    }
+                }
+                if (tvVolumeBaselineSeries) {
+                    applyRvolBaselineStyle();
+                    const nextBaselineBars = tvRvolEnabled ? volumeBaselineBars : [];
+                    const baselineTailStart = tvFindSeriesTailStart(priorBaselineBars, nextBaselineBars, tvSameVolumeBar, 12);
+                    if (baselineTailStart >= 0 && priorBaselineBars.length && nextBaselineBars.length) {
+                        baselineApplied = tvUpdateSeriesTail(tvVolumeBaselineSeries, priorBaselineBars, nextBaselineBars, baselineTailStart, row => ({ time: row.time, value: row.value || 0 }));
+                    } else {
+                        try {
+                            tvVolumeBaselineSeries.setData(nextBaselineBars);
+                            baselineApplied = nextBaselineBars.length;
+                        } catch (e) {
+                            baselineApplied = -1;
+                        }
+                    }
+                }
+                if (candleApplied < 0 || volumeApplied < 0 || baselineApplied < 0) {
+                    chartApplyMode = 'full_fallback';
+                    applyRvolColors(volumeBars, callColor, putColor);
+                    tvCandleSeries.setData(candles);
+                    tvVolumeSeries.setData(volumeBars);
+                    if (tvVolumeBaselineSeries) {
+                        applyRvolBaselineStyle();
+                        tvVolumeBaselineSeries.setData(tvRvolEnabled ? volumeBaselineBars : []);
+                    }
+                }
+                tvLastCandles = candles;
+            } else {
+                chartApplyMode = incrementalPlan.ok ? 'full_focus' : 'full_' + incrementalPlan.reason;
+                tvCandleSeries.setData(candles);
+                tvLastCandles = candles;
+                tvVolumeSeries.setData(volumeBars);
+                if (tvVolumeBaselineSeries) {
+                    applyRvolBaselineStyle();
+                    tvVolumeBaselineSeries.setData(tvRvolEnabled ? volumeBaselineBars : []);
+                }
+                candleApplied = candles.length;
+                volumeApplied = volumeBars.length;
+                baselineApplied = tvRvolEnabled ? volumeBaselineBars.length : 0;
+            }
+            tvLastPriceApplyContextKey = tvPriceApplyContextKey(priceData, candles);
+            tvLastPriceApplyTailSignature = tvTailSignature(candles, volumeBars);
+            tvLastVolumeBars = volumeBars;
+            tvLastVolumeBaselineBars = tvRvolEnabled ? volumeBaselineBars : [];
             indexVolumeMeta(volumeBars);
             updateCumRvolBadge(latestCumRvolMeta(volumeBars));
-            tvVolumeSeries.setData(volumeBars);
-            if (tvVolumeBaselineSeries) {
-                applyRvolBaselineStyle();
-                tvVolumeBaselineSeries.setData(tvRvolEnabled ? (priceData.volume_baseline || []) : []);
-            }
             scheduleRvolMarkerDraw();
+            gexPerfEnd(tvSeriesApplyPerf, {
+                mode: chartApplyMode,
+                tail: chartApplyTail,
+                candles: candles.length,
+                candle_updates: candleApplied,
+                volume_updates: volumeApplied,
+                baseline_updates: baselineApplied,
+                tail_signature: tvLastPriceApplyTailSignature,
+            });
             if (rangeToRestoreAfterData && tvPriceChart && tvPriceChart.timeScale) {
                 try { tvPriceChart.timeScale().setVisibleLogicalRange(rangeToRestoreAfterData); } catch (e) {}
             }
@@ -30959,9 +31602,28 @@ def index():
             scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
             scheduleTVProfileOverlayDraw();
-            if (tvActiveInds.size > 0) applyIndicators(tvIndicatorCandles, tvActiveInds); else applyTVAvwapDrawings();
-            renderKeyLevels(getScopedKeyLevels());
-            renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+            if (tvActiveInds.size > 0) {
+                if (chartApplyMode === 'incremental') {
+                    clearTimeout(tvIndicatorRefreshTimer);
+                    tvIndicatorRefreshTimer = setTimeout(() => applyIndicators(tvIndicatorCandles, tvActiveInds), 250);
+                } else {
+                    applyIndicators(tvIndicatorCandles, tvActiveInds);
+                }
+            } else {
+                applyTVAvwapDrawings();
+            }
+            const scopedKeyLevels = getScopedKeyLevels();
+            const keyLevelsSignature = getKeyLevelsRenderSignature(scopedKeyLevels);
+            if (keyLevelsSignature !== tvLastRenderedKeyLevelsSignature || !tvKeyLevelLines.length) {
+                renderKeyLevels(scopedKeyLevels);
+                tvLastRenderedKeyLevelsSignature = keyLevelsSignature;
+            }
+            const sessionLevelSettings = getSessionLevelSettingsFromDom();
+            const sessionLevelsSignature = getSessionLevelsRenderSignature(_lastSessionLevels, sessionLevelSettings);
+            if (sessionLevelsSignature !== tvLastRenderedSessionLevelsSignature || !tvSessionLevelLines.length) {
+                renderSessionLevels(_lastSessionLevels, sessionLevelSettings);
+                tvLastRenderedSessionLevelsSignature = sessionLevelsSignature;
+            }
             syncTradeScalpTargetLines();
             tvRefreshOverlayLevelPrices();
             if (shouldFitAll) {
@@ -30984,6 +31646,7 @@ def index():
             } else if (shouldFocusSession) {
                 tvFocusCurrentSession();
             }
+            return chartApplyMode;
         }
         // ─────────────────────────────────────────────────────────────────────
 
@@ -31837,6 +32500,9 @@ def index():
             orderPollTimer: null,
             orderPollInFlight: false,
             lastOrderPollAt: 0,
+            orderPollLastDurationMs: 0,
+            orderPollSlowCount: 0,
+            orderPollBackoffUntil: 0,
             lastChainRequestAt: 0,
             cancelLoadingId: '',
             replacingOrderId: '',
@@ -32632,11 +33298,29 @@ def index():
                 tradeRailState.orderPollTimer = null;
             }
         }
+        function updateTradeOrderPollBackoff(durationMs, failed = false) {
+            const elapsed = Number(durationMs);
+            tradeRailState.orderPollLastDurationMs = Number.isFinite(elapsed) ? elapsed : 0;
+            if (failed || (Number.isFinite(elapsed) && elapsed >= 2000)) {
+                tradeRailState.orderPollSlowCount = Math.min(4, (Number(tradeRailState.orderPollSlowCount) || 0) + 1);
+                const baseDelay = failed ? 4000 : 3000;
+                const backoffMs = Math.min(failed ? 16000 : 12000, baseDelay * tradeRailState.orderPollSlowCount);
+                tradeRailState.orderPollBackoffUntil = Date.now() + backoffMs;
+                return backoffMs;
+            }
+            if (Number.isFinite(elapsed) && elapsed < 1500) {
+                tradeRailState.orderPollSlowCount = 0;
+                tradeRailState.orderPollBackoffUntil = 0;
+            }
+            return 0;
+        }
         function scheduleTradeOrderPolling(delayMs) {
             stopTradeOrderPolling();
             if (!shouldPollTradeOrders()) return;
             const active = hasTradeOrderPollingIntents();
-            const delay = Number.isFinite(Number(delayMs)) ? Number(delayMs) : (active ? 1500 : 4000);
+            let delay = Number.isFinite(Number(delayMs)) ? Number(delayMs) : (active ? 1500 : 4000);
+            const backoffRemaining = Math.max(0, Number(tradeRailState.orderPollBackoffUntil || 0) - Date.now());
+            if (backoffRemaining > delay) delay = backoffRemaining;
             tradeRailState.orderPollTimer = setTimeout(() => {
                 tradeRailState.orderPollTimer = null;
                 if (!shouldPollTradeOrders()) return;
@@ -33031,25 +33715,46 @@ def index():
                 tradeRailState.liveQuoteEventSource = source;
                 tradeRailState.liveQuoteSymbol = symbol;
                 source.onmessage = event => {
+                    const quoteApplyPerf = gexPerfStart('applyTradeSelectedQuoteMessage', { symbol: symbol ? 1 : 0 });
+                    const rawMessage = event.data || '{}';
+                    const quoteParsePerf = gexPerfStart('selectedQuote:parse', { chars: rawMessage.length });
+                    let msg = null;
                     try {
-                        const msg = JSON.parse(event.data || '{}');
+                        msg = JSON.parse(rawMessage);
+                        gexPerfEnd(quoteParsePerf, { type: msg.type || '' });
                         if (msg.type === 'connected') {
                             tradeRailState.liveQuoteStreamStatus = 'connected';
                             tradeRailState.liveQuoteLastErrorAt = 0;
+                            gexPerfEnd(quoteApplyPerf, { skipped: 'connected' });
                             return;
                         }
-                        if (msg.type === 'heartbeat') return;
-                        if (msg.type !== 'option_quote' || msg.contract_symbol !== tradeRailState.selectedSymbol) return;
+                        if (msg.type === 'heartbeat') {
+                            gexPerfEnd(quoteApplyPerf, { skipped: 'heartbeat' });
+                            return;
+                        }
+                        if (msg.type !== 'option_quote' || msg.contract_symbol !== tradeRailState.selectedSymbol) {
+                            gexPerfEnd(quoteApplyPerf, { skipped: 'stale_or_other', type: msg.type || '' });
+                            return;
+                        }
+                        const mergePerf = gexPerfStart('selectedQuote:merge');
                         const mergedQuote = mergeTradeLiveQuoteMessage(msg);
+                        gexPerfEnd(mergePerf);
+                        const signaturePerf = gexPerfStart('selectedQuote:signature');
                         const nextSignature = getTradeLiveQuoteOverrideSignature(mergedQuote);
                         const quoteChanged = nextSignature !== tradeRailState.liveQuoteSignature;
+                        gexPerfEnd(signaturePerf, { changed: quoteChanged });
+                        const statePerf = gexPerfStart('selectedQuote:state');
                         tradeRailState.liveSelectedQuote = mergedQuote;
                         tradeRailState.liveQuoteSignature = nextSignature;
                         tradeRailState.liveQuoteStreamStatus = 'live';
                         tradeRailState.liveQuoteLastErrorAt = 0;
                         if (quoteChanged) scheduleTradeActiveTraderRender();
+                        gexPerfEnd(statePerf, { scheduled: quoteChanged });
+                        gexPerfEnd(quoteApplyPerf, { changed: quoteChanged });
                     } catch (e) {
-                        console.warn('Selected option quote stream parse failed', e);
+                        gexPerfEnd(quoteParsePerf, { error: true });
+                        gexPerfEnd(quoteApplyPerf, { error: true });
+                        console.warn('Selected option quote stream handling failed', e);
                     }
                 };
                 source.onerror = () => {
@@ -35980,12 +36685,18 @@ def index():
             tradeRailState.ordersError = '';
             tradeRailState.ordersRequestKey = key;
             if (!silent) renderTradeOrders();
+            const orderRequestStarted = performance.now();
+            const orderFetchPerf = gexPerfStart('fetch:/trade/orders', { poll: !!options.poll, silent });
             fetch('/trade/orders', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ account_hash: tradeRailState.accountHash, ticker, contract_symbol: symbol || '' }),
             })
-            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(r => {
+                gexPerfEnd(orderFetchPerf, { status: r.status });
+                return parseGexJsonResponse(r, '/trade/orders', { poll: !!options.poll })
+                    .then(d => ({ ok: r.ok, data: d }));
+            })
             .then(({ ok, data }) => {
                 if (tradeRailState.ordersRequestKey !== key) {
                     if (silent) tradeRailState.orderPollInFlight = false;
@@ -35993,16 +36704,26 @@ def index():
                     return;
                 }
                 if (!ok || data.error) throw new Error(data.error || 'Order lookup unavailable');
-                tradeRailState.orders = Array.isArray(data.orders) ? data.orders : [];
-                tradeRailState.ordersLoading = false;
-                tradeRailState.orderPollInFlight = false;
-                tradeRailState.lastOrderPollAt = Date.now();
-                tradeRailState.ordersError = '';
-                reconcileTradeOrderIntentsWithOrders(tradeRailState.orders);
-                renderTradeOrders();
-                scheduleTradeOrderPolling();
+                const orderApplyPerf = gexPerfStart('apply:/trade/orders', { orders: Array.isArray(data.orders) ? data.orders.length : 0 });
+                try {
+                    tradeRailState.orders = Array.isArray(data.orders) ? data.orders : [];
+                    tradeRailState.ordersLoading = false;
+                    tradeRailState.orderPollInFlight = false;
+                    tradeRailState.lastOrderPollAt = Date.now();
+                    tradeRailState.ordersError = '';
+                    reconcileTradeOrderIntentsWithOrders(tradeRailState.orders);
+                    renderTradeOrders();
+                    const backoffMs = updateTradeOrderPollBackoff(performance.now() - orderRequestStarted, false);
+                    scheduleTradeOrderPolling(backoffMs || undefined);
+                } finally {
+                    gexPerfEnd(orderApplyPerf, {
+                        poll_elapsed_ms: tradeRailState.orderPollLastDurationMs.toFixed(1),
+                        backoff_ms: Math.max(0, Number(tradeRailState.orderPollBackoffUntil || 0) - Date.now()).toFixed(0),
+                    });
+                }
             })
             .catch(err => {
+                gexPerfEnd(orderFetchPerf, { error: true });
                 if (tradeRailState.ordersRequestKey !== key) {
                     if (silent) tradeRailState.orderPollInFlight = false;
                     else tradeRailState.ordersLoading = false;
@@ -36013,7 +36734,8 @@ def index():
                 tradeRailState.orderPollInFlight = false;
                 tradeRailState.ordersError = err.message || 'Order lookup unavailable';
                 renderTradeOrders();
-                scheduleTradeOrderPolling();
+                const backoffMs = updateTradeOrderPollBackoff(performance.now() - orderRequestStarted, true);
+                scheduleTradeOrderPolling(backoffMs || undefined);
             });
         }
         function requestTradeAccounts(options = {}) {
@@ -36290,19 +37012,29 @@ def index():
             })
             .then(r => {
                 gexPerfEnd(tradeChainPerf, { status: r.status });
-                return r.json().then(d => ({ ok: r.ok, status: r.status, data: d }));
+                return parseGexJsonResponse(r, '/trade_chain', { refresh_cache: refreshCache })
+                    .then(d => ({ ok: r.ok, status: r.status, data: d }));
             })
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Trade chain request failed');
-                tradeRailState.payload = data;
-                if (data.strike_profiles) mergeStrikeOverlayProfiles(data.strike_profiles, 'fast-chain');
-                const expiries = Array.isArray(data.expiries) ? data.expiries : [];
-                const stillAvailable = tradeRailState.expiry && expiries.includes(tradeRailState.expiry);
-                tradeRailState.expiry = stillAvailable
-                    ? tradeRailState.expiry
-                    : ((data.selected_expiries && data.selected_expiries[0]) || expiries[0] || tradeRailState.expiry || '');
-                tradeRailState.loading = false;
-                renderTradeRail();
+                const applyPerf = gexPerfStart('apply:/trade_chain', {
+                    contracts: Array.isArray(data.contracts) ? data.contracts.length : 0,
+                    refresh_outcome: data.cache_meta && data.cache_meta.refresh_outcome,
+                    stale: data.cache_meta && data.cache_meta.stale,
+                });
+                try {
+                    tradeRailState.payload = data;
+                    if (data.strike_profiles) mergeStrikeOverlayProfiles(data.strike_profiles, 'fast-chain');
+                    const expiries = Array.isArray(data.expiries) ? data.expiries : [];
+                    const stillAvailable = tradeRailState.expiry && expiries.includes(tradeRailState.expiry);
+                    tradeRailState.expiry = stillAvailable
+                        ? tradeRailState.expiry
+                        : ((data.selected_expiries && data.selected_expiries[0]) || expiries[0] || tradeRailState.expiry || '');
+                    tradeRailState.loading = false;
+                    renderTradeRail();
+                } finally {
+                    gexPerfEnd(applyPerf, { rendered: true });
+                }
             })
             .catch(err => {
                 gexPerfEnd(tradeChainPerf, { error: true });
@@ -37857,13 +38589,37 @@ def index():
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
             if (!isChartVisible('price')) return;
+            const priceApplyDataPerf = gexPerfStart('applyPriceData');
             lastPriceData = priceJson; // keep for popout push
-            const priceContainer = ensurePriceChartDom();
-            if (!priceContainer) return;
-            showPriceChartUI();
-            const parsed = typeof priceJson === 'string' ? JSON.parse(priceJson) : priceJson;
-            if (!parsed.error) {
-                renderTVPriceChart(parsed);
+            let priceApplyMode = '';
+            try {
+                const priceContainer = ensurePriceChartDom();
+                if (!priceContainer) {
+                    gexPerfEnd(priceApplyDataPerf, { skipped: 'no_container' });
+                    return;
+                }
+                showPriceChartUI();
+                const pricePayloadParsePerf = gexPerfStart('parse:price_chart_payload', { chars: typeof priceJson === 'string' ? priceJson.length : 0 });
+                let parsed;
+                try {
+                    parsed = typeof priceJson === 'string' ? JSON.parse(priceJson) : priceJson;
+                    gexPerfEnd(pricePayloadParsePerf, { error: !!(parsed && parsed.error) });
+                } catch (e) {
+                    gexPerfEnd(pricePayloadParsePerf, { error: true });
+                    throw e;
+                }
+                if (!parsed.error) {
+                    const renderPricePerf = gexPerfStart('renderTVPriceChart', { source: 'update_price' });
+                    let renderMode = '';
+                    try {
+                        renderMode = renderTVPriceChart(parsed) || '';
+                        priceApplyMode = renderMode;
+                    } finally {
+                        gexPerfEnd(renderPricePerf, { mode: renderMode });
+                    }
+                }
+            } finally {
+                gexPerfEnd(priceApplyDataPerf, { mode: priceApplyMode });
             }
         }
 
@@ -39659,20 +40415,25 @@ def index():
             })
             .then(r => {
                 gexPerfEnd(priceFetchPerf, { status: r.status });
-                return r.json();
+                return parseGexJsonResponse(r, '/update_price', { force: !!force, timeframe: payload.timeframe });
             })
             .then(priceResp => {
-                _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
-                _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
-                if (!priceResp.error && priceResp.price) {
-                    applyPriceData(priceResp.price);
-                } else {
-                    renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
-                }
-                if (priceResp && priceResp.top_oi && requestTopOIContextKey === getTopOIContextKey()) {
-                    _lastTopOI = priceResp.top_oi;
-                    _lastTopOIContextKey = requestTopOIContextKey;
-                    if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
+                const priceApplyPerf = gexPerfStart('apply:/update_price', { has_price: !!(priceResp && priceResp.price), error: !!(priceResp && priceResp.error) });
+                try {
+                    _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
+                    _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
+                    if (!priceResp.error && priceResp.price) {
+                        applyPriceData(priceResp.price);
+                    } else {
+                        renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+                    }
+                    if (priceResp && priceResp.top_oi && requestTopOIContextKey === getTopOIContextKey()) {
+                        _lastTopOI = priceResp.top_oi;
+                        _lastTopOIContextKey = requestTopOIContextKey;
+                        if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
+                    }
+                } finally {
+                    gexPerfEnd(priceApplyPerf, { applied: true });
                 }
             })
             .catch(err => {
@@ -39704,7 +40465,13 @@ def index():
 
                 const priceData = typeof data.price === 'string' ? JSON.parse(data.price) : data.price;
                 if (!priceData.error) {
-                    renderTVPriceChart(priceData);
+                    const renderPricePerf = gexPerfStart('renderTVPriceChart', { source: 'updateCharts' });
+                    let renderMode = '';
+                    try {
+                        renderMode = renderTVPriceChart(priceData) || '';
+                    } finally {
+                        gexPerfEnd(renderPricePerf, { mode: renderMode });
+                    }
                 }
             } else if (!selectedCharts.price) {
                 const priceContainer = document.querySelector('.price-chart-container');
@@ -39734,6 +40501,13 @@ def index():
                     tvVolumeBaselineSeries = null;
                     tvRvolMarkerLayer = null;
                     tvVolumeMetaByTime = {};
+                    tvVolumePriorCumByTime = {};
+                    tvLastCumVolumeMeta = null;
+                    tvLastVolumeBars = [];
+                    tvLastVolumeBaselineBars = [];
+                    tvLastPriceApplyContextKey = '';
+                    tvLastPriceApplyTailSignature = '';
+                    tvLastCandleStyleSignature = '';
                     tvIndicatorSeries = {};
                     tvAvwapSeriesById = {};
                     tvIndicatorDataCache = {};
@@ -39748,6 +40522,8 @@ def index():
                     tvScalpTargetLineRecords = [];
                     tvScalpTargetLineSignature = '';
                     tvScalpTargetLineContextSignature = '';
+                    tvLastRenderedKeyLevelsSignature = '';
+                    tvLastRenderedSessionLevelsSignature = '';
                     tvKeyLevelPrices = [];
                     tvSessionLevelPrices = [];
                     tvTopOIPrices = [];
@@ -41877,7 +42653,7 @@ def trade_chain():
             )
             perf.add('cache_refresh_hit', cache_snapshot.get('cache_hit'))
             perf.add('cache_refresh_fetched', cache_snapshot.get('fetched'))
-            if not cache_snapshot.get('cache_hit') and not cache_snapshot.get('cache_stored'):
+            if not cache_snapshot.get('cache_hit') and not cache_snapshot.get('cache_stored') and not cache_snapshot.get('stale'):
                 if cache_snapshot.get('S') is None:
                     cache_refresh_error = 'Cache refresh did not return a current price.'
                 else:
@@ -41916,10 +42692,19 @@ def trade_chain():
     payload['cache_meta'] = {
         'cache_hit': bool(cache_snapshot.get('cache_hit')) if cache_snapshot else False,
         'fetched': bool(cache_snapshot.get('fetched')) if cache_snapshot else False,
+        'stale': bool(cache_snapshot.get('stale')) if cache_snapshot else False,
+        'inflight': bool(cache_snapshot.get('inflight')) if cache_snapshot else False,
         'stored': bool(cache_snapshot.get('cache_stored')) if cache_snapshot else False,
         'fetched_at_ms': meta.get('fetched_at_ms'),
         'cache_key': meta.get('cache_key'),
         'requested_cache_key': cache_snapshot.get('cache_key') if cache_snapshot else None,
+        'refresh_outcome': cache_snapshot.get('refresh_outcome') if cache_snapshot else None,
+        'cache_age_ms': cache_snapshot.get('cache_age_ms') if cache_snapshot else None,
+        'min_age_ms': cache_snapshot.get('min_age_ms') if cache_snapshot else None,
+        'lock_wait_ms': cache_snapshot.get('lock_wait_ms') if cache_snapshot else None,
+        'lock_held_ms': cache_snapshot.get('lock_held_ms') if cache_snapshot else None,
+        'prior_cache_age_ms': cache_snapshot.get('prior_cache_age_ms') if cache_snapshot else None,
+        'prior_cache_usable': cache_snapshot.get('prior_cache_usable') if cache_snapshot else None,
         'refresh_error': cache_refresh_error,
     }
     if refresh_cache:
@@ -42029,6 +42814,7 @@ def trade_orders():
         status = str(status or '').strip().upper() or None
     perf.add('status_filter', status or 'all')
 
+    schwab_call_started = time.perf_counter()
     try:
         with perf.span('schwab_call'):
             response = client.account_orders(
@@ -42039,7 +42825,11 @@ def trade_orders():
                 status=status,
             )
     except Exception as e:
+        schwab_call_ms = (time.perf_counter() - schwab_call_started) * 1000
+        perf.add('schwab_call_slow', schwab_call_ms >= 2000)
         return _perf_finish_response(perf, _trade_api_error('Order lookup failed.', 502, e), error='schwab_call')
+    schwab_call_ms = (time.perf_counter() - schwab_call_started) * 1000
+    perf.add('schwab_call_slow', schwab_call_ms >= 2000)
     if not getattr(response, 'ok', False):
         return _perf_finish_response(perf, _trade_api_error(
             f"Order lookup failed with Schwab status {getattr(response, 'status_code', 'unknown')}.",
@@ -43213,6 +44003,34 @@ def update_price():
         import traceback
         traceback.print_exc()
         return _perf_jsonify(perf, {'error': str(e)}, 500)
+
+
+@app.route('/perf/browser_trace', methods=['POST'])
+def perf_browser_trace():
+    """Persist an exported browser perf ring buffer to /tmp for live retests."""
+    payload = request.get_json(silent=True) or {}
+    events = payload.get('events') if isinstance(payload, dict) else None
+    if not isinstance(events, list):
+        return jsonify({'error': 'events must be a list'}), 400
+    events = events[-50000:]
+    trace_dir = os.getenv('GEX_BROWSER_TRACE_DIR') or '/tmp'
+    try:
+        os.makedirs(trace_dir, exist_ok=True)
+        stamp = datetime.now(pytz.UTC).strftime('%Y%m%dT%H%M%SZ')
+        base = f'gex-browser-perf-{stamp}-{int(time.time() * 1000)}'
+        json_path = os.path.join(trace_dir, base + '.json')
+        jsonl_path = os.path.join(trace_dir, base + '.jsonl')
+        safe_payload = dict(payload)
+        safe_payload['events'] = events
+        safe_payload['saved_at'] = datetime.now(pytz.UTC).isoformat().replace('+00:00', 'Z')
+        with open(json_path, 'w', encoding='utf-8') as fh:
+            json.dump(safe_payload, fh, separators=(',', ':'))
+        with open(jsonl_path, 'w', encoding='utf-8') as fh:
+            for event in events:
+                fh.write(json.dumps(event, separators=(',', ':')) + '\n')
+        return jsonify({'ok': True, 'count': len(events), 'path': json_path, 'jsonl_path': jsonl_path})
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
 
 
 @app.route('/save_settings', methods=['POST'])
