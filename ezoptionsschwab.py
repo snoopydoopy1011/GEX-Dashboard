@@ -261,6 +261,15 @@ class _PerfTrace:
         return response
 
 
+@contextmanager
+def _maybe_perf_span(perf, name):
+    if perf is None:
+        yield
+        return
+    with perf.span(name):
+        yield
+
+
 def _perf_jsonify(perf, payload, status=None):
     response = jsonify(payload)
     if status is not None:
@@ -1217,9 +1226,12 @@ UPDATE_INTERVAL = 1  # seconds
 current_ticker = None
 current_expiry = None
 
-# Cache for last fetched options data per ticker — used by /update_price
-# so the price chart can refresh independently without re-fetching the full chain.
-_options_cache = {}  # ticker -> {'calls': DataFrame, 'puts': DataFrame, 'S': float}
+# Cache for last fetched options data per ticker. The selected-contract stream
+# stays live independently; this cache feeds chain context and contract safety
+# validation paths.
+_options_cache = {}  # ticker -> {'calls': DataFrame, 'puts': DataFrame, 'S': float, 'meta': dict}
+_options_cache_refresh_lock = threading.Lock()
+ANALYTICS_OPTIONS_CACHE_REUSE_MS = 5000
 
 # Successful Schwab previews are valid for five minutes. The UI mirrors this
 # TTL near the Active Trader fast controls so an old preview is visible before
@@ -4665,129 +4677,14 @@ def build_historical_levels_overlay(ticker, display_date, chart_times, latest_pr
     return historical_points, historical_expected_moves
 
 
-def create_gex_side_panel(calls, puts, S, strike_range=0.02,
-                          call_color=CALL_COLOR, put_color=PUT_COLOR,
-                          selected_expiries=None):
-    """Horizontal-bar GEX panel keyed to strike, intended to render in a sibling
-    div next to the TradingView candle chart with a shared visible price range.
-
-    Calls contribute positive net GEX (dealers long gamma, green), puts
-    contribute negative (dealers short gamma, red). Each row in calls/puts is
-    summed at its native strike — SPY's native grid is $1, SPX's is $5, so the
-    resulting bar resolution naturally matches the underlying.
-    """
-    empty = go.Figure()
-    empty.update_layout(
-        paper_bgcolor=PLOT_THEME['paper_bgcolor'], plot_bgcolor=PLOT_THEME['plot_bgcolor'],
-        margin=dict(l=4, r=4, t=4, b=24),
-        xaxis=dict(visible=False), yaxis=dict(visible=False),
-    )
-
-    if (calls is None or getattr(calls, 'empty', True)) and \
-       (puts is None or getattr(puts, 'empty', True)):
-        return empty.to_json()
-
-    if calls is not None and not calls.empty and selected_expiries and 'expiration_date' in calls.columns:
-        calls = calls[calls['expiration_date'].isin(selected_expiries)]
-    if puts is not None and not puts.empty and selected_expiries and 'expiration_date' in puts.columns:
-        puts = puts[puts['expiration_date'].isin(selected_expiries)]
-
-    min_strike = S * (1 - strike_range)
-    max_strike = S * (1 + strike_range)
-
-    def strike_sum(df):
-        if df is None or df.empty or 'GEX' not in df.columns:
-            return {}
-        f = df[(df['strike'] >= min_strike) & (df['strike'] <= max_strike)]
-        if f.empty:
-            return {}
-        return f.groupby('strike')['GEX'].sum().to_dict()
-
-    call_map = strike_sum(calls)
-    put_map = strike_sum(puts)
-    strikes = sorted(set(call_map) | set(put_map))
-    if not strikes:
-        return empty.to_json()
-
-    call_vals = [call_map.get(s, 0) for s in strikes]
-    put_vals = [put_map.get(s, 0) for s in strikes]
-    net = [c - p for c, p in zip(call_vals, put_vals)]
-
-    def _hex_to_rgb(h):
-        h = h.lstrip('#')
-        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-    call_rgb = _hex_to_rgb(call_color)
-    put_rgb = _hex_to_rgb(put_color)
-    max_abs = max((abs(v) for v in net), default=0) or 1.0
-
-    def _shade(v):
-        alpha = 0.30 + 0.70 * (abs(v) / max_abs)
-        r, g, b = call_rgb if v >= 0 else put_rgb
-        return f'rgba({r},{g},{b},{alpha:.3f})'
-
-    colors = [_shade(v) for v in net]
-    customdata = list(zip(call_vals, put_vals))
-
-    native_interval = 1.0
-    if len(strikes) >= 2:
-        diffs = [round(strikes[i] - strikes[i - 1], 4) for i in range(1, len(strikes))]
-        diffs = [d for d in diffs if d > 0]
-        if diffs:
-            from collections import Counter
-            native_interval = Counter(diffs).most_common(1)[0][0]
-    bar_width = max(native_interval * 0.3, 0.05)
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=net, y=strikes,
-        orientation='h',
-        width=bar_width,
-        marker=dict(color=colors, line=dict(width=0)),
-        customdata=customdata,
-        hovertemplate=(
-            'Strike %{y}<br>'
-            'Net GEX %{x:,.0f}<br>'
-            'Call GEX %{customdata[0]:,.0f}<br>'
-            'Put GEX %{customdata[1]:,.0f}<extra></extra>'
-        ),
-        showlegend=False,
-    ))
-    fig.add_vline(x=0, line_color='#555', line_width=1)
-    fig.add_hline(y=S, line_color='#888', line_dash='dot', line_width=1)
-
-    fig.update_layout(
-        paper_bgcolor=PLOT_THEME['paper_bgcolor'],
-        plot_bgcolor=PLOT_THEME['plot_bgcolor'],
-        margin=dict(l=4, r=4, t=4, b=24),
-        height=680,
-        xaxis=dict(
-            zeroline=False,
-            gridcolor='#2A2A2A',
-            color='#888',
-            tickfont=dict(size=9),
-            title=dict(text='Net GEX', font=dict(size=10, color='#888')),
-        ),
-        yaxis=dict(
-            zeroline=False,
-            gridcolor='#2A2A2A',
-            color='#aaa',
-            tickfont=dict(size=9),
-            side='right',
-            range=[min_strike, max_strike],
-        ),
-    )
-    return fig.to_json()
-
-
-def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_expiries=None):
+def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_expiries=None, metrics=None):
     """Build compact per-strike profiles for the TradingView strike overlay.
 
     This only aggregates columns that already exist on the option chain rows; it
     does not alter any exposure math. The output is intentionally JSON-simple so
     the frontend does not need to parse Plotly payloads.
     """
-    profiles = {
+    all_profiles = {
         'gex': ('GEX', 'call_minus_put'),
         'gamma': ('GEX', 'call_minus_put'),
         'delta': ('DEX', 'call_plus_put'),
@@ -4796,8 +4693,12 @@ def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_ex
         'open_interest': ('openInterest', 'call_minus_put'),
         'options_volume': ('volume', 'call_minus_put'),
     }
+    requested = set(metrics or all_profiles.keys())
+    profiles = {key: spec for key, spec in all_profiles.items() if key in requested}
+    include_voi_ratio = metrics is None or 'voi_ratio' in requested
     empty_payload = {key: [] for key in profiles}
-    empty_payload['voi_ratio'] = []
+    if include_voi_ratio:
+        empty_payload['voi_ratio'] = []
     if S is None:
         return empty_payload
     try:
@@ -4879,26 +4780,38 @@ def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_ex
                 out[float(strike)] = ratio
         return out
 
-    voi_call_map = _voi_ratio_by_strike(calls_df)
-    voi_put_map = _voi_ratio_by_strike(puts_df)
-    voi_rows = []
-    for strike in sorted(set(voi_call_map) | set(voi_put_map)):
-        call_value = float(voi_call_map.get(strike, 0.0) or 0.0)
-        put_value = float(voi_put_map.get(strike, 0.0) or 0.0)
-        if call_value == 0 and put_value == 0:
-            continue
-        value = call_value - put_value
-        if not all(math.isfinite(v) for v in (strike, call_value, put_value, value)):
-            continue
-        voi_rows.append({
-            'strike': float(strike),
-            'value': float(value),
-            'call': call_value,
-            'put': put_value,
-            'abs_value': abs(float(value)),
-        })
-    payload['voi_ratio'] = voi_rows
+    if include_voi_ratio:
+        voi_call_map = _voi_ratio_by_strike(calls_df)
+        voi_put_map = _voi_ratio_by_strike(puts_df)
+        voi_rows = []
+        for strike in sorted(set(voi_call_map) | set(voi_put_map)):
+            call_value = float(voi_call_map.get(strike, 0.0) or 0.0)
+            put_value = float(voi_put_map.get(strike, 0.0) or 0.0)
+            if call_value == 0 and put_value == 0:
+                continue
+            value = call_value - put_value
+            if not all(math.isfinite(v) for v in (strike, call_value, put_value, value)):
+                continue
+            voi_rows.append({
+                'strike': float(strike),
+                'value': float(value),
+                'call': call_value,
+                'put': put_value,
+                'abs_value': abs(float(value)),
+            })
+        payload['voi_ratio'] = voi_rows
     return payload
+
+
+def create_fast_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_expiries=None):
+    return create_strike_profile_payload(
+        calls,
+        puts,
+        S,
+        strike_range,
+        selected_expiries=selected_expiries,
+        metrics=['options_volume', 'open_interest', 'voi_ratio'],
+    )
 
 
 def _expiration_series_iso(df):
@@ -6712,7 +6625,7 @@ def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None
     Max Pain: classic open-interest max pain for the nearest selected expiry.
     Max +/- GEX: live strongest positive / negative net GEX strikes. When a
                  strike window is provided, rank these inside that window so
-                 the chart overlays match the visible strike rail.
+                 the chart overlays match the visible strike profile.
     EM Upper/Lower: ATM straddle-based ±1σ expected move bracket.
 
     All values can be None independently if the inputs don't support them
@@ -6801,7 +6714,7 @@ def compute_key_levels(calls, puts, S, selected_expiries=None, strike_range=None
             neg_strike, neg_val = min(neg_extrema, key=lambda item: item[1])
             out['max_negative_gex'] = {'price': float(neg_strike), 'gex': float(neg_val)}
 
-        # Match the displayed strike-rail profile: look for adjacent net-GEX bars
+        # Match the displayed strike overlay profile: look for adjacent net-GEX bars
         # whose signs differ, then interpolate between them. Exact zero bars win
         # immediately. Multiple crossings can happen on noisy chains, so use the
         # one closest to spot.
@@ -10947,6 +10860,145 @@ def fetch_options_for_multiple_dates(ticker, dates, exposure_metric="Open Intere
     return combined_calls, combined_puts
 
 
+def _build_options_cache_key(
+    ticker,
+    expiry_dates,
+    exposure_metric="Open Interest",
+    delta_adjusted=False,
+    calculate_in_notional=True,
+):
+    normalized_expiries = _normalize_expiry_list(expiry_dates)
+    return json.dumps({
+        'ticker': format_ticker(ticker or ''),
+        'expiry_dates': normalized_expiries,
+        'exposure_metric': str(exposure_metric or 'Open Interest'),
+        'delta_adjusted': bool(delta_adjusted),
+        'calculate_in_notional': bool(calculate_in_notional),
+    }, sort_keys=True, separators=(',', ':'))
+
+
+def _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms):
+    cached = _options_cache.get(ticker)
+    if not cached:
+        return None
+    meta = cached.get('meta') or {}
+    if meta.get('cache_key') != cache_key:
+        return None
+    try:
+        fetched_at_ms = int(meta.get('fetched_at_ms') or 0)
+    except Exception:
+        fetched_at_ms = 0
+    if min_age_ms <= 0 or fetched_at_ms <= 0:
+        return None
+    if now_ms - fetched_at_ms > min_age_ms:
+        return None
+    return {
+        'calls': cached.get('calls'),
+        'puts': cached.get('puts'),
+        'S': cached.get('S'),
+        'cache_hit': True,
+        'fetched': False,
+        'cache_key': cache_key,
+        'fetched_at': fetched_at_ms,
+        'meta': meta,
+        'cache_stored': False,
+    }
+
+
+def refresh_options_cache_snapshot(
+    ticker,
+    expiry_dates,
+    *,
+    exposure_metric="Open Interest",
+    delta_adjusted=False,
+    calculate_in_notional=True,
+    min_age_ms=0,
+    force=False,
+    perf=None,
+):
+    """Fetch Schwab chain and current price when the keyed cache is stale.
+
+    This helper keeps the chain-cache refresh lane separate from slower chart
+    and analytics work. It intentionally does not compute Plotly payloads,
+    trader stats, key levels, or order data.
+    """
+    ticker = format_ticker(ticker or '')
+    expiry_dates = list(expiry_dates or [])
+    cache_key = _build_options_cache_key(
+        ticker,
+        expiry_dates,
+        exposure_metric=exposure_metric,
+        delta_adjusted=delta_adjusted,
+        calculate_in_notional=calculate_in_notional,
+    )
+    try:
+        min_age_ms = max(0, int(min_age_ms or 0))
+    except Exception:
+        min_age_ms = 0
+
+    with _options_cache_refresh_lock:
+        now_ms = int(time.time() * 1000)
+        if not force:
+            cached_snapshot = _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms)
+            if cached_snapshot is not None:
+                return cached_snapshot
+
+        with _maybe_perf_span(perf, 'fetch_chain'):
+            if len(expiry_dates) == 1:
+                calls, puts = fetch_options_for_date(
+                    ticker,
+                    expiry_dates[0],
+                    exposure_metric=exposure_metric,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
+                )
+            else:
+                calls, puts = fetch_options_for_multiple_dates(
+                    ticker,
+                    expiry_dates,
+                    exposure_metric=exposure_metric,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
+                )
+
+        with _maybe_perf_span(perf, 'get_current_price'):
+            S = get_current_price(ticker)
+        fetched_at_ms = int(time.time() * 1000)
+        meta = {
+            'ticker': ticker,
+            'expiry_dates': _normalize_expiry_list(expiry_dates),
+            'exposure_metric': str(exposure_metric or 'Open Interest'),
+            'delta_adjusted': bool(delta_adjusted),
+            'calculate_in_notional': bool(calculate_in_notional),
+            'fetched_at_ms': fetched_at_ms,
+            'current_price_fetched_at_ms': fetched_at_ms if S is not None else None,
+            'cache_key': cache_key,
+        }
+
+        cache_stored = False
+        if S is not None and not (calls.empty and puts.empty):
+            with _maybe_perf_span(perf, 'options_cache_copy'):
+                _options_cache[ticker] = {
+                    'calls': calls.copy(),
+                    'puts': puts.copy(),
+                    'S': S,
+                    'meta': meta,
+                }
+                cache_stored = True
+
+        return {
+            'calls': calls,
+            'puts': puts,
+            'S': S,
+            'cache_hit': False,
+            'fetched': True,
+            'cache_key': cache_key,
+            'fetched_at': fetched_at_ms,
+            'meta': meta,
+            'cache_stored': cache_stored,
+        }
+
+
 def _cleanup_desktop_window_states(now=None):
     now = now or time.time()
     expired = [
@@ -11818,7 +11870,6 @@ def index():
             text-align: center;
         }
         .chart-grid {
-            --gex-col-w: 292px;
             --rail-col-w: clamp(360px, 24vw, 430px);
             --trade-rail-w: clamp(360px, 24vw, 460px);
             --workspace-top-reclaim: 36px;
@@ -11826,14 +11877,13 @@ def index():
             --workspace-pane-h: clamp(900px, calc(84vh + var(--workspace-top-reclaim) + var(--workspace-flow-reclaim)), 1120px);
             position: relative;
             display: grid;
-            grid-template-columns: minmax(0, 1fr) var(--gex-col-w) var(--rail-col-w) var(--trade-rail-w);
+            grid-template-columns: minmax(0, 1fr) var(--rail-col-w) var(--trade-rail-w);
             grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto auto auto;
             column-gap: 2px;
             row-gap: 4px;
             width: 100%;
             align-items: stretch;
         }
-        .chart-grid.gex-collapsed { --gex-col-w: 0px; }
         .chart-grid.rail-flow-active { --rail-col-w: clamp(440px, 32vw, 560px); }
         .chart-grid.rail-collapsed { --rail-col-w: 0px !important; }
         .chart-grid.trade-rail-collapsed { --trade-rail-w: 0px !important; }
@@ -11847,18 +11897,16 @@ def index():
         .chart-grid.trade-rail-collapsed > .trade-rail-resize-handle {
             display: none;
         }
-        /* Row 1: workspace toolbar shell (col 1) + GEX column header (col 2) + rail tabs (col 3) + trading header (col 4). */
+        /* Row 1: workspace toolbar shell (col 1) + overview rail tabs (col 2) + trading header (col 3). */
         .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
-        .chart-grid > .gex-col-header       { grid-column: 2; grid-row: 1; }
-        .chart-grid > .right-rail-tabs      { grid-column: 3; grid-row: 1; }
-        .chart-grid > .trade-rail-header    { grid-column: 4; grid-row: 1; }
-        /* Row 2: price chart (col 1) + GEX column (col 2) + rail panels (col 3) + trading rail (col 4). */
+        .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
+        .chart-grid > .trade-rail-header    { grid-column: 3; grid-row: 1; }
+        /* Row 2: price chart (col 1) + overview rail panels (col 2) + trading rail (col 3). */
         .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
-        .chart-grid > .gex-column            { grid-column: 2; grid-row: 2; }
-        .chart-grid > .right-rail-panels     { grid-column: 3; grid-row: 2; }
-        .chart-grid > .trade-rail            { grid-column: 4; grid-row: 2; }
+        .chart-grid > .right-rail-panels     { grid-column: 2; grid-row: 2; }
+        .chart-grid > .trade-rail            { grid-column: 3; grid-row: 2; }
         .chart-grid > .right-rail-resize-handle {
-            grid-column: 3;
+            grid-column: 2;
             grid-row: 1 / span 2;
             justify-self: start;
             align-self: stretch;
@@ -11898,7 +11946,7 @@ def index():
             border-color: var(--accent);
         }
         .chart-grid > .trade-rail-resize-handle {
-            grid-column: 4;
+            grid-column: 3;
             grid-row: 1 / span 2;
             justify-self: start;
             align-self: stretch;
@@ -11979,51 +12027,6 @@ def index():
         /* Remaining rows span all columns. */
         .chart-grid > #secondary-tabs { grid-column: 1 / -1; grid-row: 5; }
         .chart-grid > .charts-grid    { grid-column: 1 / -1; grid-row: 6; }
-        .chart-grid > .gex-resize-handle {
-            grid-column: 2;
-            grid-row: 1 / span 2;
-            justify-self: start;
-            align-self: stretch;
-            width: 12px;
-            margin-left: -6px;
-            cursor: ew-resize;
-            z-index: 8;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            user-select: none;
-            touch-action: none;
-        }
-        .gex-resize-handle::before {
-            content: '↔';
-            width: 18px;
-            height: 54px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 999px;
-            background: rgba(21, 26, 33, 0.92);
-            border: 1px solid var(--border);
-            color: var(--fg-2);
-            font-size: 11px;
-            line-height: 1;
-            opacity: 0;
-            transform: scale(0.96);
-            transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-            pointer-events: none;
-        }
-        .gex-resize-handle:hover::before,
-        .gex-resize-handle.dragging::before {
-            opacity: 1;
-            transform: scale(1);
-            color: var(--fg-0);
-            border-color: var(--accent);
-        }
-        body.gex-resize-active,
-        body.gex-resize-active * {
-            cursor: ew-resize !important;
-            user-select: none !important;
-        }
         body.right-rail-resize-active,
         body.right-rail-resize-active * {
             cursor: ew-resize !important;
@@ -17177,204 +17180,6 @@ def index():
             font-size: 11px;
         }
 
-        .gex-side-panel-wrap {
-            background: var(--bg-0);
-            border-radius: 0;
-            height: 100%;
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
-        }
-        #gex-side-panel {
-            flex: 1;
-            min-height: 0;
-            display: flex;
-            flex-direction: column;
-            width: 100%;
-        }
-        #gex-side-panel > .js-plotly-plot,
-        #gex-side-panel > .plot-container,
-        #gex-side-panel .plotly,
-        #gex-side-panel .svg-container {
-            flex: 1 1 auto;
-            width: 100% !important;
-            height: 100% !important;
-            min-height: 0;
-        }
-
-        /* Strike Inspect (collapsible) — lives between chart and overview rail */
-        .gex-col-header {
-            position: relative;
-            display: flex;
-            align-items: stretch;
-            gap: 6px;
-            background: #1a1a1a;
-            border-bottom: 1px solid var(--bg-2);
-            border-radius: 10px 10px 0 0;
-            padding: 4px 8px;
-            overflow: hidden;
-            min-width: 0;
-            min-height: 34px;
-            container-type: inline-size;
-        }
-        .strike-rail-header-main {
-            flex: 1;
-            min-width: 0;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .strike-inspect-title-wrap {
-            flex: 0 0 auto;
-            min-width: 72px;
-            display: flex;
-            flex-direction: column;
-            gap: 1px;
-        }
-        .gex-col-header .gex-col-title {
-            font-size: 10px;
-            font-weight: 600;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: var(--fg-0);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            flex: 0 0 auto;
-        }
-        .strike-inspect-context {
-            max-width: 112px;
-            color: var(--fg-2);
-            font-size: 9px;
-            line-height: 1.1;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            font-variant-numeric: tabular-nums;
-        }
-        .strike-rail-tabs {
-            display: flex;
-            align-items: center;
-            flex: 1 1 auto;
-            min-width: 0;
-        }
-        .strike-rail-tab-list {
-            display: none;
-            align-items: center;
-            flex: 1 1 auto;
-            flex-wrap: nowrap;
-            gap: 3px;
-            min-width: 0;
-            overflow-x: auto;
-            overflow-y: hidden;
-            scrollbar-width: none;
-        }
-        .strike-rail-tab-list::-webkit-scrollbar { display: none; }
-        .strike-rail-tab {
-            background: var(--bg-2);
-            color: var(--fg-2);
-            border: 1px solid var(--border);
-            border-radius: 999px;
-            padding: 2px 7px;
-            font-size: 10px;
-            line-height: 1.2;
-            letter-spacing: 0.04em;
-            cursor: pointer;
-            white-space: nowrap;
-            transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-        }
-        .strike-rail-tab:hover { color: var(--fg-0); border-color: var(--fg-2); }
-        .strike-rail-tab.active {
-            background: var(--accent);
-            color: #fff;
-            border-color: var(--accent);
-        }
-        .strike-rail-select-wrap {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            flex: 1 1 auto;
-            min-width: 0;
-            padding-left: 4px;
-        }
-        .strike-rail-select-icon {
-            color: var(--fg-1);
-            font-size: 12px;
-            line-height: 1;
-            flex: 0 0 auto;
-        }
-        .strike-rail-select {
-            width: 100%;
-            min-width: 0;
-            min-height: 26px;
-            padding: 3px 8px;
-            border-radius: 999px;
-            border: 1px solid var(--border);
-            background: var(--bg-2);
-            color: var(--fg-0);
-            font-size: 11px;
-            letter-spacing: 0.02em;
-        }
-        .gex-col-toggle {
-            background: transparent;
-            color: var(--fg-1);
-            border: none;
-            padding: 2px 6px;
-            font-size: 12px;
-            line-height: 1;
-            cursor: pointer;
-            border-radius: 4px;
-        }
-        .gex-col-toggle:hover { color: var(--fg-0); background: var(--bg-2); }
-        .gex-column {
-            position: relative;
-            background: var(--bg-0);
-            height: var(--workspace-pane-h);
-            display: flex;
-            flex-direction: column;
-            min-width: 0;
-            overflow: hidden;
-        }
-        .strike-rail-empty {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            padding: 18px 14px;
-            text-align: center;
-            color: var(--fg-2);
-            font-size: 12px;
-            line-height: 1.45;
-        }
-        .chart-grid.gex-collapsed .gex-col-header .strike-inspect-title-wrap,
-        .chart-grid.gex-collapsed .gex-col-header .strike-rail-tabs,
-        .chart-grid.gex-collapsed .gex-column > .gex-side-panel-wrap {
-            display: none;
-        }
-        .chart-grid.gex-collapsed .gex-column { display: none; }
-        .chart-grid.gex-collapsed .gex-resize-handle { display: none; }
-        .chart-grid.gex-collapsed .gex-col-header {
-            padding: 0;
-            overflow: visible;
-            background: transparent;
-            border: 0;
-            min-height: 0;
-            justify-content: center;
-            z-index: 12;
-        }
-        .chart-grid.gex-collapsed .gex-col-toggle {
-            position: absolute;
-            right: -12px;
-            top: 7px;
-            width: 20px;
-            height: 20px;
-            padding: 0;
-            background: var(--bg-1);
-            border: 1px solid var(--border);
-            border-radius: 999px;
-            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.28);
-        }
-
         /* ── Secondary chart tab bar ──────────────────────────────── */
         .secondary-tabs {
             display: flex;
@@ -18902,13 +18707,13 @@ def index():
             font-size: 18px;
         }
         
-        /* Drop the strike rail below price on laptop widths before going single-column. */
+        /* Tighten chart workspace at laptop widths before going single-column. */
         @media screen and (max-width: 1400px) {
             .chart-grid {
                 --workspace-top-reclaim: 28px;
                 --workspace-flow-reclaim: 64px;
                 grid-template-columns: minmax(0, 1fr) var(--rail-col-w) var(--trade-rail-w);
-                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto minmax(34px, auto) 420px auto auto;
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto auto auto;
             }
             .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
             .chart-grid > .right-rail-tabs      { grid-column: 2; grid-row: 1; }
@@ -18916,18 +18721,16 @@ def index():
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
             .chart-grid > .right-rail-panels     { grid-column: 2; grid-row: 2; }
             .chart-grid > .trade-rail            { grid-column: 3; grid-row: 2; }
+            .chart-grid > .right-rail-resize-handle { grid-column: 2; grid-row: 1 / span 2; }
             .chart-grid > .trade-rail-resize-handle { grid-column: 3; grid-row: 1 / span 2; }
             .chart-grid > .flow-event-lane       { grid-column: 1 / -1; grid-row: 3; }
             .chart-grid > .journal-workspace     { grid-column: 1 / -1; grid-row: 4; }
-            .chart-grid > .gex-col-header        { grid-column: 1; grid-row: 5; }
-            .chart-grid > .gex-column            { grid-column: 1; grid-row: 6; height: 420px; }
-            .chart-grid > .gex-resize-handle     { display: none; }
             .chart-grid > #secondary-tabs,
             .chart-grid > .charts-grid {
                 grid-column: 1 / -1;
             }
-            .chart-grid > #secondary-tabs { grid-row: 7; }
-            .chart-grid > .charts-grid    { grid-row: 8; }
+            .chart-grid > #secondary-tabs { grid-row: 5; }
+            .chart-grid > .charts-grid    { grid-row: 6; }
         }
 
         /* Collapse right rail below the main chart on narrow widths */
@@ -18936,26 +18739,22 @@ def index():
                 --workspace-top-reclaim: 0px;
                 --workspace-flow-reclaim: 0px;
                 grid-template-columns: 1fr;
-                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto minmax(34px, auto) 420px minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
+                grid-template-rows: minmax(34px, auto) var(--workspace-pane-h) auto auto minmax(34px, auto) 420px minmax(34px, auto) 420px auto auto;
             }
             .chart-grid > .workspace-toolbar-shell { grid-column: 1; grid-row: 1; }
             .chart-grid > .price-chart-container { grid-column: 1; grid-row: 2; }
             .chart-grid > .flow-event-lane { grid-column: 1; grid-row: 3; }
             .chart-grid > .journal-workspace { grid-column: 1; grid-row: 4; }
-            .chart-grid > .gex-col-header { grid-column: 1; grid-row: 5; }
-            .chart-grid > .gex-column { grid-column: 1; grid-row: 6; }
-            .chart-grid > .right-rail-tabs { grid-column: 1; grid-row: 7; }
-            .chart-grid > .right-rail-panels { grid-column: 1; grid-row: 8; }
-            .chart-grid > .trade-rail-header { grid-column: 1; grid-row: 9; }
-            .chart-grid > .trade-rail { grid-column: 1; grid-row: 10; }
-            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 11; }
-            .chart-grid > .charts-grid { grid-column: 1; grid-row: 12; }
-            .chart-grid > .gex-resize-handle,
+            .chart-grid > .right-rail-tabs { grid-column: 1; grid-row: 5; }
+            .chart-grid > .right-rail-panels { grid-column: 1; grid-row: 6; }
+            .chart-grid > .trade-rail-header { grid-column: 1; grid-row: 7; }
+            .chart-grid > .trade-rail { grid-column: 1; grid-row: 8; }
+            .chart-grid > #secondary-tabs { grid-column: 1; grid-row: 9; }
+            .chart-grid > .charts-grid { grid-column: 1; grid-row: 10; }
             .chart-grid > .right-rail-resize-handle,
             .chart-grid > .trade-rail-resize-handle { display: none; }
             .right-rail-collapse-toggle,
             .trade-rail-collapse-toggle { right: 6px; }
-            .gex-column { height: 420px; }
             .right-rail-panels { height: 420px; }
             .trade-rail { height: 420px; }
         }
@@ -19370,7 +19169,7 @@ def index():
                     <div class="drawer-content">
                         <div class="control-group">
                             <label for="exposure_metric">Exposure Weighting Metric:</label>
-                            <select id="exposure_metric" title="Selects the option-chain weighting input for exposure charts/formulas; it does not change the Strike Inspect metric selector.">
+                            <select id="exposure_metric" title="Selects the option-chain weighting input for exposure charts/formulas; it does not change the on-chart strike overlay metric.">
                                 <option value="Open Interest" selected>Open Interest</option>
                                 <option value="Volume">Volume</option>
                                 <option value="Max OI vs Volume">Max OI vs Volume</option>
@@ -19848,17 +19647,6 @@ def index():
                 </div>
                 <div class="tv-toolbar-container" id="tv-toolbar-container"></div>
             </div>
-            <div class="gex-col-header" id="gex-col-header">
-                <div class="strike-rail-header-main">
-                    <div class="strike-inspect-title-wrap">
-                        <div class="gex-col-title">Strike Inspect</div>
-                        <div class="strike-inspect-context" id="strike-inspect-context">Context loads</div>
-                    </div>
-                    <div class="strike-rail-tabs" id="strike-rail-tabs"></div>
-                </div>
-                <button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>
-            </div>
-            <div class="gex-resize-handle" id="gex-resize-handle" role="separator" aria-label="Resize strike inspect" aria-orientation="vertical"></div>
             <div class="right-rail-tabs" id="right-rail-tabs">
                 <button type="button" class="right-rail-tab active" data-rail-tab="overview">Overview<span class="tab-badge" id="right-rail-alerts-badge"></span></button>
                 <button type="button" class="right-rail-tab" data-rail-tab="levels">Levels</button>
@@ -19894,11 +19682,6 @@ def index():
                 <div class="tv-sub-pane" id="atr-pane" style="display:none">
                     <div class="tv-sub-pane-header">ATR 14</div>
                     <div id="atr-chart" style="height:100px"></div>
-                </div>
-            </div>
-            <div class="gex-column" id="gex-column">
-                <div class="gex-side-panel-wrap">
-                    <div id="gex-side-panel"></div>
                 </div>
             </div>
             <div class="right-rail-panels" id="right-rail-panels">
@@ -20700,7 +20483,7 @@ def index():
 
     <script>
         let charts = {};
-        let updateInterval;
+        let analyticsUpdateInterval;
         let tradeChainAutoRefreshInterval;
         let lastUpdateTime = 0;
         let callColor = '#10B981';
@@ -20709,6 +20492,7 @@ def index():
         let lastData = {}; // Store last received data
         let lastPriceData = null; // Price chart data stored separately (fetched via /update_price)
         let updateInProgress = false;
+        let _lastAnalyticsCacheContextKey = '';
         let isStreaming = true;
         let savedScrollPosition = 0; // Track scroll position
         let chartContainerCache = {}; // Cache for chart containers to prevent recreation
@@ -21167,10 +20951,10 @@ def index():
         // Debounce timer for Plotly price-line updates (avoid flooding relayout calls)
         let plotlyPriceUpdateTimer = null;
         const IS_DESKTOP_SHELL = !!window.GEX_DESKTOP;
-        const DASHBOARD_UPDATE_INTERVAL_MS = IS_DESKTOP_SHELL ? 4000 : 2500;
-        const DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS = DASHBOARD_UPDATE_INTERVAL_MS;
-        const TRADE_CHAIN_AUTO_REFRESH_MS = IS_DESKTOP_SHELL ? 5000 : 2500;
+        const ANALYTICS_REFRESH_MS = 60000;
+        const FAST_CHAIN_REFRESH_MS = 5000;
         const PRICE_HISTORY_REFRESH_MS = 30000;
+        const TRADE_CHAIN_AUTO_REFRESH_MS = FAST_CHAIN_REFRESH_MS;
         const PLOTLY_PRICE_LINE_MIN_INTERVAL_MS = IS_DESKTOP_SHELL ? 1000 : 500;
         let pendingRealtimeQuote = null;
         let pendingRealtimeQuoteFrame = null;
@@ -21267,8 +21051,6 @@ def index():
         };
         const CHART_VISIBILITY_KEY = 'gex.chartVisibility';
         const SECONDARY_TAB_KEY = 'gex.secondaryActiveTab';
-        const STRIKE_RAIL_TAB_KEY = 'gex.strikeRailTab';
-        const GEX_COL_WIDTH_KEY = 'gex.sidePanelWidthPx';
         const TIMEFRAME_STORAGE_KEY = 'gex.selectedTimeframe';
         const TV_DRAWING_STORE_KEY = 'gex.tvDrawingStore.v2';
         const TV_DRAWING_TOOL_PREFS_KEY = 'gex.tvDrawingToolPrefs.v1';
@@ -21280,8 +21062,8 @@ def index():
             neutral: { label: 'Neutral', shortLabel: 'Neutral', color: '#94A3B8' },
             custom: { label: 'Custom', shortLabel: 'Custom', color: null },
         };
-        const STRIKE_RAIL_CHART_IDS = ['gamma', 'delta', 'vanna', 'charm', 'open_interest', 'options_volume', 'premium'];
-        const STRIKE_RAIL_LABELS = {
+        const STRIKE_PROFILE_METRIC_IDS = ['gamma', 'delta', 'vanna', 'charm', 'open_interest', 'options_volume', 'premium'];
+        const STRIKE_METRIC_LABELS = {
             gex: 'GEX',
             gamma: 'Gamma',
             delta: 'Delta',
@@ -21298,24 +21080,6 @@ def index():
         const STRIKE_OVERLAY_RIGHT_OFFSET_KEY = 'gex.strikeOverlayRightOffset';
         const STRIKE_OVERLAY_ANCHOR_GAP_KEY = 'gex.strikeOverlayAnchorGap';
         const STRIKE_OVERLAY_MAX_WIDTH_KEY = 'gex.strikeOverlayMaxWidth';
-        const STRIKE_RAIL_PREF_VERSION_KEY = 'gex.strikeRailTabPrefVersion';
-        let activeStrikeRailTab = (() => {
-            try {
-                const saved = localStorage.getItem(STRIKE_RAIL_TAB_KEY);
-                const prefVersion = localStorage.getItem(STRIKE_RAIL_PREF_VERSION_KEY);
-                if (saved === 'open_interest' && prefVersion !== '2') {
-                    localStorage.setItem(STRIKE_RAIL_TAB_KEY, 'gex');
-                    localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
-                    return 'gex';
-                }
-                if (!prefVersion) {
-                    localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
-                }
-                return (saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved))) ? saved : 'gex';
-            } catch (e) {
-                return 'gex';
-            }
-        })();
         let tvStrikeOverlayProfiles = {};
         let tvStrikeOverlayPending = false;
         let tvStrikeOverlayRenderedRows = [];
@@ -21325,7 +21089,7 @@ def index():
         let activeStrikeOverlayMetric = (() => {
             try {
                 const saved = localStorage.getItem(STRIKE_OVERLAY_METRIC_KEY);
-                const valid = saved && (saved === 'gex' || STRIKE_RAIL_CHART_IDS.includes(saved) || STRIKE_OVERLAY_ONLY_METRICS.includes(saved));
+                const valid = saved && (saved === 'gex' || STRIKE_PROFILE_METRIC_IDS.includes(saved) || STRIKE_OVERLAY_ONLY_METRICS.includes(saved));
                 return valid ? saved : 'gex';
             } catch (e) {
                 return 'gex';
@@ -21348,24 +21112,11 @@ def index():
             try { localStorage.setItem(CHART_VISIBILITY_KEY, JSON.stringify(merged)); } catch(e) {}
         }
         function isChartVisible(id) { return !!getChartVisibility()[id]; }
-        function getRequestedStrikeRailTab(selectedCharts = getChartVisibility()) {
-            const availableTabs = getVisibleStrikeRailTabs(selectedCharts);
-            if (!availableTabs.includes(activeStrikeRailTab)) {
-                activeStrikeRailTab = availableTabs[0] || 'gex';
-                try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
-            }
-            return activeStrikeRailTab || 'gex';
-        }
         function buildUpdateChartVisibilityPayload(selectedCharts = getChartVisibility()) {
             const payload = {};
             CHART_IDS.forEach(id => {
                 if (id !== 'price') payload['show_' + id] = !!selectedCharts[id];
             });
-            const requestedStrikeRailTab = getRequestedStrikeRailTab(selectedCharts);
-            STRIKE_RAIL_CHART_IDS.forEach(id => {
-                payload['show_' + id] = !!selectedCharts[id] && requestedStrikeRailTab === id;
-            });
-            payload.active_strike_rail_tab = requestedStrikeRailTab;
             return payload;
         }
         function applyScalpOverlayPreset() {
@@ -21709,7 +21460,6 @@ def index():
          */
         function isPlotlyPriceLineTargetVisible(div, id) {
             if (!div || !div._fullLayout) return false;
-            if (id === 'gex-side-panel' && typeof isGexColumnCollapsed === 'function' && isGexColumnCollapsed()) return false;
             if (div.offsetParent === null) return false;
             return (div.clientWidth || div.offsetWidth || 0) > 0 && (div.clientHeight || div.offsetHeight || 0) > 0;
         }
@@ -21741,9 +21491,7 @@ def index():
             const priceStr = price.toFixed(2);
             const numericAnnotationRe = /^-?\\d+(?:\\.\\d+)?$/;
 
-            const plotIds = PLOTLY_PRICE_LINE_CHARTS.concat(['gex-side-panel']);
-
-            plotIds.forEach(function(id) {
+            PLOTLY_PRICE_LINE_CHARTS.forEach(function(id) {
                 const div = document.getElementById(id);
                 if (!isPlotlyPriceLineTargetVisible(div, id)) return;
 
@@ -22070,7 +21818,6 @@ def index():
                     scheduleTVSessionCalendarOverlaySettleDraw();
                     scheduleTVStrikeOverlayDraw();
                     scheduleTVHistoricalOverlayDraw();
-                    scheduleGexPanelSync();
                 } catch(e) {}
             }, 50);
         }
@@ -22350,6 +22097,33 @@ def index():
             });
         }
 
+        function getPlotlyDiv(target) {
+            if (!target) return null;
+            if (target.classList && target.classList.contains('js-plotly-plot')) return target;
+            return (target.querySelector && target.querySelector('.js-plotly-plot')) || null;
+        }
+
+        function isDisplayedElement(el) {
+            return !!(
+                el &&
+                el.isConnected &&
+                el.getClientRects &&
+                el.getClientRects().length &&
+                el.offsetWidth > 0 &&
+                el.offsetHeight > 0
+            );
+        }
+
+        function resizePlotlyIfDisplayed(target) {
+            if (!window.Plotly || !Plotly.Plots) return;
+            const plot = getPlotlyDiv(target);
+            if (!isDisplayedElement(plot)) return;
+            try {
+                const resized = Plotly.Plots.resize(plot);
+                if (resized && typeof resized.catch === 'function') resized.catch(() => {});
+            } catch (e) {}
+        }
+
         function toggleChartFullscreen(container) {
             if (!container) return;
             const isFullscreen = container.classList.contains('fullscreen');
@@ -22371,8 +22145,7 @@ def index():
             // Let Plotly know about the size change; also trigger TV chart resize
             requestAnimationFrame(() => {
                 document.querySelectorAll('.chart-container').forEach(el => {
-                    const plot = el.querySelector('.js-plotly-plot');
-                    if (plot) { try { Plotly.Plots.resize(plot); } catch(e) {} }
+                    resizePlotlyIfDisplayed(el);
                 });
                 // Resize TradingView price chart
                 const tvContainer = document.getElementById('price-chart');
@@ -22407,8 +22180,7 @@ def index():
                     syncFullscreenActionControls(fs);
                     requestAnimationFrame(() => {
                         document.querySelectorAll('.chart-container').forEach(el => {
-                            const plot = el.querySelector('.js-plotly-plot');
-                            if (plot) { try { Plotly.Plots.resize(plot); } catch(e) {} }
+                            resizePlotlyIfDisplayed(el);
                         });
                         const tvContainer = document.getElementById('price-chart');
                         if (tvPriceChart && tvContainer) {
@@ -23016,7 +22788,12 @@ def index():
   };
   window.addEventListener('resize', function() {
     const el = document.getElementById('popout-plot');
-    if (el && el.querySelector('.js-plotly-plot')) { try { Plotly.Plots.resize(el); } catch(e) {} }
+    if (el && el.style.display !== 'none' && el.getClientRects().length) {
+      try {
+        const resized = Plotly.Plots.resize(el);
+        if (resized && typeof resized.catch === 'function') resized.catch(function() {});
+      } catch(e) {}
+    }
   });
 <\\/script></body></html>`);
             }
@@ -23311,6 +23088,14 @@ def index():
             const highlightMaxLevel = document.getElementById('highlight_max_level').checked;
             const maxLevelMode = document.getElementById('max_level_mode').value;
             const gateAlerts = !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked);
+            const analyticsCacheContextKey = JSON.stringify({
+                ticker: ticker.toUpperCase(),
+                expiry,
+                exposureMetric,
+                deltaAdjusted,
+                calculateInNotional,
+            });
+            const shouldRefreshTradeChainCache = analyticsCacheContextKey !== _lastAnalyticsCacheContextKey;
             setAlertGateSetting(gateAlerts);
             
             // Get visible charts (server payload uses show_<id> keys for back-compat)
@@ -23343,8 +23128,11 @@ def index():
             if (_vis.price) {
                 fetchPriceHistory(tickerChanged || !tvLastCandles.length);
             }
+            if (shouldRefreshTradeChainCache && !isTradeRailCollapsed()) {
+                requestTradeChain({ force: true, minIntervalMs: 0, refreshCache: true });
+            }
             
-            const updateFetchPerf = gexPerfStart('fetch:/update', { ticker, expiries: expiry.length, strike_tab: visibleCharts.active_strike_rail_tab || 'gex' });
+            const updateFetchPerf = gexPerfStart('fetch:/update', { ticker, expiries: expiry.length });
             fetch('/update', {
                 method: 'POST',
                 headers: {
@@ -23394,10 +23182,20 @@ def index():
                 }
                 
                 lastData = data;  // Update before rendering so popout windows get fresh data
+                _lastKeyLevels = data ? (data.key_levels || null) : null;
+                _lastKeyLevels0dte = data ? (data.key_levels_0dte || null) : null;
+                _lastStats0dte = data ? (data.stats_0dte || null) : null;
+                renderTraderStats(data ? (data.trader_stats || null) : null);
                 updateCharts(data, topOiContextKey);
                 updatePriceInfo(data.price_info);
+                redrawGexScope();
+                _lastAnalyticsCacheContextKey = analyticsCacheContextKey;
                 if (!isTradeRailCollapsed()) {
-                    requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS });
+                    requestTradeChain({
+                        force: true,
+                        minIntervalMs: shouldRefreshTradeChainCache ? 0 : TRADE_CHAIN_AUTO_REFRESH_MS,
+                        refreshCache: shouldRefreshTradeChainCache,
+                    });
                 }
                 // Options cache is now populated — refresh price levels immediately.
                 // This fixes the delay where levels were missing right after a ticker change
@@ -25850,7 +25648,6 @@ def index():
             drawTVDrawingOverlay();
             drawTVEthOverlay();
             drawTVHistoricalOverlay();
-            scheduleGexPanelSync();
         }
 
         function requestTVDrawingOverlayActiveRedraw(durationMs = 220) {
@@ -25916,8 +25713,10 @@ def index():
         }
 
         function getStrikeOverlayMetricKeys(selectedCharts = getChartVisibility()) {
-            const railKeys = getVisibleStrikeRailTabs(selectedCharts).filter(key => key !== 'premium');
-            return railKeys.concat(STRIKE_OVERLAY_ONLY_METRICS);
+            const profileKeys = ['gex'].concat(
+                STRIKE_PROFILE_METRIC_IDS.filter(key => key !== 'premium' && selectedCharts[key] !== false)
+            );
+            return profileKeys.concat(STRIKE_OVERLAY_ONLY_METRICS);
         }
 
         function normalizeStrikeOverlayMetric(metric) {
@@ -25941,7 +25740,7 @@ def index():
                     available.forEach(metricKey => {
                         const option = document.createElement('option');
                         option.value = metricKey;
-                        option.textContent = STRIKE_RAIL_LABELS[metricKey] || metricKey;
+                        option.textContent = STRIKE_METRIC_LABELS[metricKey] || metricKey;
                         select.appendChild(option);
                     });
                     select.dataset.optionsKey = optionsKey;
@@ -26113,9 +25912,9 @@ def index():
             const strike = Number(item.strike).toFixed(2).replace(/\\.00$/, '');
             const rows = [
                 ['Strike', strike],
-                ['Net ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(netValue, metric)],
-                ['Call ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(callValue, metric)],
-                ['Put ' + (STRIKE_RAIL_LABELS[metric] || metric), formatStrikeOverlayFullValue(putValue, metric)],
+                ['Net ' + (STRIKE_METRIC_LABELS[metric] || metric), formatStrikeOverlayFullValue(netValue, metric)],
+                ['Call ' + (STRIKE_METRIC_LABELS[metric] || metric), formatStrikeOverlayFullValue(callValue, metric)],
+                ['Put ' + (STRIKE_METRIC_LABELS[metric] || metric), formatStrikeOverlayFullValue(putValue, metric)],
             ];
             if (['open_interest', 'options_volume', 'voi_ratio'].includes(metric)) {
                 rows.push(['Total', formatStrikeOverlayFullValue(totalValue, metric)]);
@@ -26179,6 +25978,16 @@ def index():
                 activeStrikeOverlayMetric = normalizeStrikeOverlayMetric(
                     tvStrikeOverlayProfiles.gex ? 'gex' : Object.keys(tvStrikeOverlayProfiles)[0]
                 );
+            }
+            syncStrikeOverlayControls();
+            scheduleTVStrikeOverlayDraw();
+        }
+
+        function mergeStrikeOverlayProfiles(nextProfiles, source = 'fast') {
+            if (!nextProfiles || typeof nextProfiles !== 'object') return;
+            tvStrikeOverlayProfiles = Object.assign({}, tvStrikeOverlayProfiles || {}, nextProfiles);
+            if (lastData) {
+                lastData.strike_profiles = Object.assign({}, lastData.strike_profiles || {}, nextProfiles);
             }
             syncStrikeOverlayControls();
             scheduleTVStrikeOverlayDraw();
@@ -26286,7 +26095,7 @@ def index():
             screenRows.forEach(item => {
                 const callValue = Math.abs(Number(item.row.call || 0));
                 const putValue = Math.abs(Number(item.row.put || 0));
-                const label = STRIKE_RAIL_LABELS[metric] || metric;
+                const label = STRIKE_METRIC_LABELS[metric] || metric;
                 const addBar = (barWidth, color, opacity, className = '') => {
                     const x = Math.max(0, anchorX - barWidth);
                     const bar = document.createElement('div');
@@ -26370,13 +26179,6 @@ def index():
                     tvStrikeOverlayProfiles = lastData.strike_profiles || {};
                 }
                 applyStrikeOverlayRightOffset({ force: true });
-                if (strikeOverlayEnabled) {
-                    applyGexColumnCollapse(true);
-                } else {
-                    let userCollapsed = false;
-                    try { userCollapsed = localStorage.getItem(GEX_COL_COLLAPSE_KEY) === '1'; } catch (e) {}
-                    applyGexColumnCollapse(userCollapsed);
-                }
                 syncStrikeOverlayControls();
                 scheduleTVStrikeOverlayDraw();
             });
@@ -26389,7 +26191,7 @@ def index():
             getStrikeOverlayMetricKeys().forEach(metric => {
                 const option = document.createElement('option');
                 option.value = metric;
-                option.textContent = STRIKE_RAIL_LABELS[metric] || metric;
+                option.textContent = STRIKE_METRIC_LABELS[metric] || metric;
                 select.appendChild(option);
             });
             select.addEventListener('change', () => {
@@ -30943,7 +30745,6 @@ def index():
                     scheduleTVHistoricalOverlayDraw();
                     scheduleTVProfileOverlayDraw();
                     scheduleRvolMarkerDraw();
-                    scheduleGexPanelSync();
                 });
                 if (!tvHistoricalOverlayDomEventsBound) {
                     tvHistoricalOverlayDomEventsBound = true;
@@ -30955,7 +30756,6 @@ def index():
                         scheduleTVHistoricalOverlayDraw();
                         scheduleTVProfileOverlayDraw();
                         scheduleRvolMarkerDraw();
-                        scheduleGexPanelSync();
                         requestTVDrawingOverlayActiveRedraw(activeDuration);
                     };
                     const beginOverlayPointerDrag = () => {
@@ -31164,9 +30964,6 @@ def index():
             renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
             syncTradeScalpTargetLines();
             tvRefreshOverlayLevelPrices();
-            // Re-sync GEX side panel after candles + autoscale settle
-            scheduleGexPanelSync();
-
             if (shouldFitAll) {
                 tvYAxisMode = 'fit-all';
                 const _chart = tvPriceChart;
@@ -31700,7 +31497,6 @@ def index():
             let priceContainer = grid.querySelector('.price-chart-container');
             if (priceContainer) {
                 ensureChartContextStrip();
-                ensureStrikeRailResizeHandle(grid);
                 ensureRightRailControls(grid);
                 ensureTradeRailDom(grid);
                 ensureFlowEventLane();
@@ -31734,34 +31530,6 @@ def index():
                 toolbarShell.appendChild(toolbar);
             }
             ensureChartContextStrip(toolbarShell);
-            let gexHeader = grid.querySelector('.gex-col-header');
-            if (!gexHeader) {
-                gexHeader = document.createElement('div');
-                gexHeader.className = 'gex-col-header';
-                gexHeader.id = 'gex-col-header';
-                gexHeader.innerHTML =
-                    '<div class="strike-rail-header-main">' +
-                        '<div class="strike-inspect-title-wrap">' +
-                            '<div class="gex-col-title">Strike Inspect</div>' +
-                            '<div class="strike-inspect-context" id="strike-inspect-context">Context loads</div>' +
-                        '</div>' +
-                        '<div class="strike-rail-tabs" id="strike-rail-tabs"></div>' +
-                    '</div>' +
-                    '<button type="button" class="gex-col-toggle" id="gex-col-toggle" title="Collapse">‹</button>';
-                grid.appendChild(gexHeader);
-                wireGexColumnToggle();
-            }
-            ensureStrikeRailResizeHandle(grid);
-            if (!document.getElementById('strike-rail-tabs')) {
-                const main = gexHeader.querySelector('.strike-rail-header-main');
-                if (main) {
-                    const tabs = document.createElement('div');
-                    tabs.className = 'strike-rail-tabs';
-                    tabs.id = 'strike-rail-tabs';
-                    main.appendChild(tabs);
-                }
-            }
-            applyStrikeRailTabs();
             let tabs = grid.querySelector('.right-rail-tabs');
             if (!tabs) {
                 tabs = document.createElement('div');
@@ -31796,14 +31564,6 @@ def index():
             priceContainer.appendChild(atrPane);
             grid.appendChild(priceContainer);
 
-            let gexCol = grid.querySelector('.gex-column');
-            if (!gexCol) {
-                gexCol = document.createElement('div');
-                gexCol.className = 'gex-column';
-                gexCol.id = 'gex-column';
-                gexCol.innerHTML = '<div class="gex-side-panel-wrap"><div id="gex-side-panel"></div></div>';
-                grid.appendChild(gexCol);
-            }
             let railPanels = grid.querySelector('.right-rail-panels');
             if (!railPanels) {
                 railPanels = document.createElement('div');
@@ -31850,179 +31610,15 @@ def index():
             ensureTradeRailDom(grid);
             ensureFlowEventLane();
             ensureTradeJournalWorkspace(grid);
-            renderStrikeRailPanel();
             return priceContainer;
         }
 
         function showPriceChartUI() {
-            const ids = ['workspace-toolbar-shell', 'tv-toolbar-container', 'gex-col-header', 'gex-resize-handle', 'gex-column', 'right-rail-tabs', 'right-rail-panels', 'right-rail-collapse-toggle', 'right-rail-resize-handle', 'trade-rail-header', 'trade-rail-collapse-toggle', 'trade-rail-resize-handle', 'trade-rail', 'flow-event-lane', 'trade-journal-workspace'];
+            const ids = ['workspace-toolbar-shell', 'tv-toolbar-container', 'right-rail-tabs', 'right-rail-panels', 'right-rail-collapse-toggle', 'right-rail-resize-handle', 'trade-rail-header', 'trade-rail-collapse-toggle', 'trade-rail-resize-handle', 'trade-rail', 'flow-event-lane', 'trade-journal-workspace'];
             ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
             const pc = document.querySelector('.price-chart-container');
             if (pc) pc.style.display = 'block';
         }
-
-        // ── GEX column collapse state ────────────────────────────────────
-        const GEX_COL_COLLAPSE_KEY = 'gex.sidePanelCollapsed';
-        const GEX_COL_DEFAULT_WIDTH = 292;
-        let _gexResizeRefreshScheduled = false;
-        function getGexColWidthConstraints() {
-            const grid = document.getElementById('chart-grid');
-            if (!grid) return { min: 220, max: 520 };
-            const styles = getComputedStyle(grid);
-            const railWidth = parseFloat(styles.getPropertyValue('--rail-col-w')) || 272;
-            const tradeRailWidth = parseFloat(styles.getPropertyValue('--trade-rail-w')) || 0;
-            const min = 220;
-            const max = Math.max(min, Math.min(520, grid.clientWidth - railWidth - tradeRailWidth - 360));
-            return { min, max };
-        }
-        function clampGexColWidth(width) {
-            const { min, max } = getGexColWidthConstraints();
-            return Math.max(min, Math.min(max, width));
-        }
-        function applyGexColWidth(width, persist = false) {
-            const grid = document.getElementById('chart-grid');
-            if (!grid || !Number.isFinite(width)) return;
-            const clamped = clampGexColWidth(width);
-            grid.style.setProperty('--gex-col-w', clamped + 'px');
-            if (!persist) return;
-            try { localStorage.setItem(GEX_COL_WIDTH_KEY, String(Math.round(clamped))); } catch (e) {}
-        }
-        function scheduleGexResizeRefresh() {
-            if (_gexResizeRefreshScheduled) return;
-            _gexResizeRefreshScheduled = true;
-            requestAnimationFrame(() => {
-                _gexResizeRefreshScheduled = false;
-                const target = getStrikeRailTarget();
-                if (target && target._fullLayout) {
-                    try { Plotly.Plots.resize(target); } catch (e) {}
-                }
-                scheduleTVStrikeOverlayDraw();
-                scheduleGexPanelSync();
-                try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-            });
-        }
-        function ensureStrikeRailResizeHandle(grid = document.getElementById('chart-grid')) {
-            if (!grid) return null;
-            let handle = document.getElementById('gex-resize-handle');
-            if (!handle) {
-                handle = document.createElement('div');
-                handle.className = 'gex-resize-handle';
-                handle.id = 'gex-resize-handle';
-                handle.setAttribute('role', 'separator');
-                handle.setAttribute('aria-label', 'Resize strike inspect');
-                handle.setAttribute('aria-orientation', 'vertical');
-                grid.appendChild(handle);
-            }
-            wireStrikeRailResizeHandle(handle);
-            return handle;
-        }
-        function isGexColumnCollapsed() {
-            const grid = document.getElementById('chart-grid');
-            return !!(grid && grid.classList.contains('gex-collapsed'));
-        }
-        function applyGexColumnCollapse(collapsed) {
-            const grid = document.getElementById('chart-grid');
-            const btn  = document.getElementById('gex-col-toggle');
-            if (!grid) return;
-            grid.classList.toggle('gex-collapsed', !!collapsed);
-            if (collapsed) {
-                grid.style.setProperty('--gex-col-w', '0px');
-            } else {
-                let savedWidth = GEX_COL_DEFAULT_WIDTH;
-                try {
-                    const raw = parseFloat(localStorage.getItem(GEX_COL_WIDTH_KEY));
-                    if (Number.isFinite(raw)) savedWidth = raw;
-                } catch (e) {}
-                applyGexColWidth(savedWidth, false);
-            }
-            if (btn) {
-                btn.textContent = collapsed ? '›' : '‹';
-                btn.title = collapsed ? 'Expand Strike Inspect' : 'Collapse Strike Inspect';
-            }
-            if (!collapsed) {
-                // Re-render the active strike rail after expanding.
-                const target = getStrikeRailTarget();
-                renderStrikeRailPanel();
-                if (target) { try { Plotly.Plots.resize(target); } catch (e) {} }
-                scheduleGexPanelSync();
-            }
-            // Notify TV chart the container width changed so candles reflow
-            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-        }
-        function wireGexColumnToggle() {
-            const btn = document.getElementById('gex-col-toggle');
-            if (!btn || btn.__wired) return;
-            btn.__wired = true;
-            btn.addEventListener('click', () => {
-                if (isGexColumnCollapsed() && strikeOverlayEnabled) {
-                    strikeOverlayEnabled = false;
-                    try { localStorage.setItem(STRIKE_OVERLAY_ENABLED_KEY, '0'); } catch (e) {}
-                    applyStrikeOverlayRightOffset({ force: true });
-                    syncStrikeOverlayControls();
-                    scheduleTVStrikeOverlayDraw();
-                }
-                const next = !isGexColumnCollapsed();
-                try { localStorage.setItem(GEX_COL_COLLAPSE_KEY, next ? '1' : '0'); } catch (e) {}
-                applyGexColumnCollapse(next);
-            });
-        }
-        function wireStrikeRailResizeHandle(handle = document.getElementById('gex-resize-handle')) {
-            if (!handle || handle.__wired) return;
-            handle.__wired = true;
-            handle.addEventListener('pointerdown', (event) => {
-                if (isGexColumnCollapsed()) return;
-                const grid = document.getElementById('chart-grid');
-                if (!grid) return;
-                event.preventDefault();
-                const startX = event.clientX;
-                const startWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w')) || GEX_COL_DEFAULT_WIDTH;
-                handle.classList.add('dragging');
-                document.body.classList.add('gex-resize-active');
-                try { handle.setPointerCapture(event.pointerId); } catch (e) {}
-
-                const onMove = (moveEvent) => {
-                    const nextWidth = startWidth + (startX - moveEvent.clientX);
-                    applyGexColWidth(nextWidth, false);
-                    scheduleGexResizeRefresh();
-                };
-                const onUp = (upEvent) => {
-                    document.removeEventListener('pointermove', onMove);
-                    document.removeEventListener('pointerup', onUp);
-                    document.removeEventListener('pointercancel', onUp);
-                    handle.classList.remove('dragging');
-                    document.body.classList.remove('gex-resize-active');
-                    try { handle.releasePointerCapture(upEvent.pointerId); } catch (e) {}
-                    const liveWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w')) || startWidth;
-                    applyGexColWidth(liveWidth, true);
-                    scheduleGexResizeRefresh();
-                };
-                document.addEventListener('pointermove', onMove);
-                document.addEventListener('pointerup', onUp);
-                document.addEventListener('pointercancel', onUp);
-            });
-        }
-        (function restoreGexColumnCollapse() {
-            let collapsed = false;
-            try { collapsed = localStorage.getItem(GEX_COL_COLLAPSE_KEY) === '1'; } catch (e) {}
-            collapsed = collapsed || !!strikeOverlayEnabled;
-            // Defer until DOM is parsed
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', () => { ensureStrikeRailResizeHandle(); applyGexColumnCollapse(collapsed); wireGexColumnToggle(); });
-            } else {
-                ensureStrikeRailResizeHandle();
-                applyGexColumnCollapse(collapsed);
-                wireGexColumnToggle();
-            }
-        })();
-        (function restoreGexColumnWidth() {
-            let savedWidth = GEX_COL_DEFAULT_WIDTH;
-            try {
-                const raw = parseFloat(localStorage.getItem(GEX_COL_WIDTH_KEY));
-                if (Number.isFinite(raw)) savedWidth = raw;
-            } catch (e) {}
-            if (isGexColumnCollapsed()) return;
-            applyGexColWidth(savedWidth, false);
-        })();
 
         // ── Right rail collapse + resize ─────────────────────────────────
         const RIGHT_RAIL_COLLAPSE_KEY = 'gex.rightRailCollapsed';
@@ -32036,7 +31632,6 @@ def index():
         function scheduleRightRailResizeRefresh() {
             requestAnimationFrame(() => {
                 scheduleTVStrikeOverlayDraw();
-                scheduleGexPanelSync();
                 try { window.dispatchEvent(new Event('resize')); } catch (e) {}
             });
         }
@@ -32044,10 +31639,9 @@ def index():
             const grid = document.getElementById('chart-grid');
             if (!grid) return { min: 320, max: 640 };
             const styles = getComputedStyle(grid);
-            const gexWidth = parseFloat(styles.getPropertyValue('--gex-col-w')) || 0;
             const tradeRailWidth = parseFloat(styles.getPropertyValue('--trade-rail-w')) || 0;
             const min = getActiveRailTabForSizing() === 'flow' ? 440 : 320;
-            const max = Math.max(min, Math.min(640, grid.clientWidth - gexWidth - tradeRailWidth - 520));
+            const max = Math.max(min, Math.min(640, grid.clientWidth - tradeRailWidth - 520));
             return { min, max };
         }
         function clampRightRailWidth(width) {
@@ -36654,6 +36248,7 @@ def index():
             if (!ticker) return;
             const selectedExpiry = tradeRailState.expiry ? [tradeRailState.expiry] : getTradeRailSelectedDashboardExpiries();
             const rangePct = Math.max(0.5, Math.min(20, Number(tradeRailState.strikeRangePct) || 2));
+            const refreshCache = !!options.refreshCache;
             const key = ticker + '|' + selectedExpiry.join(',') + '|' + rangePct;
             const now = Date.now();
             const minIntervalMs = Math.max(0, Number(options.minIntervalMs) || 0);
@@ -36671,16 +36266,27 @@ def index():
             tradeRailState.requestKey = key;
             tradeRailState.lastChainRequestAt = now;
             renderTradeRail();
-            const tradeChainPerf = gexPerfStart('fetch:/trade_chain', { ticker, expiries: selectedExpiry.length, force: !!options.force });
+            const tradeChainPerf = gexPerfStart('fetch:/trade_chain', { ticker, expiries: selectedExpiry.length, force: !!options.force, refresh_cache: refreshCache });
+            const requestBody = {
+                ticker,
+                expiry: selectedExpiry,
+                strike_range: rangePct / 100,
+                contract_type: 'ALL',
+            };
+            if (refreshCache) {
+                const exposureMetricEl = document.getElementById('exposure_metric');
+                const deltaAdjustedEl = document.getElementById('delta_adjusted_exposures');
+                const calculateInNotionalEl = document.getElementById('calculate_in_notional');
+                requestBody.refresh_cache = true;
+                requestBody.cache_min_age_ms = Math.max(0, TRADE_CHAIN_AUTO_REFRESH_MS - 250);
+                requestBody.exposure_metric = exposureMetricEl ? exposureMetricEl.value : 'Open Interest';
+                requestBody.delta_adjusted = !!(deltaAdjustedEl && deltaAdjustedEl.checked);
+                requestBody.calculate_in_notional = !calculateInNotionalEl || !!calculateInNotionalEl.checked;
+            }
             fetch('/trade_chain', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    ticker,
-                    expiry: selectedExpiry,
-                    strike_range: rangePct / 100,
-                    contract_type: 'ALL',
-                }),
+                body: JSON.stringify(requestBody),
             })
             .then(r => {
                 gexPerfEnd(tradeChainPerf, { status: r.status });
@@ -36689,6 +36295,7 @@ def index():
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Trade chain request failed');
                 tradeRailState.payload = data;
+                if (data.strike_profiles) mergeStrikeOverlayProfiles(data.strike_profiles, 'fast-chain');
                 const expiries = Array.isArray(data.expiries) ? data.expiries : [];
                 const stillAvailable = tradeRailState.expiry && expiries.includes(tradeRailState.expiry);
                 tradeRailState.expiry = stillAvailable
@@ -36708,7 +36315,16 @@ def index():
         }
         function refreshTradeChainForOpenRail() {
             if (!isStreaming || isTradeRailCollapsed()) return;
-            requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS });
+            requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS, refreshCache: true });
+        }
+        function startAnalyticsAutoRefresh() {
+            if (analyticsUpdateInterval) clearInterval(analyticsUpdateInterval);
+            analyticsUpdateInterval = setInterval(updateData, ANALYTICS_REFRESH_MS);
+        }
+        function stopAnalyticsAutoRefresh() {
+            if (!analyticsUpdateInterval) return;
+            clearInterval(analyticsUpdateInterval);
+            analyticsUpdateInterval = null;
         }
         function startTradeChainAutoRefresh() {
             if (tradeChainAutoRefreshInterval) clearInterval(tradeChainAutoRefreshInterval);
@@ -38077,7 +37693,6 @@ def index():
         function scheduleTradeRailResizeRefresh() {
             requestAnimationFrame(() => {
                 scheduleTVStrikeOverlayDraw();
-                scheduleGexPanelSync();
                 try { window.dispatchEvent(new Event('resize')); } catch (e) {}
             });
         }
@@ -38085,10 +37700,9 @@ def index():
             const grid = document.getElementById('chart-grid');
             if (!grid) return { min: 340, max: 560 };
             const styles = getComputedStyle(grid);
-            const gexWidth = parseFloat(styles.getPropertyValue('--gex-col-w')) || 0;
             const railWidth = parseFloat(styles.getPropertyValue('--rail-col-w')) || 0;
             const min = 340;
-            const max = Math.max(min, Math.min(560, grid.clientWidth - gexWidth - railWidth - 520));
+            const max = Math.max(min, Math.min(560, grid.clientWidth - railWidth - 520));
             return { min, max };
         }
         function clampTradeRailWidth(width) {
@@ -38265,7 +37879,6 @@ def index():
                 try { localStorage.setItem(RAIL_TAB_KEY, 'overview'); } catch (e) {}
             }
         } catch (e) {}
-        let _lastGexPanelJson = null; // retained so re-render paths (resize, uncollapse) can reuse last data
 
         function applyRightRailTab() {
             const grid = document.getElementById('chart-grid');
@@ -38304,312 +37917,6 @@ def index():
                 });
             });
             wireGexScopePill();
-        }
-
-        function getVisibleStrikeRailTabs(selectedCharts = getChartVisibility()) {
-            const tabs = ['gex'];
-            STRIKE_RAIL_CHART_IDS.forEach(id => {
-                if (selectedCharts[id] !== false) tabs.push(id);
-            });
-            return tabs;
-        }
-
-        function applyStrikeRailTabs(selectedCharts = getChartVisibility()) {
-            const tabsEl = document.getElementById('strike-rail-tabs');
-            if (!tabsEl) return;
-            const availableTabs = getVisibleStrikeRailTabs(selectedCharts);
-            if (!availableTabs.includes(activeStrikeRailTab)) {
-                activeStrikeRailTab = availableTabs[0] || 'gex';
-                try { localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab); } catch (e) {}
-            }
-            const tabsKey = availableTabs.join('|');
-            const needsRebuild =
-                tabsEl.dataset.tabsKey !== tabsKey ||
-                !tabsEl.querySelector('.strike-rail-tab-list') ||
-                !tabsEl.querySelector('#strike-rail-select');
-            if (needsRebuild) {
-                const buttonHtml = availableTabs.map(tab =>
-                    '<button type="button" class="strike-rail-tab' + (tab === activeStrikeRailTab ? ' active' : '') +
-                    '" data-strike-rail-tab="' + tab + '">' + (STRIKE_RAIL_LABELS[tab] || tab) + '</button>'
-                ).join('');
-                const optionHtml = availableTabs.map(tab =>
-                    '<option value="' + tab + '"' + (tab === activeStrikeRailTab ? ' selected' : '') + '>' +
-                    (STRIKE_RAIL_LABELS[tab] || tab) + '</option>'
-                ).join('');
-                tabsEl.innerHTML =
-                    '<div class="strike-rail-tab-list">' + buttonHtml + '</div>' +
-                    '<label class="strike-rail-select-wrap" aria-label="Strike Inspect view">' +
-                        '<span class="strike-rail-select-icon" aria-hidden="true">&#9776;</span>' +
-                        '<select class="strike-rail-select" id="strike-rail-select">' + optionHtml + '</select>' +
-                    '</label>';
-                tabsEl.dataset.tabsKey = tabsKey;
-                wireStrikeRailTabs();
-            } else {
-                tabsEl.querySelectorAll('.strike-rail-tab').forEach(btn => {
-                    btn.classList.toggle('active', btn.dataset.strikeRailTab === activeStrikeRailTab);
-                });
-                const select = tabsEl.querySelector('#strike-rail-select');
-                if (select && select.value !== activeStrikeRailTab) {
-                    select.value = activeStrikeRailTab;
-                }
-            }
-            updateStrikeInspectContext();
-        }
-
-        function wireStrikeRailTabs() {
-            document.querySelectorAll('.strike-rail-tab').forEach(btn => {
-                if (btn.__strikeRailWired) return;
-                btn.__strikeRailWired = true;
-                btn.addEventListener('click', () => {
-                    const next = btn.dataset.strikeRailTab;
-                    if (!next || next === activeStrikeRailTab) return;
-                    activeStrikeRailTab = next;
-                    try {
-                        localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab);
-                        localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
-                    } catch (e) {}
-                    applyStrikeRailTabs();
-                    renderStrikeRailPanel();
-                });
-            });
-            const select = document.getElementById('strike-rail-select');
-            if (select && !select.__strikeRailWired) {
-                select.__strikeRailWired = true;
-                select.addEventListener('change', () => {
-                    const next = select.value;
-                    if (!next || next === activeStrikeRailTab) return;
-                    activeStrikeRailTab = next;
-                    try {
-                        localStorage.setItem(STRIKE_RAIL_TAB_KEY, activeStrikeRailTab);
-                        localStorage.setItem(STRIKE_RAIL_PREF_VERSION_KEY, '2');
-                    } catch (e) {}
-                    applyStrikeRailTabs();
-                    renderStrikeRailPanel();
-                });
-            }
-        }
-
-        function getStrikeRailTarget() {
-            return document.getElementById('gex-side-panel');
-        }
-
-        function renderStrikeRailEmpty(message) {
-            const target = getStrikeRailTarget();
-            if (!target) return;
-            try { Plotly.purge(target); } catch (e) {}
-            target.replaceChildren();
-            target.__strikeRailState = null;
-            const empty = document.createElement('div');
-            empty.className = 'strike-rail-empty';
-            empty.textContent = message || 'Strike Inspect data loads with chart updates.';
-            target.appendChild(empty);
-            updateStrikeInspectContext();
-        }
-
-        let _strikeRailLastPayloadByTab = Object.create(null);
-        let _strikeRailRenderToken = 0;
-        function getStrikeInspectRowsForActiveTab() {
-            const metric = activeStrikeRailTab === 'gex' ? 'gex' : activeStrikeRailTab;
-            const profiles = (lastData && lastData.strike_profiles) || tvStrikeOverlayProfiles || {};
-            const rows = profiles && profiles[metric];
-            return Array.isArray(rows) ? rows : [];
-        }
-        function updateStrikeInspectContext() {
-            const el = document.getElementById('strike-inspect-context');
-            if (!el) return;
-            const stats = (typeof getScopedStats === 'function') ? getScopedStats() : null;
-            const spot = Number(
-                (stats && stats.spot != null ? stats.spot : null) ??
-                (_lastPriceInfo && _lastPriceInfo.current_price != null ? _lastPriceInfo.current_price : null) ??
-                livePrice
-            );
-            const label = STRIKE_RAIL_LABELS[activeStrikeRailTab] || activeStrikeRailTab || 'GEX';
-            const rows = getStrikeInspectRowsForActiveTab();
-            const syncSpec = getStrikeRailSyncSpec();
-            const visibleRows = syncSpec
-                ? rows.filter(row => {
-                    const strike = Number(row && row.strike);
-                    return Number.isFinite(strike) && strike >= syncSpec.lo && strike <= syncSpec.hi;
-                })
-                : rows;
-            let nearestText = '';
-            if (Number.isFinite(spot) && rows.length) {
-                const nearest = rows.reduce((best, row) => {
-                    const strike = Number(row && row.strike);
-                    if (!Number.isFinite(strike)) return best;
-                    const dist = Math.abs(strike - spot);
-                    return !best || dist < best.dist ? { strike, dist } : best;
-                }, null);
-                if (nearest) nearestText = 'near ' + nearest.strike.toFixed(0);
-            }
-            const parts = [
-                Number.isFinite(spot) ? ('$' + spot.toFixed(2)) : '',
-                label,
-                nearestText || (visibleRows.length ? visibleRows.length + ' strikes' : 'waiting'),
-            ].filter(Boolean);
-            el.textContent = parts.join(' · ');
-        }
-        function getStrikeRailPayloadKey(payload) {
-            if (payload == null) return '';
-            return typeof payload === 'string' ? payload : JSON.stringify(payload);
-        }
-        function getStrikeRailSyncSpec() {
-            if (isGexColumnCollapsed()) return null;
-            const tvEl = document.getElementById('price-chart');
-            if (!tvEl || !tvPriceChart || !tvCandleSeries) return null;
-            try {
-                const h = tvEl.clientHeight;
-                if (!h) return null;
-                const tsH = (tvPriceChart.timeScale && tvPriceChart.timeScale().height)
-                    ? tvPriceChart.timeScale().height() : 0;
-                const plotBottomPx = Math.max(0, h - tsH);
-                const top = tvCandleSeries.coordinateToPrice(0);
-                const bot = tvCandleSeries.coordinateToPrice(plotBottomPx);
-                if (top == null || bot == null) return null;
-                const lo = Math.min(top, bot);
-                const hi = Math.max(top, bot);
-                if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return null;
-                return {
-                    lo,
-                    hi,
-                    tsH,
-                    key: [lo.toFixed(4), hi.toFixed(4), String(Math.round(tsH))].join('|'),
-                };
-            } catch (e) {
-                return null;
-            }
-        }
-        function applyStrikeRailSyncToFigure(fig, syncSpec) {
-            if (!fig || !syncSpec) return fig;
-            fig.layout = fig.layout || {};
-            fig.layout.margin = Object.assign({ l: 12, r: 12, t: 10, b: 28 }, fig.layout.margin || {});
-            fig.layout.margin.t = 0;
-            fig.layout.margin.b = syncSpec.tsH;
-            fig.layout.yaxis = Object.assign({}, fig.layout.yaxis || {}, {
-                range: [syncSpec.lo, syncSpec.hi],
-                autorange: false,
-                side: 'right',
-                automargin: true,
-            });
-            return fig;
-        }
-        function lockStrikeRailFigureInteractions(fig) {
-            if (!fig) return fig;
-            fig.layout = fig.layout || {};
-            fig.layout.dragmode = false;
-            fig.layout.uirevision = 'strike-rail-locked';
-            fig.layout.xaxis = Object.assign({}, fig.layout.xaxis || {}, {
-                fixedrange: true,
-                automargin: true,
-            });
-            fig.layout.yaxis = Object.assign({}, fig.layout.yaxis || {}, {
-                fixedrange: true,
-                side: 'right',
-                automargin: true,
-            });
-            return fig;
-        }
-
-        function buildStrikeRailFigure(tab, payload) {
-            const parsed = typeof payload === 'string' ? JSON.parse(payload) : payload;
-            parsed.layout = parsed.layout || {};
-            parsed.layout.autosize = true;
-            parsed.layout.width = null;
-            parsed.layout.height = null;
-            parsed.layout.title = { text: '' };
-            parsed.layout.margin = Object.assign({ l: 12, r: 12, t: 10, b: 28 }, parsed.layout.margin || {});
-            parsed.layout.showlegend = false;
-            parsed.layout.plot_bgcolor = parsed.layout.plot_bgcolor || '#1E1E1E';
-            parsed.layout.paper_bgcolor = parsed.layout.paper_bgcolor || '#1E1E1E';
-            if (parsed.layout.xaxis) parsed.layout.xaxis.automargin = true;
-            if (parsed.layout.yaxis) {
-                parsed.layout.yaxis.automargin = true;
-                parsed.layout.yaxis.side = 'right';
-            }
-            return lockStrikeRailFigureInteractions(parsed);
-        }
-
-        function renderStrikeRailPanel(force = false) {
-            const target = getStrikeRailTarget();
-            if (!target || isGexColumnCollapsed()) return;
-            const strikeRailPerf = gexPerfStart('renderStrikeRailPanel', { tab: activeStrikeRailTab, force: !!force });
-            let payload = activeStrikeRailTab === 'gex'
-                ? _lastGexPanelJson
-                : (lastData && lastData[activeStrikeRailTab]);
-            if (!payload) {
-                payload = _strikeRailLastPayloadByTab[activeStrikeRailTab] || null;
-                if (!payload) {
-                    renderStrikeRailEmpty((STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike Inspect') + ' data loads with the next refresh.');
-                    gexPerfEnd(strikeRailPerf, { empty: true });
-                    return;
-                }
-            }
-            try {
-                const payloadKey = getStrikeRailPayloadKey(payload);
-                const syncSpec = getStrikeRailSyncSpec();
-                const syncKey = syncSpec ? syncSpec.key : '';
-                const currentState = target.__strikeRailState || null;
-                if (
-                    !force &&
-                    target._fullLayout &&
-                    currentState &&
-                    currentState.tab === activeStrikeRailTab &&
-                    currentState.payloadKey === payloadKey
-                ) {
-                    if (syncKey && currentState.syncKey !== syncKey) {
-                        scheduleGexPanelSync();
-                    }
-                    updateStrikeInspectContext();
-                    gexPerfEnd(strikeRailPerf, { unchanged: true });
-                    return;
-                }
-                const fig = activeStrikeRailTab === 'gex' ? (typeof payload === 'string' ? JSON.parse(payload) : payload)
-                                                          : buildStrikeRailFigure(activeStrikeRailTab, payload);
-                lockStrikeRailFigureInteractions(fig);
-                applyStrikeRailSyncToFigure(fig, syncSpec);
-                const config = {
-                    displayModeBar: false,
-                    responsive: true,
-                    scrollZoom: false,
-                    doubleClick: false,
-                    showAxisDragHandles: false,
-                };
-                target.style.width = '100%';
-                target.style.height = '100%';
-                const hasMountedPlot = !!target._fullLayout;
-                if (!hasMountedPlot) {
-                    target.replaceChildren();
-                }
-                _strikeRailLastPayloadByTab[activeStrikeRailTab] = payload;
-                const renderToken = ++_strikeRailRenderToken;
-                const renderer = hasMountedPlot ? Plotly.react : Plotly.newPlot;
-                const plotPerf = gexPerfStart('Plotly.react', { chart: 'strike_rail', tab: activeStrikeRailTab, new_plot: !hasMountedPlot });
-                renderer(target, fig.data || [], fig.layout || {}, config)
-                    .then(() => {
-                        gexPerfEnd(plotPerf, { chart: 'strike_rail', tab: activeStrikeRailTab });
-                        if (renderToken !== _strikeRailRenderToken) {
-                            gexPerfEnd(strikeRailPerf, { superseded: true });
-                            return;
-                        }
-                        target.__strikeRailState = {
-                            tab: activeStrikeRailTab,
-                            payloadKey,
-                            syncKey,
-                        };
-                        try { Plotly.Plots.resize(target); } catch (e) {}
-                        updateStrikeInspectContext();
-                        syncGexPanelYAxisToTV();
-                        gexPerfEnd(strikeRailPerf, { rendered: true });
-                    })
-                    .catch(() => {
-                        gexPerfEnd(plotPerf, { chart: 'strike_rail', tab: activeStrikeRailTab, error: true });
-                        gexPerfEnd(strikeRailPerf, { error: true });
-                    });
-            } catch (e) {
-                gexPerfEnd(strikeRailPerf, { error: true });
-                console.warn('Strike Inspect render failed', activeStrikeRailTab, e);
-                renderStrikeRailEmpty('Could not render ' + (STRIKE_RAIL_LABELS[activeStrikeRailTab] || 'Strike Inspect') + '.');
-            }
         }
 
         function wireGexScopePill() {
@@ -38668,51 +37975,6 @@ def index():
             renderRailKeyLevels(stats);
             renderKeyLevels(levels);
             renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
-        }
-
-        function renderGexSidePanel(panelJson) {
-            _lastGexPanelJson = panelJson || null;
-            if (!_lastGexPanelJson) {
-                if (activeStrikeRailTab === 'gex') {
-                    renderStrikeRailEmpty('GEX data loads with the next refresh.');
-                }
-                return;
-            }
-            if (activeStrikeRailTab === 'gex') renderStrikeRailPanel();
-        }
-
-        // Mirror the TradingView chart's visible price range onto the Plotly
-        // strike rail so bars line up with candles at the same strike.
-        let _gexSyncScheduled = false;
-        function syncGexPanelYAxisToTV() {
-            if (isGexColumnCollapsed()) return;
-            const panel = getStrikeRailTarget();
-            const syncSpec = getStrikeRailSyncSpec();
-            if (!panel || !syncSpec) return;
-            try {
-                const currentState = panel.__strikeRailState || {};
-                if (currentState.syncKey === syncSpec.key) return;
-                // Mirror TV's plot-area pixel bounds by zeroing Plotly top margin
-                // and matching bottom margin to TV's time-axis height. That way
-                // the Plotly y-axis range maps to the same screen pixels as TV's.
-                Plotly.relayout(panel, {
-                    'yaxis.range': [syncSpec.lo, syncSpec.hi],
-                    'margin.t': 0,
-                    'margin.b': syncSpec.tsH,
-                });
-                panel.__strikeRailState = Object.assign({}, currentState, { syncKey: syncSpec.key });
-            } catch (e) {
-                // TV chart may not be ready yet; skip silently
-            }
-        }
-        function scheduleGexPanelSync() {
-            if (isGexColumnCollapsed()) return;
-            if (_gexSyncScheduled) return;
-            _gexSyncScheduled = true;
-            requestAnimationFrame(() => {
-                _gexSyncScheduled = false;
-                syncGexPanelYAxisToTV();
-            });
         }
 
         // ── Trader stats KPI strip + alerts ─────────────────────────────────
@@ -39765,7 +39027,7 @@ def index():
                 const hide = id !== secondaryActiveTab;
                 el.classList.toggle('tab-hidden', hide);
                 if (!hide) {
-                    try { Plotly.Plots.resize(el); } catch (e) {}
+                    resizePlotlyIfDisplayed(el);
                 }
             });
         }
@@ -40357,6 +39619,7 @@ def index():
             return {
                 ticker: document.getElementById('ticker').value,
                 timeframe: tf,
+                expiry: getSelectedExpiryValues(),
                 lookback_days: lookbackDays,
                 rvol_lookback_days: rvolLookback,
                 call_color: callColor,
@@ -40401,9 +39664,6 @@ def index():
             .then(priceResp => {
                 _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
                 _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
-                _lastKeyLevels = priceResp ? (priceResp.key_levels || null) : null;
-                _lastKeyLevels0dte = priceResp ? (priceResp.key_levels_0dte || null) : null;
-                _lastStats0dte = priceResp ? (priceResp.stats_0dte || null) : null;
                 if (!priceResp.error && priceResp.price) {
                     applyPriceData(priceResp.price);
                 } else {
@@ -40414,9 +39674,6 @@ def index():
                     _lastTopOIContextKey = requestTopOIContextKey;
                     if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
                 }
-                renderGexSidePanel(priceResp ? priceResp.gex_panel : null);
-                renderTraderStats(priceResp ? (priceResp.trader_stats || null) : null);
-                redrawGexScope();
             })
             .catch(err => {
                 gexPerfEnd(priceFetchPerf, { error: true });
@@ -40438,7 +39695,6 @@ def index():
             renderRailFlowBlotter(data.large_trades || null);
             
             const selectedCharts = getChartVisibility();
-            applyStrikeRailTabs(selectedCharts);
             setStrikeOverlayProfiles(data.strike_profiles || {});
             
             // Handle price chart separately (TradingView Lightweight Charts)
@@ -40457,10 +39713,6 @@ def index():
                 if (toolbarShell) toolbarShell.style.display = 'none';
                 const toolbar = document.getElementById('tv-toolbar-container');
                 if (toolbar) toolbar.style.display = 'none';
-                const gexHeader = document.getElementById('gex-col-header');
-                if (gexHeader) gexHeader.style.display = 'none';
-                const gexCol = document.getElementById('gex-column');
-                if (gexCol) gexCol.style.display = 'none';
                 const railTabs = document.getElementById('right-rail-tabs');
                 if (railTabs) railTabs.style.display = 'none';
                 const railPanels = document.getElementById('right-rail-panels');
@@ -40523,7 +39775,7 @@ def index():
                 selected && !['price'].includes(key) && data[key]
             );
 
-            const utilityCharts = regularCharts.filter(([key]) => !STRIKE_RAIL_CHART_IDS.includes(key));
+            const utilityCharts = regularCharts;
             const utilityChartIds = utilityCharts.map(([key]) => key);
             const needsGridRebuild = utilityChartIds.length !== currentChartIds.length ||
                                      !utilityChartIds.every((id, i) => currentChartIds[i] === id);
@@ -40587,9 +39839,10 @@ def index():
                             
                             chartData.layout.plot_bgcolor = '#1E1E1E';
                             chartData.layout.paper_bgcolor = '#1E1E1E';
+                            const chartIsDisplayed = isDisplayedElement(container);
                             
                             const config = {
-                                responsive: true,
+                                responsive: chartIsDisplayed,
                                 displayModeBar: true,
                                 modeBarButtonsToRemove: ['lasso2d', 'select2d'],
                                 displaylogo: false,
@@ -40619,11 +39872,9 @@ def index():
                     }
                 });
             }
-            renderStrikeRailPanel();
-            
             // Clean up disabled regular charts from charts object
             Object.keys(selectedCharts).forEach(key => {
-                if ((!selectedCharts[key] || STRIKE_RAIL_CHART_IDS.includes(key)) && !['price'].includes(key)) {
+                if (!selectedCharts[key] && !['price'].includes(key)) {
                     const container = document.getElementById(`${key}-chart`);
                     if (container) {
                         container.remove();
@@ -40643,8 +39894,7 @@ def index():
             const fsChart = document.querySelector('.chart-container.fullscreen');
             if (fsChart) {
                 requestAnimationFrame(() => {
-                    const plot = fsChart.querySelector('.js-plotly-plot');
-                    if (plot) { try { Plotly.Plots.resize(plot); } catch(e) {} }
+                    resizePlotlyIfDisplayed(fsChart);
                 });
             }
 
@@ -41755,37 +41005,26 @@ def index():
 
         // Auto-update heavy options/analytics at a slower cadence. Live candles
         // and the selected option quote stream stay on their SSE fast lanes.
-        updateInterval = setInterval(updateData, DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS);
+        startAnalyticsAutoRefresh();
         startTradeChainAutoRefresh();
         
         // Handle window resize
         window.addEventListener('resize', () => {
-            const grid = document.getElementById('chart-grid');
-            if (grid) {
-                if (isGexColumnCollapsed()) {
-                    grid.style.setProperty('--gex-col-w', '0px');
-                } else {
-                    const parsedWidth = parseFloat(getComputedStyle(grid).getPropertyValue('--gex-col-w'));
-                    const liveWidth = Number.isFinite(parsedWidth) ? parsedWidth : 352;
-                    applyGexColWidth(liveWidth, false);
-                }
-            }
             Object.keys(charts).forEach(chartKey => {
                 const chartElement = document.getElementById(`${chartKey}-chart`);
                 if (chartElement && charts[chartKey]) {
-                    Plotly.Plots.resize(chartElement);
+                    resizePlotlyIfDisplayed(chartElement);
                 }
             });
             scheduleTVDrawingOverlayDraw();
             scheduleTVStrikeOverlayDraw();
             scheduleTVHistoricalOverlayDraw();
             scheduleTVProfileOverlayDraw();
-            scheduleGexPanelSync();
         });
 
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
-            clearInterval(updateInterval);
+            stopAnalyticsAutoRefresh();
             stopTradeChainAutoRefresh();
             disconnectPriceStream();
             Object.values(charts).forEach(chart => {
@@ -41800,13 +41039,13 @@ def index():
             button.classList.toggle('paused', !isStreaming);
             
             if (isStreaming) {
-                updateInterval = setInterval(updateData, DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS);
+                startAnalyticsAutoRefresh();
                 startTradeChainAutoRefresh();
                 // Reconnect real-time price stream when resuming
                 const tickerVal = (document.getElementById('ticker').value || '').trim();
                 if (tickerVal) connectPriceStream(tickerVal);
             } else {
-                clearInterval(updateInterval);
+                stopAnalyticsAutoRefresh();
                 stopTradeChainAutoRefresh();
                 // Disconnect real-time price stream when pausing
                 disconnectPriceStream();
@@ -42590,11 +41829,6 @@ def trade_chain():
     perf.add('ticker', ticker)
     if not ticker:
         return _perf_jsonify(perf, {'error': 'Missing ticker'}, 400)
-    with perf.span('cache_lookup'):
-        cached = _options_cache.get(ticker)
-    perf.add('cache_hit', bool(cached))
-    if not cached:
-        return _perf_jsonify(perf, {'error': 'No cached option chain for ticker. Run a normal chain update first.'}, 409)
 
     expiry = data.get('expiry', data.get('expiries'))
     if isinstance(expiry, str):
@@ -42619,6 +41853,49 @@ def trade_chain():
     perf.add('selected_expiries', len(selected_expiries))
     perf.add('strike_range', strike_range)
 
+    refresh_cache = _coerce_bool(data.get('refresh_cache'), default=False)
+    perf.add('refresh_cache', refresh_cache)
+    cache_snapshot = None
+    cache_refresh_error = None
+    if refresh_cache:
+        exposure_metric = data.get('exposure_metric', "Open Interest")
+        delta_adjusted = _coerce_bool(data.get('delta_adjusted'), default=False)
+        calculate_in_notional = _coerce_bool(data.get('calculate_in_notional'), default=True)
+        try:
+            cache_min_age_ms = max(0, int(data.get('cache_min_age_ms') or 0))
+        except Exception:
+            cache_min_age_ms = 0
+        try:
+            cache_snapshot = refresh_options_cache_snapshot(
+                ticker,
+                selected_expiries,
+                exposure_metric=exposure_metric,
+                delta_adjusted=delta_adjusted,
+                calculate_in_notional=calculate_in_notional,
+                min_age_ms=cache_min_age_ms,
+                perf=perf,
+            )
+            perf.add('cache_refresh_hit', cache_snapshot.get('cache_hit'))
+            perf.add('cache_refresh_fetched', cache_snapshot.get('fetched'))
+            if not cache_snapshot.get('cache_hit') and not cache_snapshot.get('cache_stored'):
+                if cache_snapshot.get('S') is None:
+                    cache_refresh_error = 'Cache refresh did not return a current price.'
+                else:
+                    cache_refresh_error = 'Cache refresh did not return usable option data.'
+                perf.add('cache_refresh_error', cache_refresh_error[:80])
+        except Exception as e:
+            cache_refresh_error = str(e)
+            perf.add('cache_refresh_error', cache_refresh_error[:80])
+
+    with perf.span('cache_lookup'):
+        cached = _options_cache.get(ticker)
+    perf.add('cache_hit', bool(cached))
+    if not cached:
+        message = 'No cached option chain for ticker. Run a normal chain update first.'
+        if cache_refresh_error:
+            message = f'{message} Cache refresh failed: {cache_refresh_error}'
+        return _perf_jsonify(perf, {'error': message}, 409)
+
     with perf.span('build_trading_chain_payload'):
         payload = build_trading_chain_payload(
             ticker=ticker,
@@ -42632,6 +41909,32 @@ def trade_chain():
     perf.add('contracts', len(payload.get('contracts') or []))
     if not payload.get('contracts'):
         payload['warnings'] = sorted(set((payload.get('warnings') or []) + ['No contracts matched the cached chain filters.']))
+    if cache_refresh_error:
+        payload['warnings'] = sorted(set((payload.get('warnings') or []) + ['Cache refresh failed; showing last cached chain.']))
+
+    meta = (cached.get('meta') or {}) if cached else {}
+    payload['cache_meta'] = {
+        'cache_hit': bool(cache_snapshot.get('cache_hit')) if cache_snapshot else False,
+        'fetched': bool(cache_snapshot.get('fetched')) if cache_snapshot else False,
+        'stored': bool(cache_snapshot.get('cache_stored')) if cache_snapshot else False,
+        'fetched_at_ms': meta.get('fetched_at_ms'),
+        'cache_key': meta.get('cache_key'),
+        'requested_cache_key': cache_snapshot.get('cache_key') if cache_snapshot else None,
+        'refresh_error': cache_refresh_error,
+    }
+    if refresh_cache:
+        try:
+            with perf.span('create_fast_strike_profile_payload'):
+                payload['strike_profiles'] = create_fast_strike_profile_payload(
+                    cached.get('calls'),
+                    cached.get('puts'),
+                    cached.get('S'),
+                    strike_range,
+                    selected_expiries=selected_expiries,
+                )
+        except Exception as e:
+            print(f"[fast_strike_profiles] build failed: {e}")
+            payload['strike_profiles'] = {}
     return _perf_jsonify(perf, payload)
 
 
@@ -43304,8 +42607,6 @@ def update():
     
     ticker = format_ticker(ticker) 
     perf.add('ticker', ticker)
-    active_strike_rail_tab = str(data.get('active_strike_rail_tab') or 'gex').strip() or 'gex'
-    perf.add('active_strike_rail_tab', active_strike_rail_tab)
     if not ticker or not expiry:
         return _perf_jsonify(perf, {'error': 'Missing ticker or expiry'}, 400)
     
@@ -43326,26 +42627,31 @@ def update():
             calculate_in_notional = cin_val.lower() == 'true'
         else:
             calculate_in_notional = bool(cin_val)
+        gate_alerts = _coerce_bool(data.get('gate_alerts'), default=True)
 
-        # Fetch options data for multiple dates
-        with perf.span('fetch_chain'):
-            if len(expiry_dates) == 1:
-                calls, puts = fetch_options_for_date(ticker, expiry_dates[0], exposure_metric=exposure_metric, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
-            else:
-                calls, puts = fetch_options_for_multiple_dates(ticker, expiry_dates, exposure_metric=exposure_metric, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
+        cache_snapshot = refresh_options_cache_snapshot(
+            ticker,
+            expiry_dates,
+            exposure_metric=exposure_metric,
+            delta_adjusted=delta_adjusted,
+            calculate_in_notional=calculate_in_notional,
+            min_age_ms=ANALYTICS_OPTIONS_CACHE_REUSE_MS,
+            perf=perf,
+        )
+        perf.add('options_cache_hit', cache_snapshot.get('cache_hit'))
+        perf.add('options_cache_fetched', cache_snapshot.get('fetched'))
+        calls = cache_snapshot.get('calls')
+        puts = cache_snapshot.get('puts')
+        S = cache_snapshot.get('S')
+        if calls is None:
+            calls = pd.DataFrame()
+        if puts is None:
+            puts = pd.DataFrame()
         
         if calls.empty and puts.empty:
             return _perf_jsonify(perf, {'error': 'No options data found'})
-            
-        # Get current price
-        with perf.span('get_current_price'):
-            S = get_current_price(ticker)
         if S is None:
             return _perf_jsonify(perf, {'error': 'Could not fetch current price'})
-
-        # Cache options data so /update_price can use it without re-fetching
-        with perf.span('options_cache_copy'):
-            _options_cache[ticker] = {'calls': calls.copy(), 'puts': puts.copy(), 'S': S}
         
         # Get strike range
         strike_range = float(data.get('strike_range', 0.1))
@@ -43439,7 +42745,7 @@ def update():
         exposure_levels_count = int(data.get('levels_count', 3))
         use_heikin_ashi = data.get('use_heikin_ashi', False)
         horizontal = data.get('horizontal_bars', False)
-        strike_rail_horizontal = True
+        strike_profile_horizontal = True
         show_abs_gex = data.get('show_abs_gex', False)
         abs_gex_opacity = float(data.get('abs_gex_opacity', 0.2))
         highlight_max_level = data.get('highlight_max_level', False)
@@ -43453,6 +42759,9 @@ def update():
  
         
         response = {}
+        flow_pulse_snapshot = None
+        pinned_snapshot = None
+        quote_open = None
 
         try:
             with perf.span('compute_top_oi_strikes'):
@@ -43476,19 +42785,19 @@ def update():
 
         if data.get('show_gamma', True):
             with perf.span('chart_gamma'):
-                response['gamma'] = create_exposure_chart(calls, puts, "GEX", "Gamma Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, show_abs_gex_area=show_abs_gex, abs_gex_opacity=abs_gex_opacity, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+                response['gamma'] = create_exposure_chart(calls, puts, "GEX", "Gamma Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_profile_horizontal, show_abs_gex_area=show_abs_gex, abs_gex_opacity=abs_gex_opacity, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_delta', True):
             with perf.span('chart_delta'):
-                response['delta'] = create_exposure_chart(calls, puts, "DEX", "Delta Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+                response['delta'] = create_exposure_chart(calls, puts, "DEX", "Delta Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_profile_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_vanna', True):
             with perf.span('chart_vanna'):
-                response['vanna'] = create_exposure_chart(calls, puts, "VEX", "Vanna Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+                response['vanna'] = create_exposure_chart(calls, puts, "VEX", "Vanna Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_profile_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_charm', True):
             with perf.span('chart_charm'):
-                response['charm'] = create_exposure_chart(calls, puts, "Charm", "Charm Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+                response['charm'] = create_exposure_chart(calls, puts, "Charm", "Charm Exposure by Strike", S, strike_range, show_calls, show_puts, show_net, coloring_mode, call_color, put_color, expiry_dates, strike_profile_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_speed', True):
             with perf.span('chart_speed'):
@@ -43512,7 +42821,7 @@ def update():
                     calls, puts, S, strike_range,
                     call_color, put_color, coloring_mode,
                     ov_show_calls, ov_show_puts, ov_show_net,
-                    expiry_dates, strike_rail_horizontal,
+                    expiry_dates, strike_profile_horizontal,
                     highlight_max_level=highlight_max_level,
                     max_level_color=max_level_color,
                     max_level_mode=max_level_mode,
@@ -43521,14 +42830,13 @@ def update():
         
         if data.get('show_open_interest', True):
             with perf.span('chart_open_interest'):
-                response['open_interest'] = create_open_interest_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+                response['open_interest'] = create_open_interest_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_profile_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_premium', True):
             with perf.span('chart_premium'):
-                response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_rail_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
+                response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_profile_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_large_trades', True):
-            flow_pulse_snapshot = None
             try:
                 with perf.span('flow_pulse_snapshot_shared'):
                     flow_pulse_snapshot, flow_pulse_cache_hit = get_shared_flow_pulse_snapshot(
@@ -43674,6 +42982,102 @@ def update():
                 'expected_move_range': None,
                 'live_straddle': None,
             }
+
+        analytics_price_data = None
+        try:
+            with perf.span('analytics_price_history'):
+                analytics_price_data = get_price_history(
+                    ticker,
+                    timeframe=timeframe,
+                    lookback_days=data.get('lookback_days'),
+                )
+        except Exception as e:
+            print(f"[analytics_price_history] build failed: {e}")
+            analytics_price_data = None
+
+        try:
+            with perf.span('compute_key_levels'):
+                key_levels = compute_key_levels(
+                    calls, puts, S,
+                    selected_expiries=expiry_dates,
+                    strike_range=strike_range,
+                )
+                response['key_levels'] = apply_expected_move_snapshot_to_key_levels(key_levels, pinned_snapshot)
+        except Exception as e:
+            print(f"[key_levels] slow build failed: {e}")
+            response['key_levels'] = None
+
+        try:
+            full_scope_id = _build_stats_scope_id(
+                strike_range,
+                selected_expiries=expiry_dates,
+                scope_label='all',
+            )
+            with perf.span('compute_trader_stats_full'):
+                trader_stats = compute_trader_stats(
+                    calls, puts, S,
+                    strike_range=strike_range,
+                    selected_expiries=expiry_dates,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
+                    ticker=ticker,
+                    gate_strike_alerts=gate_alerts,
+                    scope_id=full_scope_id,
+                    price_data=analytics_price_data,
+                    timeframe=timeframe,
+                    expected_move_snapshot=pinned_snapshot,
+                    flow_pulse_snapshot=flow_pulse_snapshot,
+                )
+                response['trader_stats'] = apply_expected_move_snapshot_to_stats(trader_stats, pinned_snapshot)
+        except Exception as e:
+            print(f"[trader_stats] slow build failed: {e}")
+            response['trader_stats'] = None
+
+        response['key_levels_0dte'] = None
+        response['stats_0dte'] = None
+        try:
+            nearest_exp = _nearest_expiration(calls) or _nearest_expiration(puts)
+            if nearest_exp:
+                c0 = calls[calls['expiration_date'] == nearest_exp] if 'expiration_date' in calls.columns else calls
+                p0 = puts[puts['expiration_date'] == nearest_exp] if 'expiration_date' in puts.columns else puts
+                nearest_scope_id = _build_stats_scope_id(
+                    strike_range,
+                    selected_expiries=[nearest_exp],
+                    scope_label=f'expiry:{nearest_exp}',
+                )
+                pinned_em_0dte = get_pinned_expected_move(
+                    c0, p0, S, ticker,
+                    selected_expiries=[nearest_exp],
+                    open_spot=quote_open,
+                )
+                with perf.span('compute_key_levels_0dte'):
+                    key_levels_0dte = compute_key_levels(
+                        c0, p0, S,
+                        selected_expiries=[nearest_exp],
+                        strike_range=strike_range,
+                    )
+                    response['key_levels_0dte'] = apply_expected_move_snapshot_to_key_levels(key_levels_0dte, pinned_em_0dte)
+                with perf.span('compute_trader_stats_0dte'):
+                    stats_0dte = compute_trader_stats(
+                        c0, p0, S,
+                        strike_range=strike_range,
+                        selected_expiries=[nearest_exp],
+                        delta_adjusted=delta_adjusted,
+                        calculate_in_notional=calculate_in_notional,
+                        ticker=ticker,
+                        gate_strike_alerts=gate_alerts,
+                        scope_id=nearest_scope_id,
+                        price_data=analytics_price_data,
+                        timeframe=timeframe,
+                        expected_move_snapshot=pinned_em_0dte,
+                        flow_pulse_snapshot=_filter_flow_pulse_snapshot_by_expiry(
+                            flow_pulse_snapshot,
+                            [nearest_exp],
+                        ),
+                    )
+                    response['stats_0dte'] = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
+        except Exception as e:
+            print(f"[0dte_bundle] slow build failed: {e}")
         
         return _perf_jsonify(perf, response)
         
@@ -43721,20 +43125,6 @@ def update_price():
         session_level_config = normalize_session_level_config(data.get('session_levels'))
         volume_profile_settings = data.get('volume_profile') or {}
         tpo_profile_settings = data.get('tpo_profile') or {}
-        # Mirror /update_data semantics. compute_trader_stats has needed these
-        # since Phase 2 Stage 3 (commit 6fc40bb); without them every tick raised
-        # a silent NameError and trader_stats stayed None.
-        delta_adjusted = data.get('delta_adjusted', False)
-        cin_val = data.get('calculate_in_notional', True)
-        if isinstance(cin_val, str):
-            calculate_in_notional = cin_val.lower() == 'true'
-        else:
-            calculate_in_notional = bool(cin_val)
-        gate_val = data.get('gate_alerts', True)
-        if isinstance(gate_val, str):
-            gate_alerts = gate_val.lower() == 'true'
-        else:
-            gate_alerts = bool(gate_val)
 
         with perf.span('get_price_history'):
             price_data = get_price_history(ticker, timeframe=timeframe, lookback_days=lookback_days)
@@ -43794,44 +43184,9 @@ def update_price():
         except Exception:
             pass
 
-        gex_panel = None
-        key_levels = None
         top_oi = {'calls': [], 'puts': [], 'both': []}
-        flow_pulse_snapshot = None
         S_for_panel = cached.get('S')
-        quote_ticker = "$SPX" if ticker == "MARKET" else ("SPY" if ticker == "MARKET2" else ticker)
-        pinned_em_snapshot = None
-        quote_open = None
         if calls is not None and puts is not None and S_for_panel is not None:
-            try:
-                with perf.span('pinned_expected_move'):
-                    cached_em_key = _expected_move_cache_key(
-                        ticker,
-                        datetime.now(pytz.timezone('US/Eastern')).date(),
-                        selected_expiries,
-                    )
-                    cached_em = _SESSION_EM_BASELINE.get(cached_em_key)
-                    if cached_em:
-                        pinned_em_snapshot = cached_em
-                    else:
-                        quote_response = client.quote(quote_ticker)
-                        if quote_response.ok:
-                            quote_data = quote_response.json()
-                            ticker_data = quote_data.get(quote_ticker, {})
-                            quote = ticker_data.get('quote', {})
-                            quote_open = (
-                                quote.get('openPrice')
-                                or quote.get('regularMarketOpen')
-                                or quote.get('open')
-                            )
-                        pinned_em_snapshot = get_pinned_expected_move(
-                            calls, puts, S_for_panel, ticker,
-                            selected_expiries=selected_expiries,
-                            open_spot=quote_open,
-                        )
-            except Exception as e:
-                print(f"[expected_move] pinned chart EM build failed: {e}")
-                pinned_em_snapshot = None
             try:
                 # Keep historical intraday bubbles in sync with the price-chart
                 # refresh loop as well as the heavier /update loop. This avoids
@@ -43842,129 +43197,17 @@ def update_price():
             except Exception as e:
                 print(f"[interval_data] price-path store failed: {e}")
             try:
-                with perf.span('create_gex_side_panel'):
-                    gex_panel = create_gex_side_panel(
-                        calls, puts, S_for_panel, strike_range=strike_range,
-                        call_color=call_color, put_color=put_color,
-                    )
-            except Exception as e:
-                print(f"[gex_panel] build failed: {e}")
-                gex_panel = None
-            try:
-                with perf.span('compute_key_levels'):
-                    key_levels = compute_key_levels(
-                        calls, puts, S_for_panel,
-                        selected_expiries=selected_expiries,
-                        strike_range=strike_range,
-                    )
-                    key_levels = apply_expected_move_snapshot_to_key_levels(key_levels, pinned_em_snapshot)
-            except Exception as e:
-                print(f"[key_levels] build failed: {e}")
-                key_levels = None
-            try:
                 with perf.span('compute_top_oi_strikes'):
                     top_oi = compute_top_oi_strikes(calls, puts, n=top_oi_count)
             except Exception as e:
                 print(f"[top_oi] cached build failed: {e}")
                 top_oi = {'calls': [], 'puts': [], 'both': []}
-            try:
-                with perf.span('flow_pulse_snapshot_shared'):
-                    flow_pulse_snapshot, flow_pulse_cache_hit = get_shared_flow_pulse_snapshot(
-                        ticker, calls, puts, S_for_panel,
-                        strike_range=strike_range,
-                        top_n=4000,
-                        return_cache_hit=True,
-                    )
-                    perf.add('flow_pulse_cache_hit', flow_pulse_cache_hit)
-            except Exception as e:
-                print(f"[flow_pulse] price-path shared snapshot failed: {e}")
-                flow_pulse_snapshot = None
-
-        trader_stats = None
-        if calls is not None and puts is not None and S_for_panel is not None:
-            try:
-                full_scope_id = _build_stats_scope_id(
-                    strike_range,
-                    selected_expiries=selected_expiries,
-                    scope_label='all',
-                )
-                with perf.span('compute_trader_stats_full'):
-                    trader_stats = compute_trader_stats(
-                        calls, puts, S_for_panel, strike_range=strike_range,
-                        selected_expiries=selected_expiries,
-                        delta_adjusted=delta_adjusted,
-                        calculate_in_notional=calculate_in_notional,
-                        ticker=ticker,
-                        gate_strike_alerts=gate_alerts,
-                        scope_id=full_scope_id,
-                        price_data=price_data,
-                        timeframe=timeframe,
-                        expected_move_snapshot=pinned_em_snapshot,
-                        flow_pulse_snapshot=flow_pulse_snapshot,
-                    )
-                    trader_stats = apply_expected_move_snapshot_to_stats(trader_stats, pinned_em_snapshot)
-            except Exception as e:
-                print(f"[trader_stats] build failed: {e}")
-                trader_stats = None
-
-        # 0DTE-filtered bundles (nearest expiration only)
-        key_levels_0dte = None
-        stats_0dte = None
-        if calls is not None and puts is not None and S_for_panel is not None:
-            try:
-                nearest_exp = _nearest_expiration(calls) or _nearest_expiration(puts)
-                if nearest_exp:
-                    c0 = calls[calls['expiration_date'] == nearest_exp] if 'expiration_date' in calls.columns else calls
-                    p0 = puts[puts['expiration_date']   == nearest_exp] if 'expiration_date' in puts.columns  else puts
-                    nearest_scope_id = _build_stats_scope_id(
-                        strike_range,
-                        selected_expiries=[nearest_exp],
-                        scope_label=f'expiry:{nearest_exp}',
-                    )
-                    with perf.span('compute_key_levels_0dte'):
-                        key_levels_0dte = compute_key_levels(
-                            c0, p0, S_for_panel,
-                            selected_expiries=[nearest_exp],
-                            strike_range=strike_range,
-                        )
-                        pinned_em_0dte = get_pinned_expected_move(
-                            c0, p0, S_for_panel, ticker,
-                            selected_expiries=[nearest_exp],
-                            open_spot=quote_open,
-                        )
-                        key_levels_0dte = apply_expected_move_snapshot_to_key_levels(key_levels_0dte, pinned_em_0dte)
-                    with perf.span('compute_trader_stats_0dte'):
-                        stats_0dte = compute_trader_stats(
-                            c0, p0, S_for_panel,
-                            strike_range=strike_range,
-                            selected_expiries=[nearest_exp],
-                            delta_adjusted=delta_adjusted,
-                            calculate_in_notional=calculate_in_notional,
-                            ticker=ticker,
-                            gate_strike_alerts=gate_alerts,
-                            scope_id=nearest_scope_id,
-                            price_data=price_data,
-                            timeframe=timeframe,
-                            expected_move_snapshot=pinned_em_0dte,
-                            flow_pulse_snapshot=_filter_flow_pulse_snapshot_by_expiry(
-                                flow_pulse_snapshot,
-                                [nearest_exp],
-                            ),
-                        )
-                        stats_0dte = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
-            except Exception as e:
-                print(f"[0dte_bundle] build failed: {e}")
 
         return _perf_jsonify(perf, {
             'price': price_chart,
-            'gex_panel': gex_panel,
-            'key_levels': key_levels,
             'session_levels': session_levels,
             'session_levels_meta': session_levels_meta,
             'top_oi': top_oi,
-            'trader_stats': trader_stats,
-            'key_levels_0dte': key_levels_0dte,
-            'stats_0dte': stats_0dte,
         })
     except Exception as e:
         import traceback
