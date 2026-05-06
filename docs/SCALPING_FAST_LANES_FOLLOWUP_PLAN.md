@@ -1091,9 +1091,53 @@ Notes:
 - The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
 - The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
 
+### Stage 4 - Fast chain snapshot lane landed
+
+Branch: `codex/scalping-fast-lanes-followup`
+Commit subject: `perf(overlay): split fast strike profiles from slow greeks`
+
+What changed:
+
+- Extended `/trade_chain` with an opt-in `refresh_cache: true` flag. Default `/trade_chain` callers still read the existing cache only.
+- The periodic open-rail fast timer now sends `refresh_cache: true`; manual chain refreshes and user clicks do not force a Schwab chain fetch.
+- `/trade_chain refresh_cache` calls `refresh_options_cache_snapshot(...)` before building the contract picker payload, preserving selected-contract cached validation and the existing order safety paths.
+- Added a fast strike-profile subset helper that emits only `options_volume`, `open_interest`, and `voi_ratio`.
+- Added frontend `mergeStrikeOverlayProfiles(...)` so fast profile updates merge into the existing strike-overlay profile map instead of replacing slow `gex`, `gamma`, `delta`, `vanna`, or `charm` profiles.
+- Added `cache_meta` to the `/trade_chain` payload so cache fetch/hit timestamps can be inspected during trace sessions.
+
+Tricky parts:
+
+- The fast lane sends current exposure settings with the refresh request so `_options_cache` is not overwritten with a chain calculated under mismatched exposure toggles.
+- If a fast cache refresh fails but an older cache exists, `/trade_chain` now returns the old cached contract picker with a warning rather than blanking the rail.
+- `create_strike_profile_payload(...)` now accepts a `metrics` filter, but the normal slow analytics path still calls it without a filter and receives the full slow+fast profile set.
+- The fast profile merge updates `lastData.strike_profiles` as well as the live overlay cache, so later overlay toggles keep both fast and slow metrics available.
+
+Validation completed:
+
+```bash
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+rg -n "gex-side-panel|gex-column|gex-col-header|gex-resize-handle|Strike Inspect|strike-inspect|strike-rail|renderStrikeRailPanel|syncGexPanelYAxisToTV|scheduleGexPanelSync|create_gex_side_panel" ezoptionsschwab.py
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+```
+
+Additional smoke:
+
+- Monkeypatched `fetch_options_for_date(...)` and `get_current_price(...)`, then posted to `/trade_chain` with `refresh_cache: true`.
+- The endpoint returned HTTP 200, 2 cached contracts, `cache_meta.fetched=true`, and exactly the fast profile keys `open_interest`, `options_volume`, and `voi_ratio`.
+
+Notes:
+
+- `py_compile` passed with the pre-existing inline-template `SyntaxWarning: invalid escape sequence '\('`.
+- Inline script extraction found 5 scripts, and `node --check /tmp/gex-inline-scripts.js` passed.
+- The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
+- The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
+
 Next stage:
 
-- Stage 4 should add the fast chain snapshot lane, most likely by extending `/trade_chain` with `refresh_cache: true`, and merge fast strike profiles without overwriting slow GEX/DEX/Vanna/Charm overlay data.
+- Stage 5 should confirm the slow analytics route is on the one-minute cadence, make `/update` reuse a recent fast-chain cache when possible, and preserve immediate forced analytics refreshes for ticker/expiry/settings changes.
 
 ---
 

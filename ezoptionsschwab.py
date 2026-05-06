@@ -4676,14 +4676,14 @@ def build_historical_levels_overlay(ticker, display_date, chart_times, latest_pr
     return historical_points, historical_expected_moves
 
 
-def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_expiries=None):
+def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_expiries=None, metrics=None):
     """Build compact per-strike profiles for the TradingView strike overlay.
 
     This only aggregates columns that already exist on the option chain rows; it
     does not alter any exposure math. The output is intentionally JSON-simple so
     the frontend does not need to parse Plotly payloads.
     """
-    profiles = {
+    all_profiles = {
         'gex': ('GEX', 'call_minus_put'),
         'gamma': ('GEX', 'call_minus_put'),
         'delta': ('DEX', 'call_plus_put'),
@@ -4692,8 +4692,12 @@ def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_ex
         'open_interest': ('openInterest', 'call_minus_put'),
         'options_volume': ('volume', 'call_minus_put'),
     }
+    requested = set(metrics or all_profiles.keys())
+    profiles = {key: spec for key, spec in all_profiles.items() if key in requested}
+    include_voi_ratio = metrics is None or 'voi_ratio' in requested
     empty_payload = {key: [] for key in profiles}
-    empty_payload['voi_ratio'] = []
+    if include_voi_ratio:
+        empty_payload['voi_ratio'] = []
     if S is None:
         return empty_payload
     try:
@@ -4775,26 +4779,38 @@ def create_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_ex
                 out[float(strike)] = ratio
         return out
 
-    voi_call_map = _voi_ratio_by_strike(calls_df)
-    voi_put_map = _voi_ratio_by_strike(puts_df)
-    voi_rows = []
-    for strike in sorted(set(voi_call_map) | set(voi_put_map)):
-        call_value = float(voi_call_map.get(strike, 0.0) or 0.0)
-        put_value = float(voi_put_map.get(strike, 0.0) or 0.0)
-        if call_value == 0 and put_value == 0:
-            continue
-        value = call_value - put_value
-        if not all(math.isfinite(v) for v in (strike, call_value, put_value, value)):
-            continue
-        voi_rows.append({
-            'strike': float(strike),
-            'value': float(value),
-            'call': call_value,
-            'put': put_value,
-            'abs_value': abs(float(value)),
-        })
-    payload['voi_ratio'] = voi_rows
+    if include_voi_ratio:
+        voi_call_map = _voi_ratio_by_strike(calls_df)
+        voi_put_map = _voi_ratio_by_strike(puts_df)
+        voi_rows = []
+        for strike in sorted(set(voi_call_map) | set(voi_put_map)):
+            call_value = float(voi_call_map.get(strike, 0.0) or 0.0)
+            put_value = float(voi_put_map.get(strike, 0.0) or 0.0)
+            if call_value == 0 and put_value == 0:
+                continue
+            value = call_value - put_value
+            if not all(math.isfinite(v) for v in (strike, call_value, put_value, value)):
+                continue
+            voi_rows.append({
+                'strike': float(strike),
+                'value': float(value),
+                'call': call_value,
+                'put': put_value,
+                'abs_value': abs(float(value)),
+            })
+        payload['voi_ratio'] = voi_rows
     return payload
+
+
+def create_fast_strike_profile_payload(calls, puts, S, strike_range=0.02, selected_expiries=None):
+    return create_strike_profile_payload(
+        calls,
+        puts,
+        S,
+        strike_range,
+        selected_expiries=selected_expiries,
+        metrics=['options_volume', 'open_interest', 'voi_ratio'],
+    )
 
 
 def _expiration_series_iso(df):
@@ -25940,6 +25956,16 @@ def index():
             scheduleTVStrikeOverlayDraw();
         }
 
+        function mergeStrikeOverlayProfiles(nextProfiles, source = 'fast') {
+            if (!nextProfiles || typeof nextProfiles !== 'object') return;
+            tvStrikeOverlayProfiles = Object.assign({}, tvStrikeOverlayProfiles || {}, nextProfiles);
+            if (lastData) {
+                lastData.strike_profiles = Object.assign({}, lastData.strike_profiles || {}, nextProfiles);
+            }
+            syncStrikeOverlayControls();
+            scheduleTVStrikeOverlayDraw();
+        }
+
         function drawTVStrikeOverlay() {
             const overlay = ensureTVStrikeOverlay();
             if (!overlay) return;
@@ -36195,6 +36221,7 @@ def index():
             if (!ticker) return;
             const selectedExpiry = tradeRailState.expiry ? [tradeRailState.expiry] : getTradeRailSelectedDashboardExpiries();
             const rangePct = Math.max(0.5, Math.min(20, Number(tradeRailState.strikeRangePct) || 2));
+            const refreshCache = !!options.refreshCache;
             const key = ticker + '|' + selectedExpiry.join(',') + '|' + rangePct;
             const now = Date.now();
             const minIntervalMs = Math.max(0, Number(options.minIntervalMs) || 0);
@@ -36212,16 +36239,27 @@ def index():
             tradeRailState.requestKey = key;
             tradeRailState.lastChainRequestAt = now;
             renderTradeRail();
-            const tradeChainPerf = gexPerfStart('fetch:/trade_chain', { ticker, expiries: selectedExpiry.length, force: !!options.force });
+            const tradeChainPerf = gexPerfStart('fetch:/trade_chain', { ticker, expiries: selectedExpiry.length, force: !!options.force, refresh_cache: refreshCache });
+            const requestBody = {
+                ticker,
+                expiry: selectedExpiry,
+                strike_range: rangePct / 100,
+                contract_type: 'ALL',
+            };
+            if (refreshCache) {
+                const exposureMetricEl = document.getElementById('exposure_metric');
+                const deltaAdjustedEl = document.getElementById('delta_adjusted_exposures');
+                const calculateInNotionalEl = document.getElementById('calculate_in_notional');
+                requestBody.refresh_cache = true;
+                requestBody.cache_min_age_ms = Math.max(0, TRADE_CHAIN_AUTO_REFRESH_MS - 250);
+                requestBody.exposure_metric = exposureMetricEl ? exposureMetricEl.value : 'Open Interest';
+                requestBody.delta_adjusted = !!(deltaAdjustedEl && deltaAdjustedEl.checked);
+                requestBody.calculate_in_notional = !calculateInNotionalEl || !!calculateInNotionalEl.checked;
+            }
             fetch('/trade_chain', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    ticker,
-                    expiry: selectedExpiry,
-                    strike_range: rangePct / 100,
-                    contract_type: 'ALL',
-                }),
+                body: JSON.stringify(requestBody),
             })
             .then(r => {
                 gexPerfEnd(tradeChainPerf, { status: r.status });
@@ -36230,6 +36268,7 @@ def index():
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Trade chain request failed');
                 tradeRailState.payload = data;
+                if (data.strike_profiles) mergeStrikeOverlayProfiles(data.strike_profiles, 'fast-chain');
                 const expiries = Array.isArray(data.expiries) ? data.expiries : [];
                 const stillAvailable = tradeRailState.expiry && expiries.includes(tradeRailState.expiry);
                 tradeRailState.expiry = stillAvailable
@@ -36249,7 +36288,7 @@ def index():
         }
         function refreshTradeChainForOpenRail() {
             if (!isStreaming || isTradeRailCollapsed()) return;
-            requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS });
+            requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS, refreshCache: true });
         }
         function startAnalyticsAutoRefresh() {
             if (analyticsUpdateInterval) clearInterval(analyticsUpdateInterval);
@@ -41767,11 +41806,6 @@ def trade_chain():
     perf.add('ticker', ticker)
     if not ticker:
         return _perf_jsonify(perf, {'error': 'Missing ticker'}, 400)
-    with perf.span('cache_lookup'):
-        cached = _options_cache.get(ticker)
-    perf.add('cache_hit', bool(cached))
-    if not cached:
-        return _perf_jsonify(perf, {'error': 'No cached option chain for ticker. Run a normal chain update first.'}, 409)
 
     expiry = data.get('expiry', data.get('expiries'))
     if isinstance(expiry, str):
@@ -41796,6 +41830,43 @@ def trade_chain():
     perf.add('selected_expiries', len(selected_expiries))
     perf.add('strike_range', strike_range)
 
+    refresh_cache = _coerce_bool(data.get('refresh_cache'), default=False)
+    perf.add('refresh_cache', refresh_cache)
+    cache_snapshot = None
+    cache_refresh_error = None
+    if refresh_cache:
+        exposure_metric = data.get('exposure_metric', "Open Interest")
+        delta_adjusted = _coerce_bool(data.get('delta_adjusted'), default=False)
+        calculate_in_notional = _coerce_bool(data.get('calculate_in_notional'), default=True)
+        try:
+            cache_min_age_ms = max(0, int(data.get('cache_min_age_ms') or 0))
+        except Exception:
+            cache_min_age_ms = 0
+        try:
+            cache_snapshot = refresh_options_cache_snapshot(
+                ticker,
+                selected_expiries,
+                exposure_metric=exposure_metric,
+                delta_adjusted=delta_adjusted,
+                calculate_in_notional=calculate_in_notional,
+                min_age_ms=cache_min_age_ms,
+                perf=perf,
+            )
+            perf.add('cache_refresh_hit', cache_snapshot.get('cache_hit'))
+            perf.add('cache_refresh_fetched', cache_snapshot.get('fetched'))
+        except Exception as e:
+            cache_refresh_error = str(e)
+            perf.add('cache_refresh_error', cache_refresh_error[:80])
+
+    with perf.span('cache_lookup'):
+        cached = _options_cache.get(ticker)
+    perf.add('cache_hit', bool(cached))
+    if not cached:
+        message = 'No cached option chain for ticker. Run a normal chain update first.'
+        if cache_refresh_error:
+            message = f'{message} Cache refresh failed: {cache_refresh_error}'
+        return _perf_jsonify(perf, {'error': message}, 409)
+
     with perf.span('build_trading_chain_payload'):
         payload = build_trading_chain_payload(
             ticker=ticker,
@@ -41809,6 +41880,30 @@ def trade_chain():
     perf.add('contracts', len(payload.get('contracts') or []))
     if not payload.get('contracts'):
         payload['warnings'] = sorted(set((payload.get('warnings') or []) + ['No contracts matched the cached chain filters.']))
+    if cache_refresh_error:
+        payload['warnings'] = sorted(set((payload.get('warnings') or []) + ['Cache refresh failed; showing last cached chain.']))
+
+    meta = (cached.get('meta') or {}) if cached else {}
+    payload['cache_meta'] = {
+        'cache_hit': bool(cache_snapshot.get('cache_hit')) if cache_snapshot else False,
+        'fetched': bool(cache_snapshot.get('fetched')) if cache_snapshot else False,
+        'fetched_at_ms': meta.get('fetched_at_ms'),
+        'cache_key': meta.get('cache_key'),
+        'refresh_error': cache_refresh_error,
+    }
+    if refresh_cache:
+        try:
+            with perf.span('create_fast_strike_profile_payload'):
+                payload['strike_profiles'] = create_fast_strike_profile_payload(
+                    cached.get('calls'),
+                    cached.get('puts'),
+                    cached.get('S'),
+                    strike_range,
+                    selected_expiries=selected_expiries,
+                )
+        except Exception as e:
+            print(f"[fast_strike_profiles] build failed: {e}")
+            payload['strike_profiles'] = {}
     return _perf_jsonify(perf, payload)
 
 
