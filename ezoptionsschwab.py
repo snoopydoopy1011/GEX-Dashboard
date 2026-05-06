@@ -3449,7 +3449,7 @@ LOOKBACK_DEFAULT_BY_TF = {
     1: 10,
     2: 10,
     3: 15,
-    5: 60,
+    5: 10,
     10: 60,
     15: 90,
     30: 120,
@@ -21180,9 +21180,16 @@ def index():
         let lastPlotlyPriceLineUpdateAt = 0;
         const GEX_PERF_TRACE_FROM_SERVER = {{ 'true' if gex_perf_trace else 'false' }};
         const GEX_PERF_TRACE_KEY = 'gexPerfTrace';
-        const GEX_PERF_TRACE_CAP_DEFAULT = 10000;
+        const GEX_PERF_TRACE_CAP_DEFAULT = GEX_PERF_TRACE_FROM_SERVER ? 50000 : 10000;
+        const GEX_PERF_SPAN_BUFFER_CAP = 80;
+        const GEX_PERF_LONG_TASK_WINDOW_MS = 250;
+        const GEX_EVENT_LOOP_DELAY_INTERVAL_MS = 250;
+        const GEX_EVENT_LOOP_DELAY_THRESHOLD_MS = 100;
         let gexPerfSeq = 0;
         let gexLongTaskObserverStarted = false;
+        let gexEventLoopDelayStarted = false;
+        let gexPerfCompletedSpans = [];
+        let gexPerfLastChartApply = null;
 
         function isGexPerfTraceEnabled() {
             if (GEX_PERF_TRACE_FROM_SERVER) return true;
@@ -21239,6 +21246,8 @@ def index():
         window.gexPerfTraceEvents = Array.isArray(window.gexPerfTraceEvents) ? window.gexPerfTraceEvents : [];
         window.clearGexPerfTrace = function() {
             window.gexPerfTraceEvents = [];
+            gexPerfCompletedSpans = [];
+            gexPerfLastChartApply = null;
             return 0;
         };
         window.dumpGexPerfTrace = function(pretty) {
@@ -21323,9 +21332,180 @@ def index():
         function gexPerfStart(name, detail) {
             if (!isGexPerfTraceEnabled() || !window.performance || !performance.mark) return null;
             ensureGexLongTaskObserver();
+            ensureGexEventLoopDelayTrace();
             const id = 'gex-perf-mark-' + (++gexPerfSeq) + '-' + String(name).replace(/[^A-Za-z0-9_]+/g, '_');
             try { performance.mark(id + '-start'); } catch (e) {}
             return { id, name, detail: detail || {}, started: performance.now() };
+        }
+
+        function gexPerfValueSummary(value) {
+            if (value === undefined || value === null) return value;
+            if (typeof value === 'number' || typeof value === 'boolean') return value;
+            if (typeof value === 'string') return value.slice(0, 120);
+            if (Array.isArray(value)) return value.slice(0, 5).map(item => gexPerfValueSummary(item));
+            if (typeof value === 'object') {
+                const out = {};
+                Object.keys(value).slice(0, 8).forEach(key => {
+                    out[key] = gexPerfValueSummary(value[key]);
+                });
+                return out;
+            }
+            return String(value).slice(0, 120);
+        }
+
+        function summarizeGexPerfDetail(detail) {
+            const out = {};
+            if (!detail || typeof detail !== 'object') return out;
+            Object.keys(detail).slice(0, 12).forEach(key => {
+                out[key] = gexPerfValueSummary(detail[key]);
+            });
+            return out;
+        }
+
+        function rememberGexCompletedSpan(span) {
+            if (!span || !span.name) return;
+            const item = {
+                name: span.name,
+                duration_ms: Number(span.duration_ms || 0),
+                start_ms: Number(span.start_ms || 0),
+                end_ms: Number(span.end_ms || span.page_ms || 0),
+                detail: summarizeGexPerfDetail(span.detail || {}),
+            };
+            gexPerfCompletedSpans.push(item);
+            if (gexPerfCompletedSpans.length > GEX_PERF_SPAN_BUFFER_CAP) {
+                gexPerfCompletedSpans.splice(0, gexPerfCompletedSpans.length - GEX_PERF_SPAN_BUFFER_CAP);
+            }
+            if (item.name === 'applyPriceData' || item.name === 'renderTVPriceChart' || item.name === 'applyTVSeriesData') {
+                gexPerfLastChartApply = item;
+            }
+        }
+
+        function getGexNearbyPerfSpans(startMs, endMs) {
+            const start = Number(startMs || 0) - GEX_PERF_LONG_TASK_WINDOW_MS;
+            const end = Number(endMs || startMs || 0) + GEX_PERF_LONG_TASK_WINDOW_MS;
+            return gexPerfCompletedSpans
+                .filter(span => span && Number.isFinite(span.start_ms) && Number.isFinite(span.end_ms) && span.end_ms >= start && span.start_ms <= end)
+                .slice(-12)
+                .map(span => ({
+                    name: span.name,
+                    duration_ms: Number(Number(span.duration_ms || 0).toFixed(3)),
+                    start_ms: Number(Number(span.start_ms || 0).toFixed(3)),
+                    end_ms: Number(Number(span.end_ms || 0).toFixed(3)),
+                    detail: span.detail || {},
+                }));
+        }
+
+        function getGexPerfRouteContext(spans) {
+            const routeSpan = (spans || []).filter(span => /^(fetch|parse|apply):\//.test(span.name || '')).slice(-1)[0];
+            return routeSpan ? routeSpan.name : '';
+        }
+
+        function getGexPerfChartMode(spans) {
+            const chartSpan = (spans || []).filter(span => (
+                span && (span.name === 'applyPriceData' || span.name === 'renderTVPriceChart' || span.name === 'applyTVSeriesData') &&
+                span.detail && span.detail.mode
+            )).slice(-1)[0];
+            if (chartSpan && chartSpan.detail && chartSpan.detail.mode) return String(chartSpan.detail.mode);
+            return gexPerfLastChartApply && gexPerfLastChartApply.detail && gexPerfLastChartApply.detail.mode
+                ? String(gexPerfLastChartApply.detail.mode)
+                : '';
+        }
+
+        function getGexPerfInputValue(id) {
+            try {
+                const el = document.getElementById(id);
+                return el ? String(el.value || '') : '';
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function getGexPerfSelectedExpiriesSummary() {
+            let values = [];
+            try {
+                if (typeof getSelectedExpiryValues === 'function') {
+                    values = getSelectedExpiryValues();
+                }
+            } catch (e) {
+                values = [];
+            }
+            if (!Array.isArray(values) || !values.length) {
+                try {
+                    values = Array.from(document.querySelectorAll('.expiry-option input[type="checkbox"]:checked')).map(cb => cb.value);
+                } catch (e) {
+                    values = [];
+                }
+            }
+            return {
+                count: values.length,
+                values: values.slice(0, 4).join(','),
+            };
+        }
+
+        function getGexPerfTraceContext(nowMs) {
+            const now = Number.isFinite(nowMs) ? nowMs : (window.performance && performance.now ? performance.now() : 0);
+            let tradeState = null;
+            try { tradeState = tradeRailState; } catch (e) { tradeState = null; }
+            let railTab = '';
+            try { railTab = activeRailTab || ''; } catch (e) { railTab = ''; }
+            let secondaryTab = '';
+            try { secondaryTab = secondaryActiveTab || ''; } catch (e) { secondaryTab = ''; }
+            let priceHistoryInFlight = false;
+            try { priceHistoryInFlight = !!_priceHistoryInFlight; } catch (e) { priceHistoryInFlight = false; }
+            const expirySummary = getGexPerfSelectedExpiriesSummary();
+            const activePanel = (() => {
+                try {
+                    const panel = document.querySelector('.right-rail-panel.active');
+                    return panel && panel.dataset ? (panel.dataset.railPanel || '') : '';
+                } catch (e) {
+                    return '';
+                }
+            })();
+            const context = {
+                visibility: document.visibilityState || '',
+                ticker: getGexPerfInputValue('ticker'),
+                timeframe: getGexPerfInputValue('timeframe'),
+                selected_expiry_count: expirySummary.count,
+                selected_expiries: expirySummary.values,
+                right_rail_collapsed: (() => { try { return isRightRailCollapsed(); } catch (e) { return false; } })(),
+                right_rail_tab: railTab || activePanel,
+                right_rail_panel: activePanel || railTab,
+                secondary_tab: secondaryTab,
+                trade_rail_collapsed: (() => { try { return isTradeRailCollapsed(); } catch (e) { return false; } })(),
+                price_history_in_flight: priceHistoryInFlight,
+            };
+            if (tradeState) {
+                Object.assign(context, {
+                    trade_loading: !!tradeState.loading,
+                    trade_expiry: tradeState.expiry || '',
+                    trade_option_type: tradeState.optionType || '',
+                    trade_active_collapsed: !!tradeState.activeTraderCollapsed,
+                    trade_orders_collapsed: !!tradeState.ordersCollapsed,
+                    selected_contract: tradeState.selectedSymbol || '',
+                    live_quote_symbol: tradeState.liveQuoteSymbol || '',
+                    live_quote_status: tradeState.liveQuoteStreamStatus || '',
+                });
+            }
+            if (gexPerfLastChartApply) {
+                context.chart_apply_span = gexPerfLastChartApply.name || '';
+                context.chart_apply_mode = (gexPerfLastChartApply.detail && gexPerfLastChartApply.detail.mode) || '';
+                context.chart_apply_age_ms = Number(Math.max(0, now - Number(gexPerfLastChartApply.end_ms || 0)).toFixed(1));
+            }
+            return context;
+        }
+
+        function buildGexPerfAttributionDetail(startMs, endMs) {
+            const nearbySpans = getGexNearbyPerfSpans(startMs, endMs);
+            const context = getGexPerfTraceContext(endMs);
+            const routeContext = getGexPerfRouteContext(nearbySpans);
+            const chartMode = getGexPerfChartMode(nearbySpans);
+            return Object.assign({}, context, {
+                nearby_app_span_count: nearbySpans.length,
+                nearby_app_spans: nearbySpans,
+                route_context: routeContext || 'none',
+                chart_apply_mode: chartMode || context.chart_apply_mode || '',
+                attribution_window_ms: GEX_PERF_LONG_TASK_WINDOW_MS,
+            });
         }
 
         function gexPerfEnd(token, detail) {
@@ -21333,6 +21513,7 @@ def index():
             if (token.ended) return;
             token.ended = true;
             const merged = Object.assign({}, token.detail || {}, detail || {});
+            const ended = performance.now();
             let duration = Number.isFinite(token.started) ? (performance.now() - token.started) : null;
             try {
                 performance.mark(token.id + '-end');
@@ -21348,12 +21529,17 @@ def index():
             const extra = gexPerfDetailText(merged);
             if (extra) parts.push(extra);
             console.log(parts.join(' '));
-            pushGexPerfTraceEvent({
+            const normalizedDetail = normalizeGexPerfDetail(merged);
+            const spanEvent = {
                 kind: 'span',
                 name: token.name,
                 duration_ms: Number.isFinite(duration) ? Number(duration.toFixed(3)) : 0,
-                detail: normalizeGexPerfDetail(merged),
-            });
+                start_ms: Number.isFinite(token.started) ? Number(token.started.toFixed(3)) : null,
+                end_ms: Number.isFinite(ended) ? Number(ended.toFixed(3)) : null,
+                detail: normalizedDetail,
+            };
+            const pushed = pushGexPerfTraceEvent(spanEvent);
+            rememberGexCompletedSpan(pushed || spanEvent);
         }
 
         function parseGexJsonResponse(response, routeName, detail) {
@@ -21378,13 +21564,23 @@ def index():
                     list.getEntries().forEach(entry => {
                         const duration = Number(entry.duration || 0);
                         const start = Number(entry.startTime || 0);
-                        console.log('[perf] span=browser_long_task duration_ms=' + duration.toFixed(1) + ' start_ms=' + start.toFixed(1));
+                        const end = start + duration;
+                        const detail = buildGexPerfAttributionDetail(start, end);
+                        console.log('[perf] span=browser_long_task duration_ms=' + duration.toFixed(1) +
+                            ' start_ms=' + start.toFixed(1) +
+                            ' nearby_spans=' + detail.nearby_app_span_count +
+                            ' route_context=' + detail.route_context +
+                            ' chart_mode=' + (detail.chart_apply_mode || 'none') +
+                            ' timeframe=' + (detail.timeframe || '') +
+                            ' trade_rail_collapsed=' + (detail.trade_rail_collapsed ? '1' : '0') +
+                            ' selected_contract=' + (detail.selected_contract || ''));
                         pushGexPerfTraceEvent({
                             kind: 'longtask',
                             name: 'browser_long_task',
                             duration_ms: Number(duration.toFixed(3)),
                             start_ms: Number(start.toFixed(3)),
-                            detail: {},
+                            end_ms: Number(end.toFixed(3)),
+                            detail,
                         });
                     });
                 });
@@ -21395,6 +21591,40 @@ def index():
             }
         }
         ensureGexLongTaskObserver();
+
+        function ensureGexEventLoopDelayTrace() {
+            if (gexEventLoopDelayStarted || !isGexPerfTraceEnabled() || !window.performance || !performance.now) return;
+            gexEventLoopDelayStarted = true;
+            let expected = performance.now() + GEX_EVENT_LOOP_DELAY_INTERVAL_MS;
+            const tick = () => {
+                if (!isGexPerfTraceEnabled()) return;
+                const now = performance.now();
+                const delay = now - expected;
+                if (delay >= GEX_EVENT_LOOP_DELAY_THRESHOLD_MS) {
+                    const detail = buildGexPerfAttributionDetail(expected, now);
+                    detail.expected_interval_ms = GEX_EVENT_LOOP_DELAY_INTERVAL_MS;
+                    detail.delay_threshold_ms = GEX_EVENT_LOOP_DELAY_THRESHOLD_MS;
+                    console.log('[perf] span=browser_event_loop_delay duration_ms=' + delay.toFixed(1) +
+                        ' nearby_spans=' + detail.nearby_app_span_count +
+                        ' route_context=' + detail.route_context +
+                        ' chart_mode=' + (detail.chart_apply_mode || 'none') +
+                        ' timeframe=' + (detail.timeframe || '') +
+                        ' selected_contract=' + (detail.selected_contract || ''));
+                    pushGexPerfTraceEvent({
+                        kind: 'event_loop_delay',
+                        name: 'browser_event_loop_delay',
+                        duration_ms: Number(delay.toFixed(3)),
+                        start_ms: Number(expected.toFixed(3)),
+                        end_ms: Number(now.toFixed(3)),
+                        detail,
+                    });
+                }
+                expected = now + GEX_EVENT_LOOP_DELAY_INTERVAL_MS;
+                setTimeout(tick, GEX_EVENT_LOOP_DELAY_INTERVAL_MS);
+            };
+            setTimeout(tick, GEX_EVENT_LOOP_DELAY_INTERVAL_MS);
+        }
+        ensureGexEventLoopDelayTrace();
 
         // ── Chart visibility (replaces the deleted .chart-selector checkbox row) ──
         // Source of truth for which secondary charts render. Defaults below mirror the
@@ -23491,6 +23721,8 @@ def index():
                 deltaAdjusted,
                 calculateInNotional,
             });
+            let tradeExpirySyncWasPending = false;
+            try { tradeExpirySyncWasPending = !!tradeRailState.dashboardExpirySyncPending; } catch (e) {}
             const shouldRefreshTradeChainCache = analyticsCacheContextKey !== _lastAnalyticsCacheContextKey;
             setAlertGateSetting(gateAlerts);
             
@@ -23524,7 +23756,7 @@ def index():
             if (_vis.price) {
                 fetchPriceHistory(tickerChanged || !tvLastCandles.length);
             }
-            if (shouldRefreshTradeChainCache && !isTradeRailCollapsed()) {
+            if (shouldRefreshTradeChainCache && !tradeExpirySyncWasPending && !isTradeRailCollapsed()) {
                 requestTradeChain({ force: true, minIntervalMs: 0, refreshCache: true });
             }
             
@@ -23588,7 +23820,7 @@ def index():
                     updatePriceInfo(data.price_info);
                     redrawGexScope();
                     _lastAnalyticsCacheContextKey = analyticsCacheContextKey;
-                    if (!isTradeRailCollapsed()) {
+                    if (!isTradeRailCollapsed() && !tradeExpirySyncWasPending) {
                         requestTradeChain({
                             force: true,
                             minIntervalMs: shouldRefreshTradeChainCache ? 0 : TRADE_CHAIN_AUTO_REFRESH_MS,
@@ -23618,6 +23850,9 @@ def index():
                 console.error('Error fetching data:', error);
             })
             .finally(() => {
+                if (tradeExpirySyncWasPending) {
+                    try { tradeRailState.dashboardExpirySyncPending = false; } catch (e) {}
+                }
                 updateInProgress = false;
                 gexPerfEnd(updatePerf, { ticker, expiries: expiry.length });
             });
@@ -32476,6 +32711,7 @@ def index():
             liveQuoteSymbol: '',
             liveQuoteStreamStatus: '',
             liveQuoteEventSource: null,
+            liveQuoteStreamSeq: 0,
             liveQuoteRenderPending: false,
             liveQuoteSignature: '',
             liveQuoteLastErrorAt: 0,
@@ -32565,6 +32801,7 @@ def index():
             positionsCollapsed: getTradeStoredBool(TRADE_POSITION_COLLAPSE_KEY, false),
             helperCompact: getTradeStoredBool(TRADE_HELPER_COMPACT_KEY, false),
             railScrollTop: 0,
+            dashboardExpirySyncPending: false,
         };
         const TRADE_ORDER_INTENT_VISIBLE_STATES = new Set(['staged', 'previewing', 'previewed', 'sending', 'working', 'rejected', 'canceling', 'canceled', 'filled', 'expired']);
         const TRADE_ORDER_INTENT_POLL_STATES = new Set(['sending', 'working', 'canceling']);
@@ -33384,6 +33621,43 @@ def index():
             if (typeof getSelectedExpiryValues === 'function') return getSelectedExpiryValues();
             return Array.from(document.querySelectorAll('.expiry-option input[type="checkbox"]:checked')).map(cb => cb.value);
         }
+        function resetTradeSelectedContractContext(message = 'Contract context changed. Preview again.') {
+            tradeRailState.selectedSymbol = '';
+            tradeRailState.pendingContractScrollSymbol = '';
+            resetTradeSelectedQuoteOverride();
+            disconnectTradeSelectedQuoteStream();
+            clearTradeLimitPrice();
+            tradeRailState.accountDetails = null;
+            tradeRailState.accountRequestKey = '';
+            tradeRailState.orders = [];
+            tradeRailState.ordersRequestKey = '';
+            invalidateTradePreview(message);
+            stopTradeOrderPolling();
+        }
+        function syncTradeRailToDashboardExpirySelection(message = 'Dashboard expiry changed. Preview again.') {
+            const selectedExpiries = getTradeRailSelectedDashboardExpiries().filter(Boolean);
+            const currentExpiry = tradeRailState.expiry || '';
+            if (currentExpiry && selectedExpiries.includes(currentExpiry)) return false;
+            const hadTradeContext = !!(
+                currentExpiry ||
+                tradeRailState.selectedSymbol ||
+                tradeRailState.liveQuoteSymbol ||
+                tradeRailState.liveSelectedQuote ||
+                tradeRailState.payload
+            );
+            if (!hadTradeContext) return false;
+            tradeRailState.expiry = selectedExpiries[0] || '';
+            tradeRailState.payload = null;
+            tradeRailState.requestKey = '';
+            tradeRailState.loading = false;
+            tradeRailState.dashboardExpirySyncPending = true;
+            resetTradeSelectedContractContext(message);
+            renderTradeRail();
+            if (!isTradeRailCollapsed() && tradeRailState.expiry) {
+                requestTradeChain({ force: true, minIntervalMs: 0, refreshCache: true });
+            }
+            return true;
+        }
         function setTradeText(selector, text) {
             document.querySelectorAll(selector).forEach(el => { el.textContent = text; });
         }
@@ -33684,6 +33958,7 @@ def index():
             const source = tradeRailState.liveQuoteEventSource;
             tradeRailState.liveQuoteEventSource = null;
             tradeRailState.liveQuoteStreamStatus = '';
+            tradeRailState.liveQuoteStreamSeq += 1;
             if (source) {
                 source.__gexIntentionalClose = true;
                 try { source.close(); } catch (e) {}
@@ -33714,8 +33989,13 @@ def index():
                 const source = new EventSource(url);
                 tradeRailState.liveQuoteEventSource = source;
                 tradeRailState.liveQuoteSymbol = symbol;
+                const streamSeq = ++tradeRailState.liveQuoteStreamSeq;
                 source.onmessage = event => {
                     const quoteApplyPerf = gexPerfStart('applyTradeSelectedQuoteMessage', { symbol: symbol ? 1 : 0 });
+                    if (streamSeq !== tradeRailState.liveQuoteStreamSeq || source !== tradeRailState.liveQuoteEventSource) {
+                        gexPerfEnd(quoteApplyPerf, { skipped: 'stale_stream' });
+                        return;
+                    }
                     const rawMessage = event.data || '{}';
                     const quoteParsePerf = gexPerfStart('selectedQuote:parse', { chars: rawMessage.length });
                     let msg = null;
@@ -33759,6 +34039,7 @@ def index():
                 };
                 source.onerror = () => {
                     if (source.__gexIntentionalClose) return;
+                    if (streamSeq !== tradeRailState.liveQuoteStreamSeq || source !== tradeRailState.liveQuoteEventSource) return;
                     tradeRailState.liveQuoteStreamStatus = 'fallback';
                     tradeRailState.liveQuoteLastErrorAt = Date.now();
                     if (tradeRailState.liveQuoteEventSource === source) {
@@ -38637,27 +38918,32 @@ def index():
         } catch (e) {}
 
         function applyRightRailTab() {
-            const grid = document.getElementById('chart-grid');
-            if (grid) grid.classList.toggle('rail-flow-active', activeRailTab === 'flow');
-            syncRightRailWidthForTab();
-            document.querySelectorAll('.right-rail-tab').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.railTab === activeRailTab);
-            });
-            document.querySelectorAll('.right-rail-panel').forEach(p => {
-                p.classList.toggle('active', p.dataset.railPanel === activeRailTab);
-            });
-            if (activeRailTab === 'overview') {
-                markRailAlertsSeen();
-            } else {
-                _updateAlertsBadge();
+            const railTabPerf = gexPerfStart('applyRightRailTab', { tab: activeRailTab || '' });
+            try {
+                const grid = document.getElementById('chart-grid');
+                if (grid) grid.classList.toggle('rail-flow-active', activeRailTab === 'flow');
+                syncRightRailWidthForTab();
+                document.querySelectorAll('.right-rail-tab').forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.railTab === activeRailTab);
+                });
+                document.querySelectorAll('.right-rail-panel').forEach(p => {
+                    p.classList.toggle('active', p.dataset.railPanel === activeRailTab);
+                });
+                if (activeRailTab === 'overview') {
+                    markRailAlertsSeen();
+                } else {
+                    _updateAlertsBadge();
+                }
+                if (activeRailTab === 'scenarios') {
+                    renderScenarioTable(_lastStats && _lastStats.scenarios);
+                }
+                if (activeRailTab === 'flow') {
+                    initRailFlowBlotter(document.getElementById('right-rail-flow'));
+                }
+                ensureRailCardCollapseControls(document.getElementById('right-rail-panels') || document);
+            } finally {
+                gexPerfEnd(railTabPerf, { tab: activeRailTab || '' });
             }
-            if (activeRailTab === 'scenarios') {
-                renderScenarioTable(_lastStats && _lastStats.scenarios);
-            }
-            if (activeRailTab === 'flow') {
-                initRailFlowBlotter(document.getElementById('right-rail-flow'));
-            }
-            ensureRailCardCollapseControls(document.getElementById('right-rail-panels') || document);
         }
 
         function wireRightRailTabs() {
@@ -39439,43 +39725,48 @@ def index():
 
         function renderRailAlerts(list, options = {}) {
             const reset = !!(options && options.reset);
-            const target = document.getElementById('right-rail-alerts');
-            const titleNote = document.getElementById('rail-alerts-title-note');
-            _ensureRailAlertScope(reset);
-            if (reset) {
-                _lastRailAlerts = [];
-                _lastPromotedAlert = null;
-                if (target) target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
-                if (titleNote) titleNote.textContent = 'Mixed Lean';
-                renderPromotedAlert(null);
-                _updateAlertsBadge();
-                return;
-            }
-            _mergeRailAlerts(list);
-            _pruneRailAlertBuffer();
-            const buffered = _clusterRailAlerts(_getBufferedRailAlerts());
-            _lastRailAlerts = buffered;
-            _lastPromotedAlert = buffered[0] || null;
-            renderPromotedAlert(_lastPromotedAlert);
-            if (titleNote) titleNote.textContent = _liveAlertsSummaryText(buffered);
-            if (target) {
-                if (!buffered.length) {
-                    target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
-                } else {
-                    const pinned = buffered[0];
-                    const supporting = buffered.slice(1, 4);
-                    const overflow = buffered.slice(4);
-                    target.innerHTML = [
-                        _renderRailAlertCard(pinned, { lead: true }),
-                        ...supporting.map((a, idx) => _renderRailAlertCard(a, { muted: idx >= 2 })),
-                        _renderRailAlertOverflowCard(overflow),
-                    ].filter(Boolean).join('');
+            const alertsPerf = gexPerfStart('renderRailAlerts', { reset, items: Array.isArray(list) ? list.length : 0 });
+            try {
+                const target = document.getElementById('right-rail-alerts');
+                const titleNote = document.getElementById('rail-alerts-title-note');
+                _ensureRailAlertScope(reset);
+                if (reset) {
+                    _lastRailAlerts = [];
+                    _lastPromotedAlert = null;
+                    if (target) target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
+                    if (titleNote) titleNote.textContent = 'Mixed Lean';
+                    renderPromotedAlert(null);
+                    _updateAlertsBadge();
+                    return;
                 }
-            }
-            if (activeRailTab === 'overview') {
-                markRailAlertsSeen();
-            } else {
-                _updateAlertsBadge();
+                _mergeRailAlerts(list);
+                _pruneRailAlertBuffer();
+                const buffered = _clusterRailAlerts(_getBufferedRailAlerts());
+                _lastRailAlerts = buffered;
+                _lastPromotedAlert = buffered[0] || null;
+                renderPromotedAlert(_lastPromotedAlert);
+                if (titleNote) titleNote.textContent = _liveAlertsSummaryText(buffered);
+                if (target) {
+                    if (!buffered.length) {
+                        target.innerHTML = '<div class="rail-alerts-empty">No active alerts.</div>';
+                    } else {
+                        const pinned = buffered[0];
+                        const supporting = buffered.slice(1, 4);
+                        const overflow = buffered.slice(4);
+                        target.innerHTML = [
+                            _renderRailAlertCard(pinned, { lead: true }),
+                            ...supporting.map((a, idx) => _renderRailAlertCard(a, { muted: idx >= 2 })),
+                            _renderRailAlertOverflowCard(overflow),
+                        ].filter(Boolean).join('');
+                    }
+                }
+                if (activeRailTab === 'overview') {
+                    markRailAlertsSeen();
+                } else {
+                    _updateAlertsBadge();
+                }
+            } finally {
+                gexPerfEnd(alertsPerf, { reset, buffered: Array.isArray(_lastRailAlerts) ? _lastRailAlerts.length : 0 });
             }
         }
 
@@ -39669,35 +39960,40 @@ def index():
         }
 
         function renderChartContextStrip() {
-            const strip = ensureChartContextStrip();
-            if (!applyChartContextStripVisibility(strip)) return;
-            const tickerInput = document.getElementById('ticker');
-            const timeframeInput = document.getElementById('timeframe');
-            const ticker = ((tickerInput && tickerInput.value) || (lastData && lastData.ticker) || '').trim().toUpperCase();
-            _setChartContextValue('symbol', ticker || '—');
-            _setChartContextValue('expiry', _selectedExpiryContextText());
-            _setChartContextValue('timeframe', (timeframeInput && timeframeInput.value) || '—');
-            _setChartContextValue('stream', isStreaming ? 'Live' : 'Paused');
-            _setChartContextValue('options_age', _fmtChartContextAge(_lastOptionsUpdateAt));
-            const streamWrap = document.querySelector('[data-chart-context-wrap="stream"]');
-            if (streamWrap) {
-                streamWrap.classList.toggle('live', !!isStreaming);
-                streamWrap.classList.toggle('paused', !isStreaming);
-            }
-            const nearestWrap = document.querySelector('[data-chart-context-wrap="nearest"]');
-            if (_lastNearestLevelRow) {
-                const stats = getScopedStats();
-                const d = _fmtLvlDist(_lastNearestLevelRow.price, stats && stats.spot);
-                _setChartContextValue('nearest_level', _lastNearestLevelRow.label + ' ' + _fmtLvlPrice(_lastNearestLevelRow.price) + ' (' + d.primary + ')');
-                if (nearestWrap) {
-                    nearestWrap.classList.toggle('pos', d.cls === 'pos');
-                    nearestWrap.classList.toggle('neg', d.cls === 'neg');
+            const contextPerf = gexPerfStart('renderChartContextStrip');
+            try {
+                const strip = ensureChartContextStrip();
+                if (!applyChartContextStripVisibility(strip)) return;
+                const tickerInput = document.getElementById('ticker');
+                const timeframeInput = document.getElementById('timeframe');
+                const ticker = ((tickerInput && tickerInput.value) || (lastData && lastData.ticker) || '').trim().toUpperCase();
+                _setChartContextValue('symbol', ticker || '—');
+                _setChartContextValue('expiry', _selectedExpiryContextText());
+                _setChartContextValue('timeframe', (timeframeInput && timeframeInput.value) || '—');
+                _setChartContextValue('stream', isStreaming ? 'Live' : 'Paused');
+                _setChartContextValue('options_age', _fmtChartContextAge(_lastOptionsUpdateAt));
+                const streamWrap = document.querySelector('[data-chart-context-wrap="stream"]');
+                if (streamWrap) {
+                    streamWrap.classList.toggle('live', !!isStreaming);
+                    streamWrap.classList.toggle('paused', !isStreaming);
                 }
-            } else {
-                _setChartContextValue('nearest_level', '—');
-                if (nearestWrap) nearestWrap.classList.remove('pos', 'neg');
+                const nearestWrap = document.querySelector('[data-chart-context-wrap="nearest"]');
+                if (_lastNearestLevelRow) {
+                    const stats = getScopedStats();
+                    const d = _fmtLvlDist(_lastNearestLevelRow.price, stats && stats.spot);
+                    _setChartContextValue('nearest_level', _lastNearestLevelRow.label + ' ' + _fmtLvlPrice(_lastNearestLevelRow.price) + ' (' + d.primary + ')');
+                    if (nearestWrap) {
+                        nearestWrap.classList.toggle('pos', d.cls === 'pos');
+                        nearestWrap.classList.toggle('neg', d.cls === 'neg');
+                    }
+                } else {
+                    _setChartContextValue('nearest_level', '—');
+                    if (nearestWrap) nearestWrap.classList.remove('pos', 'neg');
+                }
+                renderChartContextAlert(_lastPromotedAlert);
+            } finally {
+                gexPerfEnd(contextPerf);
             }
-            renderChartContextAlert(_lastPromotedAlert);
         }
 
         function renderRailKeyLevels(stats) {
@@ -40407,7 +40703,12 @@ def index():
             _priceHistoryLastMs = now;
             _priceHistoryLastKey = key;
             _priceHistoryInFlight = true;
-            const priceFetchPerf = gexPerfStart('fetch:/update_price', { ticker: payload.ticker, timeframe: payload.timeframe, force: !!force });
+            const priceFetchPerf = gexPerfStart('fetch:/update_price', {
+                ticker: payload.ticker,
+                timeframe: payload.timeframe,
+                lookback_days: payload.lookback_days,
+                force: !!force
+            });
             fetch('/update_price', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -40415,10 +40716,15 @@ def index():
             })
             .then(r => {
                 gexPerfEnd(priceFetchPerf, { status: r.status });
-                return parseGexJsonResponse(r, '/update_price', { force: !!force, timeframe: payload.timeframe });
+                return parseGexJsonResponse(r, '/update_price', { force: !!force, timeframe: payload.timeframe, lookback_days: payload.lookback_days });
             })
             .then(priceResp => {
-                const priceApplyPerf = gexPerfStart('apply:/update_price', { has_price: !!(priceResp && priceResp.price), error: !!(priceResp && priceResp.error) });
+                const priceApplyPerf = gexPerfStart('apply:/update_price', {
+                    has_price: !!(priceResp && priceResp.price),
+                    error: !!(priceResp && priceResp.error),
+                    timeframe: payload.timeframe,
+                    lookback_days: payload.lookback_days
+                });
                 try {
                     _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
                     _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
@@ -41369,48 +41675,53 @@ def index():
         }
 
         function renderFlowPulse(stats) {
-            const target = document.getElementById('rail-flow-pulse');
-            const note = document.getElementById('rail-flow-pulse-note');
-            const strip = document.getElementById('flow-event-strip-pulse');
-            if (!target) return;
             const rows = Array.isArray(stats && stats.flow_pulse) ? stats.flow_pulse : [];
-            const summary = (stats && typeof stats.flow_pulse_summary === 'object') ? stats.flow_pulse_summary : null;
-            if (!rows.length) {
-                if (note) note.textContent = 'Mixed Lean';
-                if (strip) strip.classList.add('pulse-empty');
-                target.innerHTML = '<div class="rail-pulse-empty">Flow Blotter can be populated while Pulse waits for repeated recent contract updates; it needs at least a minute of live same-contract history.</div>';
-                return;
+            const pulsePerf = gexPerfStart('renderFlowPulse', { rows: rows.length });
+            try {
+                const target = document.getElementById('rail-flow-pulse');
+                const note = document.getElementById('rail-flow-pulse-note');
+                const strip = document.getElementById('flow-event-strip-pulse');
+                if (!target) return;
+                const summary = (stats && typeof stats.flow_pulse_summary === 'object') ? stats.flow_pulse_summary : null;
+                if (!rows.length) {
+                    if (note) note.textContent = 'Mixed Lean';
+                    if (strip) strip.classList.add('pulse-empty');
+                    target.innerHTML = '<div class="rail-pulse-empty">Flow Blotter can be populated while Pulse waits for repeated recent contract updates; it needs at least a minute of live same-contract history.</div>';
+                    return;
+                }
+                if (strip) strip.classList.remove('pulse-empty');
+                if (note) note.textContent = _flowPulseSummaryText(summary);
+                target.innerHTML = rows.slice(0, 4).map(row => {
+                    const typeKey = row.option_type === 'put' ? 'put' : 'call';
+                    const lean = _flowPulseLeanMeta(row.lean_label);
+                    const pace = (row.pace_1m != null && isFinite(row.pace_1m)) ? row.pace_1m.toFixed(1) + 'x' : '—';
+                    const vol1m = (row.vol_delta_1m != null && isFinite(row.vol_delta_1m) && row.vol_delta_1m > 0)
+                        ? '+' + fmtCountCompact(row.vol_delta_1m)
+                        : '—';
+                    const prem1m = (row.premium_delta_1m != null && isFinite(row.premium_delta_1m) && row.premium_delta_1m > 0)
+                        ? '+' + fmtMoneyCompact(row.premium_delta_1m)
+                        : '—';
+                    const voi = (row.voi != null && isFinite(row.voi)) ? row.voi.toFixed(2) + 'x V/OI' : '—';
+                    return '<div class="rail-pulse-item ' + typeKey + '">' +
+                               '<div class="rail-pulse-top">' +
+                                   '<div class="rail-pulse-contract">' + _escapeHtml(row.contract_label || '—') +
+                                       '<span class="rail-pulse-expiry">' + _escapeHtml(row.expiry_text || '') + '</span>' +
+                                   '</div>' +
+                                   '<div class="rail-pulse-right">' +
+                                       '<span class="rail-pulse-lean ' + lean.cls + '" title="' + _escapeHtml(row.lean_hint || '') + '">' + lean.text + '</span>' +
+                                       '<div class="rail-pulse-pace">' + pace + '</div>' +
+                                   '</div>' +
+                               '</div>' +
+                               '<div class="rail-pulse-meta">' +
+                                   '<span class="emph">1m ' + vol1m + ' vol</span>' +
+                                   '<span>' + prem1m + '</span>' +
+                                   '<span>' + _escapeHtml(voi) + '</span>' +
+                               '</div>' +
+                           '</div>';
+                }).join('');
+            } finally {
+                gexPerfEnd(pulsePerf, { rows: rows.length });
             }
-            if (strip) strip.classList.remove('pulse-empty');
-            if (note) note.textContent = _flowPulseSummaryText(summary);
-            target.innerHTML = rows.slice(0, 4).map(row => {
-                const typeKey = row.option_type === 'put' ? 'put' : 'call';
-                const lean = _flowPulseLeanMeta(row.lean_label);
-                const pace = (row.pace_1m != null && isFinite(row.pace_1m)) ? row.pace_1m.toFixed(1) + 'x' : '—';
-                const vol1m = (row.vol_delta_1m != null && isFinite(row.vol_delta_1m) && row.vol_delta_1m > 0)
-                    ? '+' + fmtCountCompact(row.vol_delta_1m)
-                    : '—';
-                const prem1m = (row.premium_delta_1m != null && isFinite(row.premium_delta_1m) && row.premium_delta_1m > 0)
-                    ? '+' + fmtMoneyCompact(row.premium_delta_1m)
-                    : '—';
-                const voi = (row.voi != null && isFinite(row.voi)) ? row.voi.toFixed(2) + 'x V/OI' : '—';
-                return '<div class="rail-pulse-item ' + typeKey + '">' +
-                           '<div class="rail-pulse-top">' +
-                               '<div class="rail-pulse-contract">' + _escapeHtml(row.contract_label || '—') +
-                                   '<span class="rail-pulse-expiry">' + _escapeHtml(row.expiry_text || '') + '</span>' +
-                               '</div>' +
-                               '<div class="rail-pulse-right">' +
-                                   '<span class="rail-pulse-lean ' + lean.cls + '" title="' + _escapeHtml(row.lean_hint || '') + '">' + lean.text + '</span>' +
-                                   '<div class="rail-pulse-pace">' + pace + '</div>' +
-                               '</div>' +
-                           '</div>' +
-                           '<div class="rail-pulse-meta">' +
-                               '<span class="emph">1m ' + vol1m + ' vol</span>' +
-                               '<span>' + prem1m + '</span>' +
-                               '<span>' + _escapeHtml(voi) + '</span>' +
-                           '</div>' +
-                       '</div>';
-            }).join('');
         }
 
         function renderCentroidPanel(panel) {
@@ -41610,8 +41921,7 @@ def index():
                         
                         // Add change event listener
                         checkbox.addEventListener('change', function() {
-                            updateExpiryDisplay();
-                            updateData();
+                            applyDashboardExpirySelectionChange();
                         });
                         
                         optionDiv.appendChild(checkbox);
@@ -41631,8 +41941,7 @@ def index():
                         }
                     }
                     
-                    updateExpiryDisplay();
-                    updateData();
+                    applyDashboardExpirySelectionChange({ initialLoad: true });
                 })
                 .catch(error => {
                     showError('Error loading expirations: ' + error.message);
@@ -41650,6 +41959,14 @@ def index():
             } else {
                 expiryText.textContent = `${checkedBoxes.length} expiries selected`;
             }
+        }
+
+        function applyDashboardExpirySelectionChange(options = {}) {
+            updateExpiryDisplay();
+            if (!options.initialLoad) {
+                syncTradeRailToDashboardExpirySelection();
+            }
+            updateData();
         }
         
         // Add event listeners for control checkboxes
@@ -41688,8 +42005,7 @@ def index():
             checkboxes.forEach(checkbox => {
                 checkbox.checked = true;
             });
-            updateExpiryDisplay();
-            updateData();
+            applyDashboardExpirySelectionChange();
         });
         
         document.getElementById('clearAllExpiry').addEventListener('click', function(e) {
@@ -41702,8 +42018,7 @@ def index():
             if (checkboxes.length > 0) {
                 checkboxes[0].checked = true;
             }
-            updateExpiryDisplay();
-            updateData();
+            applyDashboardExpirySelectionChange();
         });
 
         function selectExpiriesUpTo(cutoffDate) {
@@ -41719,8 +42034,7 @@ def index():
             if (!anyChecked && checkboxes.length > 0) {
                 checkboxes[0].checked = true;
             }
-            updateExpiryDisplay();
-            updateData();
+            applyDashboardExpirySelectionChange();
         }
 
         function getFriday(weeksAhead) {
@@ -41751,8 +42065,7 @@ def index():
                 checkbox.checked = i < n;
             });
             if (checkboxes.length > 0 && n === 0) checkboxes[0].checked = true;
-            updateExpiryDisplay();
-            updateData();
+            applyDashboardExpirySelectionChange();
         }
 
         document.getElementById('expiry2Wks').addEventListener('click', function(e) {
@@ -42183,7 +42496,7 @@ def index():
             { tf: '1',    label: '1 min',  def: 10,  soft: 15,  hard: 30  },
             { tf: '2',    label: '2 min',  def: 10,  soft: 15,  hard: 30  },
             { tf: '3',    label: '3 min',  def: 15,  soft: 20,  hard: 30  },
-            { tf: '5',    label: '5 min',  def: 60,  soft: 90,  hard: 180 },
+            { tf: '5',    label: '5 min',  def: 10,  soft: 30,  hard: 180 },
             { tf: '10',   label: '10 min', def: 60,  soft: 90,  hard: 180 },
             { tf: '15',   label: '15 min', def: 90,  soft: 120, hard: 270 },
             { tf: '30',   label: '30 min', def: 120, soft: 180, hard: 270 },
@@ -43901,6 +44214,9 @@ def update_price():
         timeframe = int(data.get('timeframe', 1))
         lookback_days = data.get('lookback_days')
         rvol_lookback_days = data.get('rvol_lookback_days')
+        perf.add('timeframe', timeframe)
+        perf.add('lookback_days', lookback_days)
+        perf.add('rvol_lookback_days', rvol_lookback_days)
         call_color = data.get('call_color', '#00ff00')
         put_color = data.get('put_color', '#ff0000')
         exposure_levels_types = data.get('levels_types', [])

@@ -10,16 +10,17 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 
 ## Current State
 
-- Latest validation result: [`SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md)
-- Latest implementation result: [`SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md`](../SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md)
+- Latest validation result: [`SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`](../SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md)
+- Latest implementation result: [`SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`](../SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md)
 - Full live validation checklist: [`SCALPING_SPEED_VALIDATION_PLAN.md`](../SCALPING_SPEED_VALIDATION_PLAN.md)
-- Current implementation branch used for the latest pass: `codex/scalping-speed-followup`
+- Current implementation branch used for the latest pass: `main`
 - Core file: [`ezoptionsschwab.py`](../../ezoptionsschwab.py)
 
 ## Speed Docs Map
 
 | Doc | Use it for |
 | --- | --- |
+| [`SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`](../SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md) | Latest implementation and validation result: long-task attribution, event-loop delay tracing, 5 min history-window experiment, 10-day 5 min default, and dashboard expiry-to-trade-rail sync fix. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md`](../SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md) | Latest chart-pass result, browser trace export, incremental chart update evidence, final route/browser summaries. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md) | Longer market-hours validation after the chart pass: 1 min/5 min candle samples, call/put Active Trader streams, route cadence, order polling containment, context-switch stress, and final browser/server bottleneck evidence. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_FOLLOWUP.md`](../SCALPING_SPEED_RESULTS_2026-05-06_FOLLOWUP.md) | Fast-lane cache lock attribution, browser perf attribution before the chart-pass fix, and the prompt that led to the chart pass. |
@@ -31,9 +32,11 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 
 ## Latest Findings To Carry Forward
 
-- The steady-state chart path is now incremental. In the latest trace, incremental `renderTVPriceChart` was about 16-18 ms and incremental `applyPriceData` was about 34-38 ms.
-- Browser trace export is available through `GEX_PERF_TRACE=1` and `/perf/browser_trace`; use the Trace button instead of relying on capped console history.
-- `/update_price` payload size should not be reduced until traces show parse or payload transfer is still the limiting factor after chart application.
+- Browser long tasks now include nearby app spans, route/apply context, chart mode, selected timeframe, selected contract, trade rail state, and visible panel state; trace-only `browser_event_loop_delay` events are also captured.
+- With `GEX_PERF_TRACE=1`, the browser trace cap is 50,000 events. Browser trace export remains available through `/perf/browser_trace`; use the Trace button instead of relying on capped console history.
+- The 5 min chart-history default is now 10 days. The 2026-05-06 history-window experiment showed median `/update_price` bytes dropping from about 5.1 MB to 1.3 MB and long-task p95 dropping from about 382 ms to 126 ms versus the prior 60-day default.
+- The steady-state chart path is incremental. In the latest 5 min 10-day trace, incremental `renderTVPriceChart` was about 4.4 ms and full initial `renderTVPriceChart` was about 116.8 ms.
+- Dashboard expiry changes that remove the trade-rail expiry now immediately clear stale selected contract state, force a trade-chain refresh, reconnect the selected quote stream, and guard against stale quote stream messages.
 - `/update` should stay isolated unless a trace ties it to stale fast-lane quotes, candle lag, or browser long tasks.
 - `/trade/orders` polling must remain conditional and preserve slow-call/failure backoff.
 - Analytical formulas are out of scope for speed work.

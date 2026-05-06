@@ -30,6 +30,49 @@ Open `http://127.0.0.1:5017/`, use SPY nearest 0DTE if available, otherwise near
 
 For browser traces, use the in-page Trace button when `GEX_PERF_TRACE=1`. It posts to `/perf/browser_trace` and writes `/tmp/gex-browser-perf-*.jsonl`.
 
+## Current Speed Baseline
+
+As of `docs/SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`:
+
+- `GEX_PERF_TRACE=1` raises the browser trace cap to 50,000 events.
+- `browser_long_task` events include attribution detail: nearby app spans, route/apply context, chart apply mode, selected timeframe, selected contract, trade rail state, and visible panel state.
+- Trace-only `browser_event_loop_delay` events are emitted when the event loop delay exceeds 100 ms.
+- The 5 min chart-history default is 10 days. Do not restore the previous 60-day default without a new measured reason.
+- Dashboard expiry changes that remove the current trade-rail expiry should immediately clear stale selected contract state, force `/trade_chain`, reconnect the selected quote stream, and ignore stale stream messages.
+
+## Protocol Tiers
+
+Use the smallest protocol that answers the question.
+
+| Tier | Use it when | Minimum coverage |
+| --- | --- | --- |
+| Static check | After code edits | `py_compile`, extracted inline JS `node --check`, `git diff --check` |
+| Smoke trace | Verifying instrumentation or a narrow UI fix | 2-3 minutes with Active Trader open, one browser trace export |
+| Focused experiment | Testing one variable such as chart history, overlay state, or rail visibility | Change one variable at a time; capture route bytes/timing, chart modes, long tasks, and selected quote spans |
+| Full market-hours validation | Establishing a new speed baseline | 5 min call, 5 min put, 1 min sample, expiry switch, rail collapse/expand, order polling containment |
+| Stress matrix | Reproducing intermittent jank/stale state | Repeated expiry switches, overlay matrix, right/trade rail states, volatile market window |
+
+## Post-Change Full Validation Matrix
+
+After the 5 min 10-day default and expiry-sync fix, the next full validation should cover:
+
+1. SPY nearest 0DTE 5 min call, about 5 minutes.
+2. SPY nearest 0DTE 5 min put, about 5 minutes.
+3. SPY 1 min selected-contract sample, 3-5 minutes.
+4. Dashboard expiry switch from 0DTE to 1DTE and back if both are available.
+5. Trading rail collapse/expand and right rail collapse/expand while selected quote stream is live.
+6. Orders open/closed with Auto Send off and no preview/place/live-order calls.
+
+Required checks:
+
+- 5 min Chart Data Window is `10` unless the test explicitly changes it.
+- Selected option quote age stays `now` or `1s` while stream status is `Live`.
+- `applyTradeSelectedQuoteMessage` p95 stays under `5 ms`.
+- `renderTradeActiveTrader` p95 stays under `20 ms`.
+- `/trade_chain` cache/stale paths stay under the validation-plan target.
+- Browser long tasks over `100 ms` are attributed; normal quote ticks should not produce recurring long tasks.
+- Server logs contain no preview/place/live-order endpoints.
+
 ## Lane Ownership
 
 - `/price_stream/<ticker>` and `applyRealtimeQuote` / `applyRealtimeCandle`: live candle and last-price lane.
