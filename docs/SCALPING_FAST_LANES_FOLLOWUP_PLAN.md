@@ -977,7 +977,52 @@ Do not skip Stage 1 validation before starting endpoint work. Removing the visua
 
 ---
 
-## 10. Open Decisions
+## 10. Progress Log
+
+### Stage 1 - Strike Inspect rail removal landed
+
+Branch: `codex/scalping-fast-lanes-followup`
+Commit subject: `refactor(ui): remove strike inspect rail`
+
+What changed:
+
+- Removed the middle `Strike Inspect` rail from the desktop, laptop, and narrow responsive grid. The main price chart now sits directly beside the right rail and Active Trader rail.
+- Removed initial DOM and `ensurePriceChartDom()` rebuild creation for `gex-col-header`, `gex-resize-handle`, `gex-column`, and `gex-side-panel`.
+- Removed the side-panel-only JS path: rail tab state, collapse/resize persistence, y-axis sync, Plotly render cache, and the `renderGexSidePanel()`/`renderStrikeRailPanel()` flow.
+- Kept the on-chart strike overlay and renamed the shared metric label/list constants so overlay code is no longer coupled to the removed rail.
+- Stopped `/update_price` from building or returning `gex_panel`, and removed the unused `create_gex_side_panel()` backend function.
+- Kept right rail tabs, Active Trader rail, candle rendering, selected option quote SSE, order preview/place safety paths, and secondary Plotly charts intact.
+
+Tricky parts:
+
+- Stage 2 of the older performance plan had narrowed `/update` chart payloads around the active Strike Inspect tab. Once that rail was removed, the secondary Plotly charts needed to render normally again, so `buildUpdateChartVisibilityPayload()` now sends plain chart visibility and `updateCharts()` no longer filters gamma/delta/vanna/charm/options-volume/OI/premium out as rail-only charts.
+- Right-rail and trade-rail resize constraints previously subtracted `--gex-col-w`; those constraints now compute available width without any middle-rail width.
+- The strike overlay used the old rail metric labels and previously collapsed the rail when toggled on. The overlay now owns its metric list directly and toggles without changing layout.
+- `create_gex_side_panel()` was removed in Stage 1 rather than left unused, so cleanup greps against `ezoptionsschwab.py` are expected to return no live matches.
+
+Validation completed:
+
+```bash
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+rg -n "gex-side-panel|gex-column|gex-col-header|gex-resize-handle|Strike Inspect|strike-inspect|strike-rail|renderStrikeRailPanel|syncGexPanelYAxisToTV|scheduleGexPanelSync|create_gex_side_panel" ezoptionsschwab.py
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+```
+
+Notes:
+
+- `py_compile` passed with the pre-existing inline-template `SyntaxWarning: invalid escape sequence '\('`.
+- The Stage 1 cleanup grep returned no matches in `ezoptionsschwab.py`; broader greps still match historical plan docs by design.
+
+Next stage:
+
+- Stage 2 should introduce explicit lane constants before endpoint/cache work.
+
+---
+
+## 11. Open Decisions
 
 These should be decided during implementation based on live timings:
 
@@ -986,4 +1031,3 @@ These should be decided during implementation based on live timings:
 - Whether `/trade_chain` should be extended with `refresh_cache` or a new endpoint should be created. Recommended: extend `/trade_chain` unless response shape gets too muddy.
 - Whether `top_oi` belongs in `/update_price` or slow analytics. Recommended: keep only if an enabled indicator needs it and it stays cheap.
 - Whether GEX key-level overlays should show an "updated Xs ago" label. Recommended: add only if the slower cadence causes confusion.
-
