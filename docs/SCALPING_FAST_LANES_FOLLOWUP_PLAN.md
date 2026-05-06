@@ -1,10 +1,10 @@
 # GEX Dashboard - Scalping Fast Lanes Follow-Up Plan
 
 **Status:** Complete — 7 of 7 stages landed on `codex/scalping-fast-lanes-followup`; market-hours/browser regression pass still pending
-**Created:** 2026-05-06  
-**Primary file:** `ezoptionsschwab.py`  
-**Related plan:** `docs/SCALPING_PERFORMANCE_OPTIMIZATION_PLAN.md`  
-**Target workflow:** Fast SPY 0-1 DTE option scalping with candles, option-volume context, and Active Trader open  
+**Created:** 2026-05-06
+**Primary file:** `ezoptionsschwab.py`
+**Related plan:** `docs/SCALPING_PERFORMANCE_OPTIMIZATION_PLAN.md`
+**Target workflow:** Fast SPY 0-1 DTE option scalping with candles, option-volume context, and Active Trader open
 
 ---
 

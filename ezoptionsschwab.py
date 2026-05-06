@@ -10901,6 +10901,7 @@ def _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms):
         'cache_key': cache_key,
         'fetched_at': fetched_at_ms,
         'meta': meta,
+        'cache_stored': False,
     }
 
 
@@ -10974,6 +10975,7 @@ def refresh_options_cache_snapshot(
             'cache_key': cache_key,
         }
 
+        cache_stored = False
         if S is not None and not (calls.empty and puts.empty):
             with _maybe_perf_span(perf, 'options_cache_copy'):
                 _options_cache[ticker] = {
@@ -10982,6 +10984,7 @@ def refresh_options_cache_snapshot(
                     'S': S,
                     'meta': meta,
                 }
+                cache_stored = True
 
         return {
             'calls': calls,
@@ -10992,6 +10995,7 @@ def refresh_options_cache_snapshot(
             'cache_key': cache_key,
             'fetched_at': fetched_at_ms,
             'meta': meta,
+            'cache_stored': cache_stored,
         }
 
 
@@ -23123,6 +23127,9 @@ def index():
             // Real-time candle ticks come from SSE (connectPriceStream), not from polling.
             if (_vis.price) {
                 fetchPriceHistory(tickerChanged || !tvLastCandles.length);
+            }
+            if (shouldRefreshTradeChainCache && !isTradeRailCollapsed()) {
+                requestTradeChain({ force: true, minIntervalMs: 0, refreshCache: true });
             }
             
             const updateFetchPerf = gexPerfStart('fetch:/update', { ticker, expiries: expiry.length });
@@ -39612,6 +39619,7 @@ def index():
             return {
                 ticker: document.getElementById('ticker').value,
                 timeframe: tf,
+                expiry: getSelectedExpiryValues(),
                 lookback_days: lookbackDays,
                 rvol_lookback_days: rvolLookback,
                 call_color: callColor,
@@ -41869,6 +41877,12 @@ def trade_chain():
             )
             perf.add('cache_refresh_hit', cache_snapshot.get('cache_hit'))
             perf.add('cache_refresh_fetched', cache_snapshot.get('fetched'))
+            if not cache_snapshot.get('cache_hit') and not cache_snapshot.get('cache_stored'):
+                if cache_snapshot.get('S') is None:
+                    cache_refresh_error = 'Cache refresh did not return a current price.'
+                else:
+                    cache_refresh_error = 'Cache refresh did not return usable option data.'
+                perf.add('cache_refresh_error', cache_refresh_error[:80])
         except Exception as e:
             cache_refresh_error = str(e)
             perf.add('cache_refresh_error', cache_refresh_error[:80])
@@ -41902,8 +41916,10 @@ def trade_chain():
     payload['cache_meta'] = {
         'cache_hit': bool(cache_snapshot.get('cache_hit')) if cache_snapshot else False,
         'fetched': bool(cache_snapshot.get('fetched')) if cache_snapshot else False,
+        'stored': bool(cache_snapshot.get('cache_stored')) if cache_snapshot else False,
         'fetched_at_ms': meta.get('fetched_at_ms'),
         'cache_key': meta.get('cache_key'),
+        'requested_cache_key': cache_snapshot.get('cache_key') if cache_snapshot else None,
         'refresh_error': cache_refresh_error,
     }
     if refresh_cache:
