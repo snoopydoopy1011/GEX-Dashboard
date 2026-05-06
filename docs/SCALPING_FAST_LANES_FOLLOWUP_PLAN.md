@@ -1176,9 +1176,52 @@ Notes:
 - The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
 - The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
 
+### Stage 6 - Price-history lane diet landed
+
+Branch: `codex/scalping-fast-lanes-followup`
+Commit subject: `perf(price): remove analytics work from price history refresh`
+
+What changed:
+
+- Moved `key_levels`, `key_levels_0dte`, `trader_stats`, `stats_0dte`, and shared flow pulse work out of `/update_price` and into the slow `/update` analytics response.
+- `/update_price` now returns the price chart, session levels, session level metadata, and cached `top_oi` only.
+- The frontend now updates `_lastKeyLevels`, `_lastKeyLevels0dte`, `_lastStats0dte`, and `renderTraderStats(...)` from `/update`.
+- The 30-second price-history refresh no longer blanks right-rail analytics or key-level overlays while it refreshes candles.
+- Slow `/update` fetches price history only for analytics context such as vol pressure; the price chart itself still comes from `/update_price` and underlying SSE.
+
+Tricky parts:
+
+- `renderTVPriceChart(...)` already redraws key levels from cached `_lastKeyLevels`, so the price-history lane can safely stop returning key-level payloads without losing overlays on candle refresh.
+- `/update` now owns the full and 0DTE analytics bundles, so `redrawGexScope()` is called after the slow analytics payload lands rather than after every price-history payload.
+- `top_oi` stays in `/update_price` because it is cheap and still supports the optional top-OI chart indicator during candle refreshes.
+
+Validation completed:
+
+```bash
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+rg -n "gex-side-panel|gex-column|gex-col-header|gex-resize-handle|Strike Inspect|strike-inspect|strike-rail|renderStrikeRailPanel|syncGexPanelYAxisToTV|scheduleGexPanelSync|create_gex_side_panel" ezoptionsschwab.py
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+```
+
+Additional smoke:
+
+- Monkeypatched the chain, quote, price-history, and analytics helpers, then posted to both `/update` and `/update_price`.
+- `/update` returned `trader_stats`, `key_levels`, and `stats_0dte`.
+- `/update_price` returned no `trader_stats`, `key_levels`, `stats_0dte`, or `key_levels_0dte` fields.
+
+Notes:
+
+- `py_compile` passed with the pre-existing inline-template `SyntaxWarning: invalid escape sequence '\('`.
+- Inline script extraction found 5 scripts, and `node --check /tmp/gex-inline-scripts.js` passed.
+- The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
+- The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
+
 Next stage:
 
-- Stage 6 should diet `/update_price` so the price-history lane no longer rebuilds trader stats, 0DTE stats, key levels, or shared flow pulse snapshots during normal 30-second candle-history refreshes.
+- Stage 7 should run the final cleanup greps, remove any remaining dead Strike Inspect / old side-panel compatibility code if found, and close the plan if only historical docs still match.
 
 ---
 

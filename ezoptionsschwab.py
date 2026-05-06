@@ -23175,8 +23175,13 @@ def index():
                 }
                 
                 lastData = data;  // Update before rendering so popout windows get fresh data
+                _lastKeyLevels = data ? (data.key_levels || null) : null;
+                _lastKeyLevels0dte = data ? (data.key_levels_0dte || null) : null;
+                _lastStats0dte = data ? (data.stats_0dte || null) : null;
+                renderTraderStats(data ? (data.trader_stats || null) : null);
                 updateCharts(data, topOiContextKey);
                 updatePriceInfo(data.price_info);
+                redrawGexScope();
                 _lastAnalyticsCacheContextKey = analyticsCacheContextKey;
                 if (!isTradeRailCollapsed()) {
                     requestTradeChain({
@@ -39651,9 +39656,6 @@ def index():
             .then(priceResp => {
                 _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
                 _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
-                _lastKeyLevels = priceResp ? (priceResp.key_levels || null) : null;
-                _lastKeyLevels0dte = priceResp ? (priceResp.key_levels_0dte || null) : null;
-                _lastStats0dte = priceResp ? (priceResp.stats_0dte || null) : null;
                 if (!priceResp.error && priceResp.price) {
                     applyPriceData(priceResp.price);
                 } else {
@@ -39664,8 +39666,6 @@ def index():
                     _lastTopOIContextKey = requestTopOIContextKey;
                     if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
                 }
-                renderTraderStats(priceResp ? (priceResp.trader_stats || null) : null);
-                redrawGexScope();
             })
             .catch(err => {
                 gexPerfEnd(priceFetchPerf, { error: true });
@@ -42611,6 +42611,7 @@ def update():
             calculate_in_notional = cin_val.lower() == 'true'
         else:
             calculate_in_notional = bool(cin_val)
+        gate_alerts = _coerce_bool(data.get('gate_alerts'), default=True)
 
         cache_snapshot = refresh_options_cache_snapshot(
             ticker,
@@ -42742,6 +42743,9 @@ def update():
  
         
         response = {}
+        flow_pulse_snapshot = None
+        pinned_snapshot = None
+        quote_open = None
 
         try:
             with perf.span('compute_top_oi_strikes'):
@@ -42817,7 +42821,6 @@ def update():
                 response['premium'] = create_premium_chart(calls, puts, S, strike_range, call_color, put_color, coloring_mode, show_calls, show_puts, show_net, expiry_dates, strike_profile_horizontal, highlight_max_level=highlight_max_level, max_level_color=max_level_color, max_level_mode=max_level_mode)
         
         if data.get('show_large_trades', True):
-            flow_pulse_snapshot = None
             try:
                 with perf.span('flow_pulse_snapshot_shared'):
                     flow_pulse_snapshot, flow_pulse_cache_hit = get_shared_flow_pulse_snapshot(
@@ -42963,6 +42966,102 @@ def update():
                 'expected_move_range': None,
                 'live_straddle': None,
             }
+
+        analytics_price_data = None
+        try:
+            with perf.span('analytics_price_history'):
+                analytics_price_data = get_price_history(
+                    ticker,
+                    timeframe=timeframe,
+                    lookback_days=data.get('lookback_days'),
+                )
+        except Exception as e:
+            print(f"[analytics_price_history] build failed: {e}")
+            analytics_price_data = None
+
+        try:
+            with perf.span('compute_key_levels'):
+                key_levels = compute_key_levels(
+                    calls, puts, S,
+                    selected_expiries=expiry_dates,
+                    strike_range=strike_range,
+                )
+                response['key_levels'] = apply_expected_move_snapshot_to_key_levels(key_levels, pinned_snapshot)
+        except Exception as e:
+            print(f"[key_levels] slow build failed: {e}")
+            response['key_levels'] = None
+
+        try:
+            full_scope_id = _build_stats_scope_id(
+                strike_range,
+                selected_expiries=expiry_dates,
+                scope_label='all',
+            )
+            with perf.span('compute_trader_stats_full'):
+                trader_stats = compute_trader_stats(
+                    calls, puts, S,
+                    strike_range=strike_range,
+                    selected_expiries=expiry_dates,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
+                    ticker=ticker,
+                    gate_strike_alerts=gate_alerts,
+                    scope_id=full_scope_id,
+                    price_data=analytics_price_data,
+                    timeframe=timeframe,
+                    expected_move_snapshot=pinned_snapshot,
+                    flow_pulse_snapshot=flow_pulse_snapshot,
+                )
+                response['trader_stats'] = apply_expected_move_snapshot_to_stats(trader_stats, pinned_snapshot)
+        except Exception as e:
+            print(f"[trader_stats] slow build failed: {e}")
+            response['trader_stats'] = None
+
+        response['key_levels_0dte'] = None
+        response['stats_0dte'] = None
+        try:
+            nearest_exp = _nearest_expiration(calls) or _nearest_expiration(puts)
+            if nearest_exp:
+                c0 = calls[calls['expiration_date'] == nearest_exp] if 'expiration_date' in calls.columns else calls
+                p0 = puts[puts['expiration_date'] == nearest_exp] if 'expiration_date' in puts.columns else puts
+                nearest_scope_id = _build_stats_scope_id(
+                    strike_range,
+                    selected_expiries=[nearest_exp],
+                    scope_label=f'expiry:{nearest_exp}',
+                )
+                pinned_em_0dte = get_pinned_expected_move(
+                    c0, p0, S, ticker,
+                    selected_expiries=[nearest_exp],
+                    open_spot=quote_open,
+                )
+                with perf.span('compute_key_levels_0dte'):
+                    key_levels_0dte = compute_key_levels(
+                        c0, p0, S,
+                        selected_expiries=[nearest_exp],
+                        strike_range=strike_range,
+                    )
+                    response['key_levels_0dte'] = apply_expected_move_snapshot_to_key_levels(key_levels_0dte, pinned_em_0dte)
+                with perf.span('compute_trader_stats_0dte'):
+                    stats_0dte = compute_trader_stats(
+                        c0, p0, S,
+                        strike_range=strike_range,
+                        selected_expiries=[nearest_exp],
+                        delta_adjusted=delta_adjusted,
+                        calculate_in_notional=calculate_in_notional,
+                        ticker=ticker,
+                        gate_strike_alerts=gate_alerts,
+                        scope_id=nearest_scope_id,
+                        price_data=analytics_price_data,
+                        timeframe=timeframe,
+                        expected_move_snapshot=pinned_em_0dte,
+                        flow_pulse_snapshot=_filter_flow_pulse_snapshot_by_expiry(
+                            flow_pulse_snapshot,
+                            [nearest_exp],
+                        ),
+                    )
+                    response['stats_0dte'] = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
+        except Exception as e:
+            print(f"[0dte_bundle] slow build failed: {e}")
         
         return _perf_jsonify(perf, response)
         
@@ -43010,20 +43109,6 @@ def update_price():
         session_level_config = normalize_session_level_config(data.get('session_levels'))
         volume_profile_settings = data.get('volume_profile') or {}
         tpo_profile_settings = data.get('tpo_profile') or {}
-        # Mirror /update_data semantics. compute_trader_stats has needed these
-        # since Phase 2 Stage 3 (commit 6fc40bb); without them every tick raised
-        # a silent NameError and trader_stats stayed None.
-        delta_adjusted = data.get('delta_adjusted', False)
-        cin_val = data.get('calculate_in_notional', True)
-        if isinstance(cin_val, str):
-            calculate_in_notional = cin_val.lower() == 'true'
-        else:
-            calculate_in_notional = bool(cin_val)
-        gate_val = data.get('gate_alerts', True)
-        if isinstance(gate_val, str):
-            gate_alerts = gate_val.lower() == 'true'
-        else:
-            gate_alerts = bool(gate_val)
 
         with perf.span('get_price_history'):
             price_data = get_price_history(ticker, timeframe=timeframe, lookback_days=lookback_days)
@@ -43083,43 +43168,9 @@ def update_price():
         except Exception:
             pass
 
-        key_levels = None
         top_oi = {'calls': [], 'puts': [], 'both': []}
-        flow_pulse_snapshot = None
         S_for_panel = cached.get('S')
-        quote_ticker = "$SPX" if ticker == "MARKET" else ("SPY" if ticker == "MARKET2" else ticker)
-        pinned_em_snapshot = None
-        quote_open = None
         if calls is not None and puts is not None and S_for_panel is not None:
-            try:
-                with perf.span('pinned_expected_move'):
-                    cached_em_key = _expected_move_cache_key(
-                        ticker,
-                        datetime.now(pytz.timezone('US/Eastern')).date(),
-                        selected_expiries,
-                    )
-                    cached_em = _SESSION_EM_BASELINE.get(cached_em_key)
-                    if cached_em:
-                        pinned_em_snapshot = cached_em
-                    else:
-                        quote_response = client.quote(quote_ticker)
-                        if quote_response.ok:
-                            quote_data = quote_response.json()
-                            ticker_data = quote_data.get(quote_ticker, {})
-                            quote = ticker_data.get('quote', {})
-                            quote_open = (
-                                quote.get('openPrice')
-                                or quote.get('regularMarketOpen')
-                                or quote.get('open')
-                            )
-                        pinned_em_snapshot = get_pinned_expected_move(
-                            calls, puts, S_for_panel, ticker,
-                            selected_expiries=selected_expiries,
-                            open_spot=quote_open,
-                        )
-            except Exception as e:
-                print(f"[expected_move] pinned chart EM build failed: {e}")
-                pinned_em_snapshot = None
             try:
                 # Keep historical intraday bubbles in sync with the price-chart
                 # refresh loop as well as the heavier /update loop. This avoids
@@ -43130,119 +43181,17 @@ def update_price():
             except Exception as e:
                 print(f"[interval_data] price-path store failed: {e}")
             try:
-                with perf.span('compute_key_levels'):
-                    key_levels = compute_key_levels(
-                        calls, puts, S_for_panel,
-                        selected_expiries=selected_expiries,
-                        strike_range=strike_range,
-                    )
-                    key_levels = apply_expected_move_snapshot_to_key_levels(key_levels, pinned_em_snapshot)
-            except Exception as e:
-                print(f"[key_levels] build failed: {e}")
-                key_levels = None
-            try:
                 with perf.span('compute_top_oi_strikes'):
                     top_oi = compute_top_oi_strikes(calls, puts, n=top_oi_count)
             except Exception as e:
                 print(f"[top_oi] cached build failed: {e}")
                 top_oi = {'calls': [], 'puts': [], 'both': []}
-            try:
-                with perf.span('flow_pulse_snapshot_shared'):
-                    flow_pulse_snapshot, flow_pulse_cache_hit = get_shared_flow_pulse_snapshot(
-                        ticker, calls, puts, S_for_panel,
-                        strike_range=strike_range,
-                        top_n=4000,
-                        return_cache_hit=True,
-                    )
-                    perf.add('flow_pulse_cache_hit', flow_pulse_cache_hit)
-            except Exception as e:
-                print(f"[flow_pulse] price-path shared snapshot failed: {e}")
-                flow_pulse_snapshot = None
-
-        trader_stats = None
-        if calls is not None and puts is not None and S_for_panel is not None:
-            try:
-                full_scope_id = _build_stats_scope_id(
-                    strike_range,
-                    selected_expiries=selected_expiries,
-                    scope_label='all',
-                )
-                with perf.span('compute_trader_stats_full'):
-                    trader_stats = compute_trader_stats(
-                        calls, puts, S_for_panel, strike_range=strike_range,
-                        selected_expiries=selected_expiries,
-                        delta_adjusted=delta_adjusted,
-                        calculate_in_notional=calculate_in_notional,
-                        ticker=ticker,
-                        gate_strike_alerts=gate_alerts,
-                        scope_id=full_scope_id,
-                        price_data=price_data,
-                        timeframe=timeframe,
-                        expected_move_snapshot=pinned_em_snapshot,
-                        flow_pulse_snapshot=flow_pulse_snapshot,
-                    )
-                    trader_stats = apply_expected_move_snapshot_to_stats(trader_stats, pinned_em_snapshot)
-            except Exception as e:
-                print(f"[trader_stats] build failed: {e}")
-                trader_stats = None
-
-        # 0DTE-filtered bundles (nearest expiration only)
-        key_levels_0dte = None
-        stats_0dte = None
-        if calls is not None and puts is not None and S_for_panel is not None:
-            try:
-                nearest_exp = _nearest_expiration(calls) or _nearest_expiration(puts)
-                if nearest_exp:
-                    c0 = calls[calls['expiration_date'] == nearest_exp] if 'expiration_date' in calls.columns else calls
-                    p0 = puts[puts['expiration_date']   == nearest_exp] if 'expiration_date' in puts.columns  else puts
-                    nearest_scope_id = _build_stats_scope_id(
-                        strike_range,
-                        selected_expiries=[nearest_exp],
-                        scope_label=f'expiry:{nearest_exp}',
-                    )
-                    with perf.span('compute_key_levels_0dte'):
-                        key_levels_0dte = compute_key_levels(
-                            c0, p0, S_for_panel,
-                            selected_expiries=[nearest_exp],
-                            strike_range=strike_range,
-                        )
-                        pinned_em_0dte = get_pinned_expected_move(
-                            c0, p0, S_for_panel, ticker,
-                            selected_expiries=[nearest_exp],
-                            open_spot=quote_open,
-                        )
-                        key_levels_0dte = apply_expected_move_snapshot_to_key_levels(key_levels_0dte, pinned_em_0dte)
-                    with perf.span('compute_trader_stats_0dte'):
-                        stats_0dte = compute_trader_stats(
-                            c0, p0, S_for_panel,
-                            strike_range=strike_range,
-                            selected_expiries=[nearest_exp],
-                            delta_adjusted=delta_adjusted,
-                            calculate_in_notional=calculate_in_notional,
-                            ticker=ticker,
-                            gate_strike_alerts=gate_alerts,
-                            scope_id=nearest_scope_id,
-                            price_data=price_data,
-                            timeframe=timeframe,
-                            expected_move_snapshot=pinned_em_0dte,
-                            flow_pulse_snapshot=_filter_flow_pulse_snapshot_by_expiry(
-                                flow_pulse_snapshot,
-                                [nearest_exp],
-                            ),
-                        )
-                        stats_0dte = apply_expected_move_snapshot_to_stats(stats_0dte, pinned_em_0dte)
-            except Exception as e:
-                print(f"[0dte_bundle] build failed: {e}")
 
         return _perf_jsonify(perf, {
             'price': price_chart,
-            'key_levels': key_levels,
             'session_levels': session_levels,
             'session_levels_meta': session_levels_meta,
             'top_oi': top_oi,
-            'trader_stats': trader_stats,
-            'key_levels_0dte': key_levels_0dte,
-            'stats_0dte': stats_0dte,
         })
     except Exception as e:
         import traceback
