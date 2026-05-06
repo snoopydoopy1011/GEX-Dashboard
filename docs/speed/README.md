@@ -10,6 +10,7 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 
 ## Current State
 
+- Latest validation result: [`SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md)
 - Latest implementation result: [`SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md`](../SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md)
 - Full live validation checklist: [`SCALPING_SPEED_VALIDATION_PLAN.md`](../SCALPING_SPEED_VALIDATION_PLAN.md)
 - Current implementation branch used for the latest pass: `codex/scalping-speed-followup`
@@ -20,6 +21,7 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 | Doc | Use it for |
 | --- | --- |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md`](../SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md) | Latest chart-pass result, browser trace export, incremental chart update evidence, final route/browser summaries. |
+| [`SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md) | Longer market-hours validation after the chart pass: 1 min/5 min candle samples, call/put Active Trader streams, route cadence, order polling containment, context-switch stress, and final browser/server bottleneck evidence. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_FOLLOWUP.md`](../SCALPING_SPEED_RESULTS_2026-05-06_FOLLOWUP.md) | Fast-lane cache lock attribution, browser perf attribution before the chart-pass fix, and the prompt that led to the chart pass. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06.md`](../SCALPING_SPEED_RESULTS_2026-05-06.md) | Earlier same-day baseline and first speed results. |
 | [`SCALPING_SPEED_VALIDATION_PLAN.md`](../SCALPING_SPEED_VALIDATION_PLAN.md) | Market-hours test matrix, success targets, capture requirements, bottleneck diagnosis, and results template. |
