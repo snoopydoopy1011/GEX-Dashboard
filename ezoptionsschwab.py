@@ -261,6 +261,15 @@ class _PerfTrace:
         return response
 
 
+@contextmanager
+def _maybe_perf_span(perf, name):
+    if perf is None:
+        yield
+        return
+    with perf.span(name):
+        yield
+
+
 def _perf_jsonify(perf, payload, status=None):
     response = jsonify(payload)
     if status is not None:
@@ -1217,9 +1226,11 @@ UPDATE_INTERVAL = 1  # seconds
 current_ticker = None
 current_expiry = None
 
-# Cache for last fetched options data per ticker — used by /update_price
-# so the price chart can refresh independently without re-fetching the full chain.
-_options_cache = {}  # ticker -> {'calls': DataFrame, 'puts': DataFrame, 'S': float}
+# Cache for last fetched options data per ticker. The selected-contract stream
+# stays live independently; this cache feeds chain context and contract safety
+# validation paths.
+_options_cache = {}  # ticker -> {'calls': DataFrame, 'puts': DataFrame, 'S': float, 'meta': dict}
+_options_cache_refresh_lock = threading.Lock()
 
 # Successful Schwab previews are valid for five minutes. The UI mirrors this
 # TTL near the Active Trader fast controls so an old preview is visible before
@@ -10830,6 +10841,141 @@ def fetch_options_for_multiple_dates(ticker, dates, exposure_metric="Open Intere
         raise last_exception
 
     return combined_calls, combined_puts
+
+
+def _build_options_cache_key(
+    ticker,
+    expiry_dates,
+    exposure_metric="Open Interest",
+    delta_adjusted=False,
+    calculate_in_notional=True,
+):
+    normalized_expiries = _normalize_expiry_list(expiry_dates)
+    return json.dumps({
+        'ticker': format_ticker(ticker or ''),
+        'expiry_dates': normalized_expiries,
+        'exposure_metric': str(exposure_metric or 'Open Interest'),
+        'delta_adjusted': bool(delta_adjusted),
+        'calculate_in_notional': bool(calculate_in_notional),
+    }, sort_keys=True, separators=(',', ':'))
+
+
+def _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms):
+    cached = _options_cache.get(ticker)
+    if not cached:
+        return None
+    meta = cached.get('meta') or {}
+    if meta.get('cache_key') != cache_key:
+        return None
+    try:
+        fetched_at_ms = int(meta.get('fetched_at_ms') or 0)
+    except Exception:
+        fetched_at_ms = 0
+    if min_age_ms <= 0 or fetched_at_ms <= 0:
+        return None
+    if now_ms - fetched_at_ms > min_age_ms:
+        return None
+    return {
+        'calls': cached.get('calls'),
+        'puts': cached.get('puts'),
+        'S': cached.get('S'),
+        'cache_hit': True,
+        'fetched': False,
+        'cache_key': cache_key,
+        'fetched_at': fetched_at_ms,
+        'meta': meta,
+    }
+
+
+def refresh_options_cache_snapshot(
+    ticker,
+    expiry_dates,
+    *,
+    exposure_metric="Open Interest",
+    delta_adjusted=False,
+    calculate_in_notional=True,
+    min_age_ms=0,
+    force=False,
+    perf=None,
+):
+    """Fetch Schwab chain and current price when the keyed cache is stale.
+
+    This helper keeps the chain-cache refresh lane separate from slower chart
+    and analytics work. It intentionally does not compute Plotly payloads,
+    trader stats, key levels, or order data.
+    """
+    ticker = format_ticker(ticker or '')
+    expiry_dates = list(expiry_dates or [])
+    cache_key = _build_options_cache_key(
+        ticker,
+        expiry_dates,
+        exposure_metric=exposure_metric,
+        delta_adjusted=delta_adjusted,
+        calculate_in_notional=calculate_in_notional,
+    )
+    try:
+        min_age_ms = max(0, int(min_age_ms or 0))
+    except Exception:
+        min_age_ms = 0
+
+    with _options_cache_refresh_lock:
+        now_ms = int(time.time() * 1000)
+        if not force:
+            cached_snapshot = _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms)
+            if cached_snapshot is not None:
+                return cached_snapshot
+
+        with _maybe_perf_span(perf, 'fetch_chain'):
+            if len(expiry_dates) == 1:
+                calls, puts = fetch_options_for_date(
+                    ticker,
+                    expiry_dates[0],
+                    exposure_metric=exposure_metric,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
+                )
+            else:
+                calls, puts = fetch_options_for_multiple_dates(
+                    ticker,
+                    expiry_dates,
+                    exposure_metric=exposure_metric,
+                    delta_adjusted=delta_adjusted,
+                    calculate_in_notional=calculate_in_notional,
+                )
+
+        with _maybe_perf_span(perf, 'get_current_price'):
+            S = get_current_price(ticker)
+        fetched_at_ms = int(time.time() * 1000)
+        meta = {
+            'ticker': ticker,
+            'expiry_dates': _normalize_expiry_list(expiry_dates),
+            'exposure_metric': str(exposure_metric or 'Open Interest'),
+            'delta_adjusted': bool(delta_adjusted),
+            'calculate_in_notional': bool(calculate_in_notional),
+            'fetched_at_ms': fetched_at_ms,
+            'current_price_fetched_at_ms': fetched_at_ms if S is not None else None,
+            'cache_key': cache_key,
+        }
+
+        if S is not None and not (calls.empty and puts.empty):
+            with _maybe_perf_span(perf, 'options_cache_copy'):
+                _options_cache[ticker] = {
+                    'calls': calls.copy(),
+                    'puts': puts.copy(),
+                    'S': S,
+                    'meta': meta,
+                }
+
+        return {
+            'calls': calls,
+            'puts': puts,
+            'S': S,
+            'cache_hit': False,
+            'fetched': True,
+            'cache_key': cache_key,
+            'fetched_at': fetched_at_ms,
+            'meta': meta,
+        }
 
 
 def _cleanup_desktop_window_states(now=None):
@@ -42356,25 +42502,29 @@ def update():
         else:
             calculate_in_notional = bool(cin_val)
 
-        # Fetch options data for multiple dates
-        with perf.span('fetch_chain'):
-            if len(expiry_dates) == 1:
-                calls, puts = fetch_options_for_date(ticker, expiry_dates[0], exposure_metric=exposure_metric, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
-            else:
-                calls, puts = fetch_options_for_multiple_dates(ticker, expiry_dates, exposure_metric=exposure_metric, delta_adjusted=delta_adjusted, calculate_in_notional=calculate_in_notional)
+        cache_snapshot = refresh_options_cache_snapshot(
+            ticker,
+            expiry_dates,
+            exposure_metric=exposure_metric,
+            delta_adjusted=delta_adjusted,
+            calculate_in_notional=calculate_in_notional,
+            force=True,
+            perf=perf,
+        )
+        perf.add('options_cache_hit', cache_snapshot.get('cache_hit'))
+        perf.add('options_cache_fetched', cache_snapshot.get('fetched'))
+        calls = cache_snapshot.get('calls')
+        puts = cache_snapshot.get('puts')
+        S = cache_snapshot.get('S')
+        if calls is None:
+            calls = pd.DataFrame()
+        if puts is None:
+            puts = pd.DataFrame()
         
         if calls.empty and puts.empty:
             return _perf_jsonify(perf, {'error': 'No options data found'})
-            
-        # Get current price
-        with perf.span('get_current_price'):
-            S = get_current_price(ticker)
         if S is None:
             return _perf_jsonify(perf, {'error': 'Could not fetch current price'})
-
-        # Cache options data so /update_price can use it without re-fetching
-        with perf.span('options_cache_copy'):
-            _options_cache[ticker] = {'calls': calls.copy(), 'puts': puts.copy(), 'S': S}
         
         # Get strike range
         strike_range = float(data.get('strike_range', 0.1))

@@ -1053,9 +1053,47 @@ Notes:
 - The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
 - The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
 
+### Stage 3 - Shared options cache refresh helper landed
+
+Branch: `codex/scalping-fast-lanes-followup`
+Commit subject: `perf(chain): refresh cached option chain without analytics`
+
+What changed:
+
+- Added `refresh_options_cache_snapshot(...)` as the shared backend lane for refreshing `_options_cache` without building Plotly charts, trader stats, key levels, flow pulse snapshots, or order data.
+- Added cache metadata keyed by ticker, selected expiries, exposure metric, delta-adjusted flag, calculate-in-notional flag, and fetch timestamps.
+- Added a narrow `_options_cache_refresh_lock` around cache refresh work so simultaneous callers do not overlap Schwab chain fetches.
+- Routed `/update` through the helper with `force=True`, preserving the current user-facing behavior that a slow analytics tick still fetches a fresh chain and current price.
+- Kept `/trade_chain` cache-only for this stage, so selected-contract cached validation and trade-chain response shape stay unchanged until Stage 4 intentionally adds the fast refresh flag.
+
+Tricky parts:
+
+- The helper preserves the existing `/update` perf span names (`fetch_chain`, `get_current_price`, `options_cache_copy`) by accepting the route perf tracer rather than hiding that timing inside one opaque helper span.
+- Cache hits are intentionally only allowed when callers pass a positive `min_age_ms`; the current `/update` path uses `force=True` so Stage 3 does not silently change freshness behavior.
+- Empty option-chain fetches or missing current price do not replace the last good cache entry. `/update` still returns the same error responses for empty chain data or missing current price.
+- The lock is held only for the cache refresh lane. Slow analytics and chart construction still run outside the lock after the helper returns.
+
+Validation completed:
+
+```bash
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+rg -n "gex-side-panel|gex-column|gex-col-header|gex-resize-handle|Strike Inspect|strike-inspect|strike-rail|renderStrikeRailPanel|syncGexPanelYAxisToTV|scheduleGexPanelSync|create_gex_side_panel" ezoptionsschwab.py
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+```
+
+Notes:
+
+- `py_compile` passed with the pre-existing inline-template `SyntaxWarning: invalid escape sequence '\('`.
+- Inline script extraction found 5 scripts, and `node --check /tmp/gex-inline-scripts.js` passed.
+- The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
+- The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
+
 Next stage:
 
-- Stage 3 should extract the shared options cache refresh helper before changing endpoint/cache behavior.
+- Stage 4 should add the fast chain snapshot lane, most likely by extending `/trade_chain` with `refresh_cache: true`, and merge fast strike profiles without overwriting slow GEX/DEX/Vanna/Charm overlay data.
 
 ---
 
