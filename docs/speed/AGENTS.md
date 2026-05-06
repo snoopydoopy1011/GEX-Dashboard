@@ -15,6 +15,7 @@ Use this file whenever the task is about scalping speed, fast lanes, chart respo
 - Do not place live orders.
 - Keep Auto Send off during speed validation unless the user explicitly asks for a disabled/rejection-flow test.
 - Do not use preview/place/live-order endpoints unless the user explicitly asks and the behavior is preview-only or safely disabled.
+- Treat Active Trader live-order behavior as a separate safety-scoped investigation, not part of normal speed validation. Map preview/live/confirm/reject state transitions before proposing a one-click Auto Send change.
 - Leave analytical formulas unchanged: GEX, DEX, Vanna, Charm, Flow, key-level math, and alert semantics are not performance knobs.
 - Keep the single-file `ezoptionsschwab.py` structure and vanilla JS approach.
 
@@ -32,13 +33,15 @@ For browser traces, use the in-page Trace button when `GEX_PERF_TRACE=1`. It pos
 
 ## Current Speed Baseline
 
-As of `docs/SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`:
+As of `docs/SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`:
 
 - `GEX_PERF_TRACE=1` raises the browser trace cap to 50,000 events.
 - `browser_long_task` events include attribution detail: nearby app spans, route/apply context, chart apply mode, selected timeframe, selected contract, trade rail state, and visible panel state.
 - Trace-only `browser_event_loop_delay` events are emitted when the event loop delay exceeds 100 ms.
 - The 5 min chart-history default is 10 days. Do not restore the previous 60-day default without a new measured reason.
 - Dashboard expiry changes that remove the current trade-rail expiry should immediately clear stale selected contract state, force `/trade_chain`, reconnect the selected quote stream, and ignore stale stream messages.
+- Contract Helper must not show candidate buttons from an expiry that is no longer selected on the dashboard. During expiry transitions, stale helper candidates should clear until the matching expiry payload arrives.
+- The remaining measured long-task source is full chart application (`applyPriceData` / `renderTVPriceChart`), especially on 1 min history. Do not optimize Active Trader, ladder rendering, or `/trade_chain` unless traces specifically identify them.
 
 ## Protocol Tiers
 
@@ -72,6 +75,17 @@ Required checks:
 - `/trade_chain` cache/stale paths stay under the validation-plan target.
 - Browser long tasks over `100 ms` are attributed; normal quote ticks should not produce recurring long tasks.
 - Server logs contain no preview/place/live-order endpoints.
+- Contract Helper clears old-expiry candidates immediately during 0DTE/1DTE switches, then repopulates with the selected dashboard expiry.
+
+## Active Trader Follow-Up Invariants
+
+Use these when the task asks about Active Trader quote behavior or order-entry flow.
+
+- Chart candle timeframe and selected option price are separate lanes. Changing `1 min` to `5 min` should affect `/update_price`, chart history, and candle rendering; it should not change `tradeRailState.selectedSymbol`, selected option quote stream URL, bid/mid/ask source, or ladder center by itself.
+- If timeframe changes appear to affect selected option price, first inspect selected-symbol reset/reconnect paths and quote-stream merge logic. Do not change option-pricing math.
+- Auto Send behavior must be investigated with live orders disabled unless the user gives explicit authorization for a safe disabled/rejection-flow test. Normal speed validation keeps Auto Send off.
+- Before changing Auto Send UX, document the intended click flow for Preview Only / Auto off, Preview Only / Auto on, Live disabled / Auto on, and Live explicitly enabled / Auto on.
+- Any one-click order-entry change must preserve a server-side live-trading guard. A client UI state must never be the only protection against live order placement.
 
 ## Lane Ownership
 
@@ -93,6 +107,8 @@ Prefer fixing the lane that evidence identifies:
 - `/trade_chain` cache/stale paths slow: inspect cache lock, payload build, and DOM apply.
 - `/update_price` parse or payload dominates after chart apply is optimized: then consider payload reduction.
 - `/update` aligns with long tasks: split/defer analytics rendering before touching formulas.
+- Timeframe changes appear to mutate selected option quote/ladder state: isolate chart timeframe handlers from selected contract state before tuning speed paths.
+- Auto Send requires unexpected extra clicks: map the safety state machine first; do not remove preview/confirmation safeguards without explicit live-trading requirements.
 
 ## Result Notes
 

@@ -10,8 +10,8 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 
 ## Current State
 
-- Latest validation result: [`SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`](../SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md)
-- Latest implementation result: [`SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`](../SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md)
+- Latest validation result: [`SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md)
+- Latest implementation result: [`SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md)
 - Full live validation checklist: [`SCALPING_SPEED_VALIDATION_PLAN.md`](../SCALPING_SPEED_VALIDATION_PLAN.md)
 - Current implementation branch used for the latest pass: `main`
 - Core file: [`ezoptionsschwab.py`](../../ezoptionsschwab.py)
@@ -20,7 +20,8 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 
 | Doc | Use it for |
 | --- | --- |
-| [`SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`](../SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md) | Latest implementation and validation result: long-task attribution, event-loop delay tracing, 5 min history-window experiment, 10-day 5 min default, and dashboard expiry-to-trade-rail sync fix. |
+| [`SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md) | Post-change validation on `main`: 5 min call/put samples, 1 min selected-contract sample, expiry/rail stress, order polling containment, browser attribution, and Contract Helper mixed-expiry cleanup verification. |
+| [`SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`](../SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md) | Prior implementation and validation result: long-task attribution, event-loop delay tracing, 5 min history-window experiment, 10-day 5 min default, and dashboard expiry-to-trade-rail sync fix. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md`](../SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md) | Latest chart-pass result, browser trace export, incremental chart update evidence, final route/browser summaries. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_FULL_VALIDATION.md) | Longer market-hours validation after the chart pass: 1 min/5 min candle samples, call/put Active Trader streams, route cadence, order polling containment, context-switch stress, and final browser/server bottleneck evidence. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_FOLLOWUP.md`](../SCALPING_SPEED_RESULTS_2026-05-06_FOLLOWUP.md) | Fast-lane cache lock attribution, browser perf attribution before the chart-pass fix, and the prompt that led to the chart pass. |
@@ -37,6 +38,10 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 - The 5 min chart-history default is now 10 days. The 2026-05-06 history-window experiment showed median `/update_price` bytes dropping from about 5.1 MB to 1.3 MB and long-task p95 dropping from about 382 ms to 126 ms versus the prior 60-day default.
 - The steady-state chart path is incremental. In the latest 5 min 10-day trace, incremental `renderTVPriceChart` was about 4.4 ms and full initial `renderTVPriceChart` was about 116.8 ms.
 - Dashboard expiry changes that remove the trade-rail expiry now immediately clear stale selected contract state, force a trade-chain refresh, reconnect the selected quote stream, and guard against stale quote stream messages.
+- Contract Helper now clears stale old-expiry candidates during dashboard expiry switches and repopulates only when the helper payload matches the selected dashboard expiry.
+- The post-change validation passed fast-lane span targets after hours; a market-hours rerun is still needed for quote-age and candle-freshness pass/fail.
+- If future validation fails on long tasks, start with full chart application (`applyPriceData` / `renderTVPriceChart`) before touching Active Trader, ladder rendering, or `/trade_chain`.
+- Active Trader follow-ups are separate from speed validation: chart timeframe should not drive selected option price, and Auto Send order flow must be investigated with live-order safeguards intact.
 - `/update` should stay isolated unless a trace ties it to stale fast-lane quotes, candle lag, or browser long tasks.
 - `/trade/orders` polling must remain conditional and preserve slow-call/failure backoff.
 - Analytical formulas are out of scope for speed work.

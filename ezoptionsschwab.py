@@ -33652,6 +33652,7 @@ def index():
             tradeRailState.loading = false;
             tradeRailState.dashboardExpirySyncPending = true;
             resetTradeSelectedContractContext(message);
+            try { renderContractHelper(getScopedStats()); } catch (e) {}
             renderTradeRail();
             if (!isTradeRailCollapsed() && tradeRailState.expiry) {
                 requestTradeChain({ force: true, minIntervalMs: 0, refreshCache: true });
@@ -41356,6 +41357,23 @@ def index():
 
         function renderContractHelper(stats) {
             const helper = stats && stats.contract_helper;
+            const normalizeHelperExpiry = value => String(value || '').trim().slice(0, 10);
+            const getExpectedHelperExpiry = () => {
+                const selected = (typeof getTradeRailSelectedDashboardExpiries === 'function')
+                    ? getTradeRailSelectedDashboardExpiries()
+                    : [];
+                const dashboardExpiry = normalizeHelperExpiry(selected && selected[0]);
+                if (dashboardExpiry) return dashboardExpiry;
+                return normalizeHelperExpiry(tradeRailState && tradeRailState.expiry);
+            };
+            const getHelperExpiry = helperRow => {
+                if (!helperRow) return '';
+                return normalizeHelperExpiry(
+                    helperRow.expiry ||
+                    (helperRow.call && helperRow.call.expiry) ||
+                    (helperRow.put && helperRow.put.expiry)
+                );
+            };
             const setSizeTone = risk => {
                 document.querySelectorAll('[data-met="contract_size"]').forEach(sizeEl => {
                     sizeEl.classList.remove('pos', 'neg');
@@ -41404,7 +41422,16 @@ def index():
                     el.classList.toggle('has-compare', available);
                 });
             };
-            if (!helper || helper.status !== 'ready') {
+            const helperExpiry = getHelperExpiry(helper);
+            const expectedHelperExpiry = getExpectedHelperExpiry();
+            const helperExpiryMismatch = !!(
+                helper &&
+                helper.status === 'ready' &&
+                helperExpiry &&
+                expectedHelperExpiry &&
+                helperExpiry !== expectedHelperExpiry
+            );
+            if (!helper || helper.status !== 'ready' || helperExpiryMismatch) {
                 _setMet('contract_expiry', 'Near expiry');
                 _setMet('contract_primary_dte', '0DTE');
                 _setMet('contract_call', '—');
@@ -41419,7 +41446,9 @@ def index():
                 _setMet('contract_put_meta', '—');
                 _setMet('contract_size_label', 'Size guide');
                 _setMet('contract_size', '—');
-                _setMet('contract_note', (helper && helper.note) || 'Scores nearby ATM to 2 OTM contracts.');
+                _setMet('contract_note', helperExpiryMismatch
+                    ? 'Contract helper updating for selected expiry.'
+                    : ((helper && helper.note) || 'Scores nearby ATM to 2 OTM contracts.'));
                 setSizeTone(null);
                 setComparisonTone(null);
                 setCandidateControl('CALL', null);
