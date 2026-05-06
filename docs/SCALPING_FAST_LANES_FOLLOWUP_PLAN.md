@@ -1135,9 +1135,50 @@ Notes:
 - The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
 - The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
 
+### Stage 5 - Slow analytics cache reuse landed
+
+Branch: `codex/scalping-fast-lanes-followup`
+Commit subject: `perf(analytics): slow GEX rail refresh cadence`
+
+What changed:
+
+- Confirmed the frontend slow analytics timer is already on `ANALYTICS_REFRESH_MS = 60000` from Stage 2.
+- Changed `/update` to call `refresh_options_cache_snapshot(...)` with a 5-second reuse window instead of always forcing a Schwab chain fetch.
+- Because the helper cache key includes ticker, selected expiries, exposure metric, delta-adjusted flag, and calculate-in-notional flag, ticker/expiry/exposure-setting changes still force a fresh chain unless a matching fast-chain refresh just landed.
+- Added frontend analytics cache-context tracking. When ticker, expiry, exposure metric, delta-adjusted, or notional setting changes and the trade rail is open, the post-analytics trade-chain refresh now sends `refresh_cache: true` immediately rather than waiting for the periodic fast timer.
+
+Tricky parts:
+
+- `_lastAnalyticsCacheContextKey` is updated only after a successful `/update` response. Failed analytics requests do not mark a context as refreshed.
+- The immediate trade-chain refresh uses `minIntervalMs: 0` only when the analytics cache context changes; steady-state `/update` completions keep the existing 5-second no-overlap guard.
+- The selected option quote SSE path remains independent of both the one-minute analytics cadence and the 5-second fast chain cadence.
+
+Validation completed:
+
+```bash
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+rg -n "gex-side-panel|gex-column|gex-col-header|gex-resize-handle|Strike Inspect|strike-inspect|strike-rail|renderStrikeRailPanel|syncGexPanelYAxisToTV|scheduleGexPanelSync|create_gex_side_panel" ezoptionsschwab.py
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+```
+
+Additional smoke:
+
+- Monkeypatched `fetch_options_for_date(...)` and `get_current_price(...)`, then called `refresh_options_cache_snapshot(...)` twice for the same ticker/expiry/settings.
+- First call fetched; second call with `min_age_ms=5000` returned `cache_hit=True`; fake chain fetch count stayed at 1.
+
+Notes:
+
+- `py_compile` passed with the pre-existing inline-template `SyntaxWarning: invalid escape sequence '\('`.
+- Inline script extraction found 5 scripts, and `node --check /tmp/gex-inline-scripts.js` passed.
+- The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
+- The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
+
 Next stage:
 
-- Stage 5 should confirm the slow analytics route is on the one-minute cadence, make `/update` reuse a recent fast-chain cache when possible, and preserve immediate forced analytics refreshes for ticker/expiry/settings changes.
+- Stage 6 should diet `/update_price` so the price-history lane no longer rebuilds trader stats, 0DTE stats, key levels, or shared flow pulse snapshots during normal 30-second candle-history refreshes.
 
 ---
 

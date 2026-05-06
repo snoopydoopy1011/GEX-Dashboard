@@ -1231,6 +1231,7 @@ current_expiry = None
 # validation paths.
 _options_cache = {}  # ticker -> {'calls': DataFrame, 'puts': DataFrame, 'S': float, 'meta': dict}
 _options_cache_refresh_lock = threading.Lock()
+ANALYTICS_OPTIONS_CACHE_REUSE_MS = 5000
 
 # Successful Schwab previews are valid for five minutes. The UI mirrors this
 # TTL near the Active Trader fast controls so an old preview is visible before
@@ -20487,6 +20488,7 @@ def index():
         let lastData = {}; // Store last received data
         let lastPriceData = null; // Price chart data stored separately (fetched via /update_price)
         let updateInProgress = false;
+        let _lastAnalyticsCacheContextKey = '';
         let isStreaming = true;
         let savedScrollPosition = 0; // Track scroll position
         let chartContainerCache = {}; // Cache for chart containers to prevent recreation
@@ -23082,6 +23084,14 @@ def index():
             const highlightMaxLevel = document.getElementById('highlight_max_level').checked;
             const maxLevelMode = document.getElementById('max_level_mode').value;
             const gateAlerts = !!(document.getElementById('gate_alerts') && document.getElementById('gate_alerts').checked);
+            const analyticsCacheContextKey = JSON.stringify({
+                ticker: ticker.toUpperCase(),
+                expiry,
+                exposureMetric,
+                deltaAdjusted,
+                calculateInNotional,
+            });
+            const shouldRefreshTradeChainCache = analyticsCacheContextKey !== _lastAnalyticsCacheContextKey;
             setAlertGateSetting(gateAlerts);
             
             // Get visible charts (server payload uses show_<id> keys for back-compat)
@@ -23167,8 +23177,13 @@ def index():
                 lastData = data;  // Update before rendering so popout windows get fresh data
                 updateCharts(data, topOiContextKey);
                 updatePriceInfo(data.price_info);
+                _lastAnalyticsCacheContextKey = analyticsCacheContextKey;
                 if (!isTradeRailCollapsed()) {
-                    requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS });
+                    requestTradeChain({
+                        force: true,
+                        minIntervalMs: shouldRefreshTradeChainCache ? 0 : TRADE_CHAIN_AUTO_REFRESH_MS,
+                        refreshCache: shouldRefreshTradeChainCache,
+                    });
                 }
                 // Options cache is now populated — refresh price levels immediately.
                 // This fixes the delay where levels were missing right after a ticker change
@@ -42603,7 +42618,7 @@ def update():
             exposure_metric=exposure_metric,
             delta_adjusted=delta_adjusted,
             calculate_in_notional=calculate_in_notional,
-            force=True,
+            min_age_ms=ANALYTICS_OPTIONS_CACHE_REUSE_MS,
             perf=perf,
         )
         perf.add('options_cache_hit', cache_snapshot.get('cache_hit'))
