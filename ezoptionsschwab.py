@@ -10878,31 +10878,119 @@ def _build_options_cache_key(
 
 
 def _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms):
-    cached = _options_cache.get(ticker)
-    if not cached:
-        return None
-    meta = cached.get('meta') or {}
-    if meta.get('cache_key') != cache_key:
+    snapshot = _options_cache_snapshot_for_key(ticker, cache_key, now_ms)
+    if snapshot is None or not snapshot.get('cache_usable'):
         return None
     try:
-        fetched_at_ms = int(meta.get('fetched_at_ms') or 0)
+        fetched_at_ms = int(snapshot.get('fetched_at') or 0)
     except Exception:
         fetched_at_ms = 0
     if min_age_ms <= 0 or fetched_at_ms <= 0:
         return None
-    if now_ms - fetched_at_ms > min_age_ms:
+    if snapshot.get('cache_age_ms') is None or snapshot.get('cache_age_ms') > min_age_ms:
         return None
-    return {
-        'calls': cached.get('calls'),
-        'puts': cached.get('puts'),
-        'S': cached.get('S'),
+    snapshot.update({
         'cache_hit': True,
+        'fetched': False,
+        'stale': False,
+        'inflight': False,
+        'cache_stored': False,
+        'refresh_outcome': 'cache_hit',
+    })
+    return snapshot
+
+
+def _options_cache_snapshot_for_key(ticker, cache_key, now_ms=None):
+    cached = _options_cache.get(ticker)
+    if not cached:
+        return None
+    meta = cached.get('meta') or {}
+    cache_key_match = meta.get('cache_key') == cache_key
+    try:
+        fetched_at_ms = int(meta.get('fetched_at_ms') or 0)
+    except Exception:
+        fetched_at_ms = 0
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    cache_age_ms = max(0, now_ms - fetched_at_ms) if fetched_at_ms > 0 else None
+    calls = cached.get('calls')
+    puts = cached.get('puts')
+    has_calls = calls is not None and not getattr(calls, 'empty', True)
+    has_puts = puts is not None and not getattr(puts, 'empty', True)
+    cache_usable = bool(cache_key_match and cached.get('S') is not None and (has_calls or has_puts))
+    return {
+        'calls': calls,
+        'puts': puts,
+        'S': cached.get('S'),
+        'cache_hit': False,
         'fetched': False,
         'cache_key': cache_key,
         'fetched_at': fetched_at_ms,
         'meta': meta,
+        'cache_key_match': cache_key_match,
+        'cache_age_ms': cache_age_ms,
+        'cache_usable': cache_usable,
         'cache_stored': False,
     }
+
+
+def _stale_options_snapshot_for_key(ticker, cache_key, now_ms):
+    snapshot = _options_cache_snapshot_for_key(ticker, cache_key, now_ms)
+    if snapshot is None or not snapshot.get('cache_usable'):
+        return None
+    snapshot.update({
+        'cache_hit': False,
+        'fetched': False,
+        'stale': True,
+        'inflight': True,
+        'cache_stored': False,
+        'refresh_outcome': 'stale_inflight',
+    })
+    return snapshot
+
+
+def _annotate_options_cache_refresh_result(
+    result,
+    *,
+    min_age_ms=0,
+    lock_wait_ms=0.0,
+    lock_held_ms=0.0,
+    prior_snapshot=None,
+    outcome=None,
+):
+    if result is None:
+        result = {}
+    if outcome:
+        result['refresh_outcome'] = outcome
+    result['min_age_ms'] = min_age_ms
+    result['lock_wait_ms'] = float(lock_wait_ms or 0.0)
+    result['lock_held_ms'] = float(lock_held_ms or 0.0)
+    if prior_snapshot is not None:
+        result['prior_cache_key_match'] = bool(prior_snapshot.get('cache_key_match'))
+        result['prior_cache_usable'] = bool(prior_snapshot.get('cache_usable'))
+        result['prior_cache_age_ms'] = prior_snapshot.get('cache_age_ms')
+    else:
+        result['prior_cache_key_match'] = False
+        result['prior_cache_usable'] = False
+        result['prior_cache_age_ms'] = None
+    return result
+
+
+def _add_options_cache_refresh_perf(perf, result):
+    if perf is None or result is None:
+        return
+    perf.add('cache_refresh_outcome', result.get('refresh_outcome'))
+    perf.add('cache_refresh_stale', bool(result.get('stale')))
+    perf.add('cache_refresh_inflight', bool(result.get('inflight')))
+    perf.add('cache_refresh_key_match', bool(result.get('cache_key_match')))
+    perf.add('cache_refresh_cache_usable', bool(result.get('cache_usable')))
+    perf.add('cache_refresh_cache_age_ms', result.get('cache_age_ms'))
+    perf.add('cache_refresh_min_age_ms', result.get('min_age_ms'))
+    perf.add('cache_refresh_prior_key_match', bool(result.get('prior_cache_key_match')))
+    perf.add('cache_refresh_prior_usable', bool(result.get('prior_cache_usable')))
+    perf.add('cache_refresh_prior_age_ms', result.get('prior_cache_age_ms'))
+    perf.add('cache_refresh_lock_wait_ms', result.get('lock_wait_ms'))
+    perf.add('cache_refresh_lock_held_ms', result.get('lock_held_ms'))
 
 
 def refresh_options_cache_snapshot(
@@ -10936,12 +11024,52 @@ def refresh_options_cache_snapshot(
     except Exception:
         min_age_ms = 0
 
-    with _options_cache_refresh_lock:
+    now_ms = int(time.time() * 1000)
+    prior_snapshot = _options_cache_snapshot_for_key(ticker, cache_key, now_ms)
+    if not force:
+        cached_snapshot = _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms)
+        if cached_snapshot is not None:
+            result = _annotate_options_cache_refresh_result(
+                cached_snapshot,
+                min_age_ms=min_age_ms,
+                prior_snapshot=prior_snapshot,
+                outcome='cache_hit_prelock',
+            )
+            _add_options_cache_refresh_perf(perf, result)
+            return result
+
+    lock_wait_started = time.perf_counter()
+    acquired = _options_cache_refresh_lock.acquire(blocking=False)
+    if not acquired:
+        if not force:
+            stale_snapshot = _stale_options_snapshot_for_key(ticker, cache_key, now_ms)
+            if stale_snapshot is not None:
+                result = _annotate_options_cache_refresh_result(
+                    stale_snapshot,
+                    min_age_ms=min_age_ms,
+                    prior_snapshot=prior_snapshot,
+                    outcome='stale_inflight',
+                )
+                _add_options_cache_refresh_perf(perf, result)
+                return result
+        _options_cache_refresh_lock.acquire()
+    lock_wait_ms = (time.perf_counter() - lock_wait_started) * 1000
+    lock_held_started = time.perf_counter()
+    result = None
+    try:
         now_ms = int(time.time() * 1000)
         if not force:
             cached_snapshot = _cached_options_snapshot_for_key(ticker, cache_key, min_age_ms, now_ms)
             if cached_snapshot is not None:
-                return cached_snapshot
+                outcome = 'cache_hit_after_wait' if lock_wait_ms >= 1 else 'cache_hit_in_lock'
+                result = _annotate_options_cache_refresh_result(
+                    cached_snapshot,
+                    min_age_ms=min_age_ms,
+                    lock_wait_ms=lock_wait_ms,
+                    prior_snapshot=prior_snapshot,
+                    outcome=outcome,
+                )
+                return result
 
         with _maybe_perf_span(perf, 'fetch_chain'):
             if len(expiry_dates) == 1:
@@ -10986,7 +11114,7 @@ def refresh_options_cache_snapshot(
                 }
                 cache_stored = True
 
-        return {
+        result = {
             'calls': calls,
             'puts': puts,
             'S': S,
@@ -10996,7 +11124,37 @@ def refresh_options_cache_snapshot(
             'fetched_at': fetched_at_ms,
             'meta': meta,
             'cache_stored': cache_stored,
+            'stale': False,
+            'inflight': False,
+            'cache_key_match': True,
+            'cache_age_ms': 0,
+            'cache_usable': bool(cache_stored),
         }
+        result = _annotate_options_cache_refresh_result(
+            result,
+            min_age_ms=min_age_ms,
+            lock_wait_ms=lock_wait_ms,
+            prior_snapshot=prior_snapshot,
+            outcome='fetched_stored' if cache_stored else 'fetched_unusable',
+        )
+        return result
+    finally:
+        lock_held_ms = (time.perf_counter() - lock_held_started) * 1000
+        if result is not None:
+            result['lock_wait_ms'] = float(lock_wait_ms or 0.0)
+            result['lock_held_ms'] = float(lock_held_ms or 0.0)
+            _add_options_cache_refresh_perf(perf, result)
+        else:
+            _add_options_cache_refresh_perf(perf, {
+                'refresh_outcome': 'error',
+                'min_age_ms': min_age_ms,
+                'lock_wait_ms': float(lock_wait_ms or 0.0),
+                'lock_held_ms': float(lock_held_ms or 0.0),
+                'prior_cache_key_match': bool(prior_snapshot and prior_snapshot.get('cache_key_match')),
+                'prior_cache_usable': bool(prior_snapshot and prior_snapshot.get('cache_usable')),
+                'prior_cache_age_ms': prior_snapshot.get('cache_age_ms') if prior_snapshot else None,
+            })
+        _options_cache_refresh_lock.release()
 
 
 def _cleanup_desktop_window_states(now=None):
@@ -21013,6 +21171,21 @@ def index():
             console.log(parts.join(' '));
         }
 
+        function parseGexJsonResponse(response, routeName, detail) {
+            const status = response && response.status;
+            return response.text().then(text => {
+                const parsePerf = gexPerfStart('parse:' + routeName, Object.assign({ status, chars: text.length }, detail || {}));
+                try {
+                    const parsed = text ? JSON.parse(text) : {};
+                    gexPerfEnd(parsePerf, { ok: true });
+                    return parsed;
+                } catch (e) {
+                    gexPerfEnd(parsePerf, { error: true });
+                    throw e;
+                }
+            });
+        }
+
         function ensureGexLongTaskObserver() {
             if (gexLongTaskObserverStarted || !isGexPerfTraceEnabled() || typeof PerformanceObserver === 'undefined') return;
             try {
@@ -21990,9 +22163,16 @@ def index():
          * of appending the raw 1-min bar (which would render as a tiny sliver).
          */
         function applyRealtimeCandle(candle) {
-            if (!tvCandleSeries) return;
+            const realtimeCandlePerf = gexPerfStart('applyRealtimeCandle');
+            if (!tvCandleSeries) {
+                gexPerfEnd(realtimeCandlePerf, { skipped: 'no_series' });
+                return;
+            }
             const bucketStart = tvBucketStartForUnixSec(candle.time);
-            if (!Number.isFinite(bucketStart)) return;
+            if (!Number.isFinite(bucketStart)) {
+                gexPerfEnd(realtimeCandlePerf, { skipped: 'bad_bucket' });
+                return;
+            }
 
             function rollInto(arr) {
                 const lastIdx = arr.length - 1;
@@ -22073,6 +22253,7 @@ def index():
             scheduleTVStrikeOverlayDraw();
             if (displayRoll.isNew) scheduleTVSessionCalendarOverlaySettleDraw();
             tvResolveDeferredSessionFocus();
+            gexPerfEnd(realtimeCandlePerf, { new_bar: !!displayRoll.isNew, time: displayBar.time });
         }
 
         // --- Fullscreen chart support ---
@@ -23169,43 +23350,48 @@ def index():
             })
             .then(response => {
                 gexPerfEnd(updateFetchPerf, { status: response.status });
-                return response.json();
+                return parseGexJsonResponse(response, '/update', { ticker, expiries: expiry.length });
             })
             .then(data => {
-                if (data.error) {
-                    showError(data.error);
-                    // Pause streaming on persistent error
-                    if (isStreaming) {
-                        toggleStreaming();
+                const updateApplyPerf = gexPerfStart('apply:/update', { ticker, expiries: expiry.length, error: !!(data && data.error) });
+                try {
+                    if (data.error) {
+                        showError(data.error);
+                        // Pause streaming on persistent error
+                        if (isStreaming) {
+                            toggleStreaming();
+                        }
+                        return;
                     }
-                    return;
-                }
-                
-                lastData = data;  // Update before rendering so popout windows get fresh data
-                _lastKeyLevels = data ? (data.key_levels || null) : null;
-                _lastKeyLevels0dte = data ? (data.key_levels_0dte || null) : null;
-                _lastStats0dte = data ? (data.stats_0dte || null) : null;
-                renderTraderStats(data ? (data.trader_stats || null) : null);
-                updateCharts(data, topOiContextKey);
-                updatePriceInfo(data.price_info);
-                redrawGexScope();
-                _lastAnalyticsCacheContextKey = analyticsCacheContextKey;
-                if (!isTradeRailCollapsed()) {
-                    requestTradeChain({
-                        force: true,
-                        minIntervalMs: shouldRefreshTradeChainCache ? 0 : TRADE_CHAIN_AUTO_REFRESH_MS,
-                        refreshCache: shouldRefreshTradeChainCache,
-                    });
-                }
-                // Options cache is now populated — refresh price levels immediately.
-                // This fixes the delay where levels were missing right after a ticker change
-                // because /update_price fired before the options chain was cached.
-                // Gate on ticker-change / first-load only: running this every tick
-                // forces a full setData rebuild at 1Hz, which flashes the candle and
-                // level lines as the axis snaps back to the historical-only snapshot.
-                if (shouldRefreshPriceLevels && isChartVisible('price')) {
-                    _priceHistoryLastKey = ''; // force cache-miss so fetchPriceHistory re-fetches
-                    fetchPriceHistory(true);
+
+                    lastData = data;  // Update before rendering so popout windows get fresh data
+                    _lastKeyLevels = data ? (data.key_levels || null) : null;
+                    _lastKeyLevels0dte = data ? (data.key_levels_0dte || null) : null;
+                    _lastStats0dte = data ? (data.stats_0dte || null) : null;
+                    renderTraderStats(data ? (data.trader_stats || null) : null);
+                    updateCharts(data, topOiContextKey);
+                    updatePriceInfo(data.price_info);
+                    redrawGexScope();
+                    _lastAnalyticsCacheContextKey = analyticsCacheContextKey;
+                    if (!isTradeRailCollapsed()) {
+                        requestTradeChain({
+                            force: true,
+                            minIntervalMs: shouldRefreshTradeChainCache ? 0 : TRADE_CHAIN_AUTO_REFRESH_MS,
+                            refreshCache: shouldRefreshTradeChainCache,
+                        });
+                    }
+                    // Options cache is now populated — refresh price levels immediately.
+                    // This fixes the delay where levels were missing right after a ticker change
+                    // because /update_price fired before the options chain was cached.
+                    // Gate on ticker-change / first-load only: running this every tick
+                    // forces a full setData rebuild at 1Hz, which flashes the candle and
+                    // level lines as the axis snaps back to the historical-only snapshot.
+                    if (shouldRefreshPriceLevels && isChartVisible('price')) {
+                        _priceHistoryLastKey = ''; // force cache-miss so fetchPriceHistory re-fetches
+                        fetchPriceHistory(true);
+                    }
+                } finally {
+                    gexPerfEnd(updateApplyPerf, { charts: true });
                 }
             })
             .catch(error => {
@@ -31837,6 +32023,9 @@ def index():
             orderPollTimer: null,
             orderPollInFlight: false,
             lastOrderPollAt: 0,
+            orderPollLastDurationMs: 0,
+            orderPollSlowCount: 0,
+            orderPollBackoffUntil: 0,
             lastChainRequestAt: 0,
             cancelLoadingId: '',
             replacingOrderId: '',
@@ -32632,11 +32821,29 @@ def index():
                 tradeRailState.orderPollTimer = null;
             }
         }
+        function updateTradeOrderPollBackoff(durationMs, failed = false) {
+            const elapsed = Number(durationMs);
+            tradeRailState.orderPollLastDurationMs = Number.isFinite(elapsed) ? elapsed : 0;
+            if (failed || (Number.isFinite(elapsed) && elapsed >= 2000)) {
+                tradeRailState.orderPollSlowCount = Math.min(4, (Number(tradeRailState.orderPollSlowCount) || 0) + 1);
+                const baseDelay = failed ? 4000 : 3000;
+                const backoffMs = Math.min(failed ? 16000 : 12000, baseDelay * tradeRailState.orderPollSlowCount);
+                tradeRailState.orderPollBackoffUntil = Date.now() + backoffMs;
+                return backoffMs;
+            }
+            if (Number.isFinite(elapsed) && elapsed < 1500) {
+                tradeRailState.orderPollSlowCount = 0;
+                tradeRailState.orderPollBackoffUntil = 0;
+            }
+            return 0;
+        }
         function scheduleTradeOrderPolling(delayMs) {
             stopTradeOrderPolling();
             if (!shouldPollTradeOrders()) return;
             const active = hasTradeOrderPollingIntents();
-            const delay = Number.isFinite(Number(delayMs)) ? Number(delayMs) : (active ? 1500 : 4000);
+            let delay = Number.isFinite(Number(delayMs)) ? Number(delayMs) : (active ? 1500 : 4000);
+            const backoffRemaining = Math.max(0, Number(tradeRailState.orderPollBackoffUntil || 0) - Date.now());
+            if (backoffRemaining > delay) delay = backoffRemaining;
             tradeRailState.orderPollTimer = setTimeout(() => {
                 tradeRailState.orderPollTimer = null;
                 if (!shouldPollTradeOrders()) return;
@@ -33031,25 +33238,46 @@ def index():
                 tradeRailState.liveQuoteEventSource = source;
                 tradeRailState.liveQuoteSymbol = symbol;
                 source.onmessage = event => {
+                    const quoteApplyPerf = gexPerfStart('applyTradeSelectedQuoteMessage', { symbol: symbol ? 1 : 0 });
+                    const rawMessage = event.data || '{}';
+                    const quoteParsePerf = gexPerfStart('selectedQuote:parse', { chars: rawMessage.length });
+                    let msg = null;
                     try {
-                        const msg = JSON.parse(event.data || '{}');
+                        msg = JSON.parse(rawMessage);
+                        gexPerfEnd(quoteParsePerf, { type: msg.type || '' });
                         if (msg.type === 'connected') {
                             tradeRailState.liveQuoteStreamStatus = 'connected';
                             tradeRailState.liveQuoteLastErrorAt = 0;
+                            gexPerfEnd(quoteApplyPerf, { skipped: 'connected' });
                             return;
                         }
-                        if (msg.type === 'heartbeat') return;
-                        if (msg.type !== 'option_quote' || msg.contract_symbol !== tradeRailState.selectedSymbol) return;
+                        if (msg.type === 'heartbeat') {
+                            gexPerfEnd(quoteApplyPerf, { skipped: 'heartbeat' });
+                            return;
+                        }
+                        if (msg.type !== 'option_quote' || msg.contract_symbol !== tradeRailState.selectedSymbol) {
+                            gexPerfEnd(quoteApplyPerf, { skipped: 'stale_or_other', type: msg.type || '' });
+                            return;
+                        }
+                        const mergePerf = gexPerfStart('selectedQuote:merge');
                         const mergedQuote = mergeTradeLiveQuoteMessage(msg);
+                        gexPerfEnd(mergePerf);
+                        const signaturePerf = gexPerfStart('selectedQuote:signature');
                         const nextSignature = getTradeLiveQuoteOverrideSignature(mergedQuote);
                         const quoteChanged = nextSignature !== tradeRailState.liveQuoteSignature;
+                        gexPerfEnd(signaturePerf, { changed: quoteChanged });
+                        const statePerf = gexPerfStart('selectedQuote:state');
                         tradeRailState.liveSelectedQuote = mergedQuote;
                         tradeRailState.liveQuoteSignature = nextSignature;
                         tradeRailState.liveQuoteStreamStatus = 'live';
                         tradeRailState.liveQuoteLastErrorAt = 0;
                         if (quoteChanged) scheduleTradeActiveTraderRender();
+                        gexPerfEnd(statePerf, { scheduled: quoteChanged });
+                        gexPerfEnd(quoteApplyPerf, { changed: quoteChanged });
                     } catch (e) {
-                        console.warn('Selected option quote stream parse failed', e);
+                        gexPerfEnd(quoteParsePerf, { error: true });
+                        gexPerfEnd(quoteApplyPerf, { error: true });
+                        console.warn('Selected option quote stream handling failed', e);
                     }
                 };
                 source.onerror = () => {
@@ -35980,12 +36208,18 @@ def index():
             tradeRailState.ordersError = '';
             tradeRailState.ordersRequestKey = key;
             if (!silent) renderTradeOrders();
+            const orderRequestStarted = performance.now();
+            const orderFetchPerf = gexPerfStart('fetch:/trade/orders', { poll: !!options.poll, silent });
             fetch('/trade/orders', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ account_hash: tradeRailState.accountHash, ticker, contract_symbol: symbol || '' }),
             })
-            .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+            .then(r => {
+                gexPerfEnd(orderFetchPerf, { status: r.status });
+                return parseGexJsonResponse(r, '/trade/orders', { poll: !!options.poll })
+                    .then(d => ({ ok: r.ok, data: d }));
+            })
             .then(({ ok, data }) => {
                 if (tradeRailState.ordersRequestKey !== key) {
                     if (silent) tradeRailState.orderPollInFlight = false;
@@ -35993,16 +36227,26 @@ def index():
                     return;
                 }
                 if (!ok || data.error) throw new Error(data.error || 'Order lookup unavailable');
-                tradeRailState.orders = Array.isArray(data.orders) ? data.orders : [];
-                tradeRailState.ordersLoading = false;
-                tradeRailState.orderPollInFlight = false;
-                tradeRailState.lastOrderPollAt = Date.now();
-                tradeRailState.ordersError = '';
-                reconcileTradeOrderIntentsWithOrders(tradeRailState.orders);
-                renderTradeOrders();
-                scheduleTradeOrderPolling();
+                const orderApplyPerf = gexPerfStart('apply:/trade/orders', { orders: Array.isArray(data.orders) ? data.orders.length : 0 });
+                try {
+                    tradeRailState.orders = Array.isArray(data.orders) ? data.orders : [];
+                    tradeRailState.ordersLoading = false;
+                    tradeRailState.orderPollInFlight = false;
+                    tradeRailState.lastOrderPollAt = Date.now();
+                    tradeRailState.ordersError = '';
+                    reconcileTradeOrderIntentsWithOrders(tradeRailState.orders);
+                    renderTradeOrders();
+                    const backoffMs = updateTradeOrderPollBackoff(performance.now() - orderRequestStarted, false);
+                    scheduleTradeOrderPolling(backoffMs || undefined);
+                } finally {
+                    gexPerfEnd(orderApplyPerf, {
+                        poll_elapsed_ms: tradeRailState.orderPollLastDurationMs.toFixed(1),
+                        backoff_ms: Math.max(0, Number(tradeRailState.orderPollBackoffUntil || 0) - Date.now()).toFixed(0),
+                    });
+                }
             })
             .catch(err => {
+                gexPerfEnd(orderFetchPerf, { error: true });
                 if (tradeRailState.ordersRequestKey !== key) {
                     if (silent) tradeRailState.orderPollInFlight = false;
                     else tradeRailState.ordersLoading = false;
@@ -36013,7 +36257,8 @@ def index():
                 tradeRailState.orderPollInFlight = false;
                 tradeRailState.ordersError = err.message || 'Order lookup unavailable';
                 renderTradeOrders();
-                scheduleTradeOrderPolling();
+                const backoffMs = updateTradeOrderPollBackoff(performance.now() - orderRequestStarted, true);
+                scheduleTradeOrderPolling(backoffMs || undefined);
             });
         }
         function requestTradeAccounts(options = {}) {
@@ -36290,19 +36535,29 @@ def index():
             })
             .then(r => {
                 gexPerfEnd(tradeChainPerf, { status: r.status });
-                return r.json().then(d => ({ ok: r.ok, status: r.status, data: d }));
+                return parseGexJsonResponse(r, '/trade_chain', { refresh_cache: refreshCache })
+                    .then(d => ({ ok: r.ok, status: r.status, data: d }));
             })
             .then(({ ok, data }) => {
                 if (!ok || data.error) throw new Error(data.error || 'Trade chain request failed');
-                tradeRailState.payload = data;
-                if (data.strike_profiles) mergeStrikeOverlayProfiles(data.strike_profiles, 'fast-chain');
-                const expiries = Array.isArray(data.expiries) ? data.expiries : [];
-                const stillAvailable = tradeRailState.expiry && expiries.includes(tradeRailState.expiry);
-                tradeRailState.expiry = stillAvailable
-                    ? tradeRailState.expiry
-                    : ((data.selected_expiries && data.selected_expiries[0]) || expiries[0] || tradeRailState.expiry || '');
-                tradeRailState.loading = false;
-                renderTradeRail();
+                const applyPerf = gexPerfStart('apply:/trade_chain', {
+                    contracts: Array.isArray(data.contracts) ? data.contracts.length : 0,
+                    refresh_outcome: data.cache_meta && data.cache_meta.refresh_outcome,
+                    stale: data.cache_meta && data.cache_meta.stale,
+                });
+                try {
+                    tradeRailState.payload = data;
+                    if (data.strike_profiles) mergeStrikeOverlayProfiles(data.strike_profiles, 'fast-chain');
+                    const expiries = Array.isArray(data.expiries) ? data.expiries : [];
+                    const stillAvailable = tradeRailState.expiry && expiries.includes(tradeRailState.expiry);
+                    tradeRailState.expiry = stillAvailable
+                        ? tradeRailState.expiry
+                        : ((data.selected_expiries && data.selected_expiries[0]) || expiries[0] || tradeRailState.expiry || '');
+                    tradeRailState.loading = false;
+                    renderTradeRail();
+                } finally {
+                    gexPerfEnd(applyPerf, { rendered: true });
+                }
             })
             .catch(err => {
                 gexPerfEnd(tradeChainPerf, { error: true });
@@ -37857,13 +38112,34 @@ def index():
         // Standalone price chart renderer — called by /update_price without touching other charts.
         function applyPriceData(priceJson) {
             if (!isChartVisible('price')) return;
+            const priceApplyDataPerf = gexPerfStart('applyPriceData');
             lastPriceData = priceJson; // keep for popout push
-            const priceContainer = ensurePriceChartDom();
-            if (!priceContainer) return;
-            showPriceChartUI();
-            const parsed = typeof priceJson === 'string' ? JSON.parse(priceJson) : priceJson;
-            if (!parsed.error) {
-                renderTVPriceChart(parsed);
+            try {
+                const priceContainer = ensurePriceChartDom();
+                if (!priceContainer) {
+                    gexPerfEnd(priceApplyDataPerf, { skipped: 'no_container' });
+                    return;
+                }
+                showPriceChartUI();
+                const pricePayloadParsePerf = gexPerfStart('parse:price_chart_payload', { chars: typeof priceJson === 'string' ? priceJson.length : 0 });
+                let parsed;
+                try {
+                    parsed = typeof priceJson === 'string' ? JSON.parse(priceJson) : priceJson;
+                    gexPerfEnd(pricePayloadParsePerf, { error: !!(parsed && parsed.error) });
+                } catch (e) {
+                    gexPerfEnd(pricePayloadParsePerf, { error: true });
+                    throw e;
+                }
+                if (!parsed.error) {
+                    const renderPricePerf = gexPerfStart('renderTVPriceChart', { source: 'update_price' });
+                    try {
+                        renderTVPriceChart(parsed);
+                    } finally {
+                        gexPerfEnd(renderPricePerf);
+                    }
+                }
+            } finally {
+                gexPerfEnd(priceApplyDataPerf);
             }
         }
 
@@ -39659,20 +39935,25 @@ def index():
             })
             .then(r => {
                 gexPerfEnd(priceFetchPerf, { status: r.status });
-                return r.json();
+                return parseGexJsonResponse(r, '/update_price', { force: !!force, timeframe: payload.timeframe });
             })
             .then(priceResp => {
-                _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
-                _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
-                if (!priceResp.error && priceResp.price) {
-                    applyPriceData(priceResp.price);
-                } else {
-                    renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
-                }
-                if (priceResp && priceResp.top_oi && requestTopOIContextKey === getTopOIContextKey()) {
-                    _lastTopOI = priceResp.top_oi;
-                    _lastTopOIContextKey = requestTopOIContextKey;
-                    if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
+                const priceApplyPerf = gexPerfStart('apply:/update_price', { has_price: !!(priceResp && priceResp.price), error: !!(priceResp && priceResp.error) });
+                try {
+                    _lastSessionLevels = priceResp ? (priceResp.session_levels || null) : null;
+                    _lastSessionLevelsMeta = priceResp ? (priceResp.session_levels_meta || null) : null;
+                    if (!priceResp.error && priceResp.price) {
+                        applyPriceData(priceResp.price);
+                    } else {
+                        renderSessionLevels(_lastSessionLevels, getSessionLevelSettingsFromDom());
+                    }
+                    if (priceResp && priceResp.top_oi && requestTopOIContextKey === getTopOIContextKey()) {
+                        _lastTopOI = priceResp.top_oi;
+                        _lastTopOIContextKey = requestTopOIContextKey;
+                        if (tvActiveInds.has('oi')) renderTopOI(_lastTopOI);
+                    }
+                } finally {
+                    gexPerfEnd(priceApplyPerf, { applied: true });
                 }
             })
             .catch(err => {
@@ -39704,7 +39985,12 @@ def index():
 
                 const priceData = typeof data.price === 'string' ? JSON.parse(data.price) : data.price;
                 if (!priceData.error) {
-                    renderTVPriceChart(priceData);
+                    const renderPricePerf = gexPerfStart('renderTVPriceChart', { source: 'updateCharts' });
+                    try {
+                        renderTVPriceChart(priceData);
+                    } finally {
+                        gexPerfEnd(renderPricePerf);
+                    }
                 }
             } else if (!selectedCharts.price) {
                 const priceContainer = document.querySelector('.price-chart-container');
@@ -41877,7 +42163,7 @@ def trade_chain():
             )
             perf.add('cache_refresh_hit', cache_snapshot.get('cache_hit'))
             perf.add('cache_refresh_fetched', cache_snapshot.get('fetched'))
-            if not cache_snapshot.get('cache_hit') and not cache_snapshot.get('cache_stored'):
+            if not cache_snapshot.get('cache_hit') and not cache_snapshot.get('cache_stored') and not cache_snapshot.get('stale'):
                 if cache_snapshot.get('S') is None:
                     cache_refresh_error = 'Cache refresh did not return a current price.'
                 else:
@@ -41916,10 +42202,19 @@ def trade_chain():
     payload['cache_meta'] = {
         'cache_hit': bool(cache_snapshot.get('cache_hit')) if cache_snapshot else False,
         'fetched': bool(cache_snapshot.get('fetched')) if cache_snapshot else False,
+        'stale': bool(cache_snapshot.get('stale')) if cache_snapshot else False,
+        'inflight': bool(cache_snapshot.get('inflight')) if cache_snapshot else False,
         'stored': bool(cache_snapshot.get('cache_stored')) if cache_snapshot else False,
         'fetched_at_ms': meta.get('fetched_at_ms'),
         'cache_key': meta.get('cache_key'),
         'requested_cache_key': cache_snapshot.get('cache_key') if cache_snapshot else None,
+        'refresh_outcome': cache_snapshot.get('refresh_outcome') if cache_snapshot else None,
+        'cache_age_ms': cache_snapshot.get('cache_age_ms') if cache_snapshot else None,
+        'min_age_ms': cache_snapshot.get('min_age_ms') if cache_snapshot else None,
+        'lock_wait_ms': cache_snapshot.get('lock_wait_ms') if cache_snapshot else None,
+        'lock_held_ms': cache_snapshot.get('lock_held_ms') if cache_snapshot else None,
+        'prior_cache_age_ms': cache_snapshot.get('prior_cache_age_ms') if cache_snapshot else None,
+        'prior_cache_usable': cache_snapshot.get('prior_cache_usable') if cache_snapshot else None,
         'refresh_error': cache_refresh_error,
     }
     if refresh_cache:
@@ -42029,6 +42324,7 @@ def trade_orders():
         status = str(status or '').strip().upper() or None
     perf.add('status_filter', status or 'all')
 
+    schwab_call_started = time.perf_counter()
     try:
         with perf.span('schwab_call'):
             response = client.account_orders(
@@ -42039,7 +42335,11 @@ def trade_orders():
                 status=status,
             )
     except Exception as e:
+        schwab_call_ms = (time.perf_counter() - schwab_call_started) * 1000
+        perf.add('schwab_call_slow', schwab_call_ms >= 2000)
         return _perf_finish_response(perf, _trade_api_error('Order lookup failed.', 502, e), error='schwab_call')
+    schwab_call_ms = (time.perf_counter() - schwab_call_started) * 1000
+    perf.add('schwab_call_slow', schwab_call_ms >= 2000)
     if not getattr(response, 'ok', False):
         return _perf_finish_response(perf, _trade_api_error(
             f"Order lookup failed with Schwab status {getattr(response, 'status_code', 'unknown')}.",

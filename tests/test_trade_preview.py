@@ -2,6 +2,7 @@ import importlib
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -343,6 +344,53 @@ class TradePreviewEndpointTest(unittest.TestCase):
 
         journal = self.app.get('/trade/journal').get_json()
         self.assertEqual(journal['events'][0]['id'], event['id'])
+
+
+class OptionsCacheRefreshSnapshotTest(unittest.TestCase):
+    def tearDown(self):
+        ezoptionsschwab._options_cache.clear()
+        try:
+            if ezoptionsschwab._options_cache_refresh_lock.locked():
+                ezoptionsschwab._options_cache_refresh_lock.release()
+        except RuntimeError:
+            pass
+
+    def test_refresh_returns_same_key_stale_snapshot_when_lock_busy(self):
+        ticker = 'SPY'
+        expiry_dates = ['2026-05-01']
+        cache_key = ezoptionsschwab._build_options_cache_key(ticker, expiry_dates)
+        ezoptionsschwab._options_cache.clear()
+        ezoptionsschwab._options_cache[ticker] = {
+            'S': 721.85,
+            'calls': pd.DataFrame([{'strike': 722.0}]),
+            'puts': pd.DataFrame(),
+            'meta': {
+                'ticker': ticker,
+                'expiry_dates': expiry_dates,
+                'exposure_metric': 'Open Interest',
+                'delta_adjusted': False,
+                'calculate_in_notional': True,
+                'fetched_at_ms': int(time.time() * 1000) - 10_000,
+                'cache_key': cache_key,
+            },
+        }
+        self.assertTrue(ezoptionsschwab._options_cache_refresh_lock.acquire(blocking=False))
+        with patch.object(ezoptionsschwab, 'fetch_options_for_date') as fetch_chain, \
+             patch.object(ezoptionsschwab, 'get_current_price') as get_price:
+            snapshot = ezoptionsschwab.refresh_options_cache_snapshot(
+                ticker,
+                expiry_dates,
+                min_age_ms=1_000,
+            )
+        self.assertFalse(fetch_chain.called)
+        self.assertFalse(get_price.called)
+        self.assertFalse(snapshot['cache_hit'])
+        self.assertFalse(snapshot['fetched'])
+        self.assertTrue(snapshot['stale'])
+        self.assertTrue(snapshot['inflight'])
+        self.assertEqual(snapshot['refresh_outcome'], 'stale_inflight')
+        self.assertEqual(snapshot['cache_key'], cache_key)
+        self.assertGreaterEqual(snapshot['cache_age_ms'], 1_000)
 
 
 class TradePlaceOrderEndpointTest(unittest.TestCase):
