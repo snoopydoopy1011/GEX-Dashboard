@@ -1,6 +1,6 @@
 # GEX Dashboard - Scalping Fast Lanes Follow-Up Plan
 
-**Status:** Proposed follow-up implementation plan  
+**Status:** Complete — 7 of 7 stages landed on `codex/scalping-fast-lanes-followup`; market-hours/browser regression pass still pending
 **Created:** 2026-05-06  
 **Primary file:** `ezoptionsschwab.py`  
 **Related plan:** `docs/SCALPING_PERFORMANCE_OPTIMIZATION_PLAN.md`  
@@ -1219,9 +1219,50 @@ Notes:
 - The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
 - The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
 
+### Stage 7 - Final cleanup sweep landed
+
+Branch: `codex/scalping-fast-lanes-followup`
+Commit subject: `chore(perf): remove dead strike rail code`
+
+What changed:
+
+- Ran the final cleanup greps for removed Strike Inspect / old side-panel anchors.
+- Confirmed `ezoptionsschwab.py` has no live matches for the removed rail, side-panel, resize/collapse, active strike-rail tab, `gex_panel`, or `create_gex_side_panel` anchors.
+- Left `gexScope` intact because it still controls the active all-vs-0DTE overview/key-level scope and is explicitly called out in §5 Stage 7 as a careful-review item.
+- Updated this plan status to complete.
+
+Tricky parts:
+
+- No code deletion was needed in Stage 7 because Stage 1 already removed the live Strike Inspect implementation and later stages kept the greps clean.
+- The broader `docs/` grep still returns historical plan references by design; those are not live code paths.
+
+Validation completed:
+
+```bash
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+rg -n "gex-side-panel|gex-column|gex-col-header|gex-resize-handle|Strike Inspect|strike-inspect|strike-rail|renderStrikeRailPanel|syncGexPanelYAxisToTV|scheduleGexPanelSync|create_gex_side_panel" ezoptionsschwab.py
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+```
+
+Cleanup grep notes:
+
+- `rg -n "gex-side-panel|gex-column|gex-col-header|gex-resize-handle|Strike Inspect|strike-inspect|strike-rail|active_strike_rail_tab|renderStrikeRailPanel|create_gex_side_panel|gex_panel" ezoptionsschwab.py docs` returns docs-only historical references.
+- `rg -n "_strikeRailLastPayloadByTab|gex_panel|activeStrikeRailTab|STRIKE_RAIL|strikeRail|sidePanelCollapsed|sidePanelWidthPx" ezoptionsschwab.py` returns no matches.
+- `rg -n "gexScope" ezoptionsschwab.py` returns live overview-scope code and was intentionally preserved.
+
+Notes:
+
+- `py_compile` passed with the pre-existing inline-template `SyntaxWarning: invalid escape sequence '\('`.
+- Inline script extraction found 5 scripts, and `node --check /tmp/gex-inline-scripts.js` passed.
+- The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
+- The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
+
 Next stage:
 
-- Stage 7 should run the final cleanup greps, remove any remaining dead Strike Inspect / old side-panel compatibility code if found, and close the plan if only historical docs still match.
+- None in this implementation plan. Remaining follow-up is live market-hours/browser regression validation: route cadence, selected-contract SSE behavior, no-overlap fast chain refresh, and visual checks with Active Trader open.
 
 ---
 
