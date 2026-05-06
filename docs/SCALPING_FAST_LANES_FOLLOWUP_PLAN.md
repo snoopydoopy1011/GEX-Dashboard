@@ -1016,9 +1016,46 @@ Notes:
 - `py_compile` passed with the pre-existing inline-template `SyntaxWarning: invalid escape sequence '\('`.
 - The Stage 1 cleanup grep returned no matches in `ezoptionsschwab.py`; broader greps still match historical plan docs by design.
 
+### Stage 2 - Explicit lane constants landed
+
+Branch: `codex/scalping-fast-lanes-followup`
+Commit subject: `perf(update): name fast and slow dashboard lanes`
+
+What changed:
+
+- Replaced the older `DASHBOARD_UPDATE_INTERVAL_MS` / `DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS` naming with an explicit `ANALYTICS_REFRESH_MS` slow-lane constant.
+- Added `FAST_CHAIN_REFRESH_MS` and made `TRADE_CHAIN_AUTO_REFRESH_MS` an alias of that lane, starting conservatively at 5 seconds in both desktop and browser shells.
+- Renamed the auto-update interval handle to `analyticsUpdateInterval` and added `startAnalyticsAutoRefresh()` / `stopAnalyticsAutoRefresh()` helpers so pause/resume and unload cleanup name the timer they control.
+- Kept the underlying price SSE path, selected Active Trader quote SSE path, and the 1-second signature-gated Active Trader stale-check path intact.
+- Added a displayed-Plotly resize guard for secondary tabs and fullscreen/window resize paths so hidden Plotly divs are not resized while inactive tabs are `display: none`.
+
+Tricky parts:
+
+- This stage intentionally does not add the Stage 3/4 cache-refresh helper yet, so the fast chain lane still reads the existing cached `/trade_chain` payload. The selected option bid/ask/last lane remains live through SSE between chain snapshots.
+- Pausing Auto-Update now stops the analytics timer, fast chain timer, and underlying price stream through named helpers. The selected option quote stream is still controlled by its existing selection/collapse lifecycle, which preserves the live Active Trader quote path requested for scalping.
+- The reported PySide terminal error (`Resize must be passed a displayed plot div element`) came from Plotly resize/react work against hidden secondary-tab containers. Hidden chart renders now disable Plotly's responsive resize hook, and explicit resize calls skip non-displayed plots.
+
+Validation completed:
+
+```bash
+python3 -m py_compile ezoptionsschwab.py
+git diff --check
+python3 -c "import re, pathlib, ezoptionsschwab as m; html=m.app.test_client().get('/').get_data(as_text=True); scripts=re.findall(r'<script[^>]*>(.*?)</script>', html, re.S|re.I); pathlib.Path('/tmp/gex-inline-scripts.js').write_text('\\n;\\n'.join(scripts)); print('scripts', len(scripts))"
+node --check /tmp/gex-inline-scripts.js
+rg -n "gex-side-panel|gex-column|gex-col-header|gex-resize-handle|Strike Inspect|strike-inspect|strike-rail|renderStrikeRailPanel|syncGexPanelYAxisToTV|scheduleGexPanelSync|create_gex_side_panel" ezoptionsschwab.py
+python3 -m unittest tests.test_session_levels tests.test_trade_preview
+```
+
+Notes:
+
+- `py_compile` passed with the pre-existing inline-template `SyntaxWarning: invalid escape sequence '\('`.
+- Inline script extraction found 5 scripts, and `node --check /tmp/gex-inline-scripts.js` passed.
+- The targeted Strike Inspect / gex-side-panel grep returned no matches in `ezoptionsschwab.py`.
+- The focused unit suite ran 36 tests successfully. The test harness printed the expected `disabled in tests` Schwab client messages.
+
 Next stage:
 
-- Stage 2 should introduce explicit lane constants before endpoint/cache work.
+- Stage 3 should extract the shared options cache refresh helper before changing endpoint/cache behavior.
 
 ---
 

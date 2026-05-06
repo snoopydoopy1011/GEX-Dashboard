@@ -20316,7 +20316,7 @@ def index():
 
     <script>
         let charts = {};
-        let updateInterval;
+        let analyticsUpdateInterval;
         let tradeChainAutoRefreshInterval;
         let lastUpdateTime = 0;
         let callColor = '#10B981';
@@ -20783,10 +20783,10 @@ def index():
         // Debounce timer for Plotly price-line updates (avoid flooding relayout calls)
         let plotlyPriceUpdateTimer = null;
         const IS_DESKTOP_SHELL = !!window.GEX_DESKTOP;
-        const DASHBOARD_UPDATE_INTERVAL_MS = IS_DESKTOP_SHELL ? 4000 : 2500;
-        const DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS = DASHBOARD_UPDATE_INTERVAL_MS;
-        const TRADE_CHAIN_AUTO_REFRESH_MS = IS_DESKTOP_SHELL ? 5000 : 2500;
+        const ANALYTICS_REFRESH_MS = 60000;
+        const FAST_CHAIN_REFRESH_MS = 5000;
         const PRICE_HISTORY_REFRESH_MS = 30000;
+        const TRADE_CHAIN_AUTO_REFRESH_MS = FAST_CHAIN_REFRESH_MS;
         const PLOTLY_PRICE_LINE_MIN_INTERVAL_MS = IS_DESKTOP_SHELL ? 1000 : 500;
         let pendingRealtimeQuote = null;
         let pendingRealtimeQuoteFrame = null;
@@ -21929,6 +21929,33 @@ def index():
             });
         }
 
+        function getPlotlyDiv(target) {
+            if (!target) return null;
+            if (target.classList && target.classList.contains('js-plotly-plot')) return target;
+            return (target.querySelector && target.querySelector('.js-plotly-plot')) || null;
+        }
+
+        function isDisplayedElement(el) {
+            return !!(
+                el &&
+                el.isConnected &&
+                el.getClientRects &&
+                el.getClientRects().length &&
+                el.offsetWidth > 0 &&
+                el.offsetHeight > 0
+            );
+        }
+
+        function resizePlotlyIfDisplayed(target) {
+            if (!window.Plotly || !Plotly.Plots) return;
+            const plot = getPlotlyDiv(target);
+            if (!isDisplayedElement(plot)) return;
+            try {
+                const resized = Plotly.Plots.resize(plot);
+                if (resized && typeof resized.catch === 'function') resized.catch(() => {});
+            } catch (e) {}
+        }
+
         function toggleChartFullscreen(container) {
             if (!container) return;
             const isFullscreen = container.classList.contains('fullscreen');
@@ -21950,8 +21977,7 @@ def index():
             // Let Plotly know about the size change; also trigger TV chart resize
             requestAnimationFrame(() => {
                 document.querySelectorAll('.chart-container').forEach(el => {
-                    const plot = el.querySelector('.js-plotly-plot');
-                    if (plot) { try { Plotly.Plots.resize(plot); } catch(e) {} }
+                    resizePlotlyIfDisplayed(el);
                 });
                 // Resize TradingView price chart
                 const tvContainer = document.getElementById('price-chart');
@@ -21986,8 +22012,7 @@ def index():
                     syncFullscreenActionControls(fs);
                     requestAnimationFrame(() => {
                         document.querySelectorAll('.chart-container').forEach(el => {
-                            const plot = el.querySelector('.js-plotly-plot');
-                            if (plot) { try { Plotly.Plots.resize(plot); } catch(e) {} }
+                            resizePlotlyIfDisplayed(el);
                         });
                         const tvContainer = document.getElementById('price-chart');
                         if (tvPriceChart && tvContainer) {
@@ -22595,7 +22620,12 @@ def index():
   };
   window.addEventListener('resize', function() {
     const el = document.getElementById('popout-plot');
-    if (el && el.querySelector('.js-plotly-plot')) { try { Plotly.Plots.resize(el); } catch(e) {} }
+    if (el && el.style.display !== 'none' && el.getClientRects().length) {
+      try {
+        const resized = Plotly.Plots.resize(el);
+        if (resized && typeof resized.catch === 'function') resized.catch(function() {});
+      } catch(e) {}
+    }
   });
 <\\/script></body></html>`);
             }
@@ -36075,6 +36105,15 @@ def index():
             if (!isStreaming || isTradeRailCollapsed()) return;
             requestTradeChain({ force: true, minIntervalMs: TRADE_CHAIN_AUTO_REFRESH_MS });
         }
+        function startAnalyticsAutoRefresh() {
+            if (analyticsUpdateInterval) clearInterval(analyticsUpdateInterval);
+            analyticsUpdateInterval = setInterval(updateData, ANALYTICS_REFRESH_MS);
+        }
+        function stopAnalyticsAutoRefresh() {
+            if (!analyticsUpdateInterval) return;
+            clearInterval(analyticsUpdateInterval);
+            analyticsUpdateInterval = null;
+        }
         function startTradeChainAutoRefresh() {
             if (tradeChainAutoRefreshInterval) clearInterval(tradeChainAutoRefreshInterval);
             tradeChainAutoRefreshInterval = setInterval(refreshTradeChainForOpenRail, TRADE_CHAIN_AUTO_REFRESH_MS);
@@ -38776,7 +38815,7 @@ def index():
                 const hide = id !== secondaryActiveTab;
                 el.classList.toggle('tab-hidden', hide);
                 if (!hide) {
-                    try { Plotly.Plots.resize(el); } catch (e) {}
+                    resizePlotlyIfDisplayed(el);
                 }
             });
         }
@@ -39592,9 +39631,10 @@ def index():
                             
                             chartData.layout.plot_bgcolor = '#1E1E1E';
                             chartData.layout.paper_bgcolor = '#1E1E1E';
+                            const chartIsDisplayed = isDisplayedElement(container);
                             
                             const config = {
-                                responsive: true,
+                                responsive: chartIsDisplayed,
                                 displayModeBar: true,
                                 modeBarButtonsToRemove: ['lasso2d', 'select2d'],
                                 displaylogo: false,
@@ -39646,8 +39686,7 @@ def index():
             const fsChart = document.querySelector('.chart-container.fullscreen');
             if (fsChart) {
                 requestAnimationFrame(() => {
-                    const plot = fsChart.querySelector('.js-plotly-plot');
-                    if (plot) { try { Plotly.Plots.resize(plot); } catch(e) {} }
+                    resizePlotlyIfDisplayed(fsChart);
                 });
             }
 
@@ -40758,7 +40797,7 @@ def index():
 
         // Auto-update heavy options/analytics at a slower cadence. Live candles
         // and the selected option quote stream stay on their SSE fast lanes.
-        updateInterval = setInterval(updateData, DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS);
+        startAnalyticsAutoRefresh();
         startTradeChainAutoRefresh();
         
         // Handle window resize
@@ -40766,7 +40805,7 @@ def index():
             Object.keys(charts).forEach(chartKey => {
                 const chartElement = document.getElementById(`${chartKey}-chart`);
                 if (chartElement && charts[chartKey]) {
-                    Plotly.Plots.resize(chartElement);
+                    resizePlotlyIfDisplayed(chartElement);
                 }
             });
             scheduleTVDrawingOverlayDraw();
@@ -40777,7 +40816,7 @@ def index():
 
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
-            clearInterval(updateInterval);
+            stopAnalyticsAutoRefresh();
             stopTradeChainAutoRefresh();
             disconnectPriceStream();
             Object.values(charts).forEach(chart => {
@@ -40792,13 +40831,13 @@ def index():
             button.classList.toggle('paused', !isStreaming);
             
             if (isStreaming) {
-                updateInterval = setInterval(updateData, DASHBOARD_ANALYTICS_UPDATE_INTERVAL_MS);
+                startAnalyticsAutoRefresh();
                 startTradeChainAutoRefresh();
                 // Reconnect real-time price stream when resuming
                 const tickerVal = (document.getElementById('ticker').value || '').trim();
                 if (tickerVal) connectPriceStream(tickerVal);
             } else {
-                clearInterval(updateInterval);
+                stopAnalyticsAutoRefresh();
                 stopTradeChainAutoRefresh();
                 // Disconnect real-time price stream when pausing
                 disconnectPriceStream();
