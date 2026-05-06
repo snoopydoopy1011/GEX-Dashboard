@@ -10,7 +10,7 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 
 ## Current State
 
-- Latest validation result: [`SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md)
+- Latest validation result: [`SCALPING_SPEED_RESULTS_2026-05-06_MARKET_HOURS_ATTEMPT_AFTER_CLOSE.md`](../SCALPING_SPEED_RESULTS_2026-05-06_MARKET_HOURS_ATTEMPT_AFTER_CLOSE.md)
 - Latest implementation result: [`SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md)
 - Full live validation checklist: [`SCALPING_SPEED_VALIDATION_PLAN.md`](../SCALPING_SPEED_VALIDATION_PLAN.md)
 - Current implementation branch used for the latest pass: `main`
@@ -20,6 +20,7 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 
 | Doc | Use it for |
 | --- | --- |
+| [`SCALPING_SPEED_RESULTS_2026-05-06_MARKET_HOURS_ATTEMPT_AFTER_CLOSE.md`](../SCALPING_SPEED_RESULTS_2026-05-06_MARKET_HOURS_ATTEMPT_AFTER_CLOSE.md) | After-close market-hours rerun attempt on `main`: route/browser evidence, quote/candle freshness blocked by stale after-hours option quotes, timeframe independence check, expiry/rail stress, and order polling containment. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`](../SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md) | Post-change validation on `main`: 5 min call/put samples, 1 min selected-contract sample, expiry/rail stress, order polling containment, browser attribution, and Contract Helper mixed-expiry cleanup verification. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md`](../SCALPING_SPEED_RESULTS_2026-05-06_ATTRIBUTION_HISTORY_SYNC.md) | Prior implementation and validation result: long-task attribution, event-loop delay tracing, 5 min history-window experiment, 10-day 5 min default, and dashboard expiry-to-trade-rail sync fix. |
 | [`SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md`](../SCALPING_SPEED_RESULTS_2026-05-06_CHART_PASS.md) | Latest chart-pass result, browser trace export, incremental chart update evidence, final route/browser summaries. |
@@ -39,7 +40,9 @@ This folder is the entry point for future scalping speed, fast-lane, and live va
 - The steady-state chart path is incremental. In the latest 5 min 10-day trace, incremental `renderTVPriceChart` was about 4.4 ms and full initial `renderTVPriceChart` was about 116.8 ms.
 - Dashboard expiry changes that remove the trade-rail expiry now immediately clear stale selected contract state, force a trade-chain refresh, reconnect the selected quote stream, and guard against stale quote stream messages.
 - Contract Helper now clears stale old-expiry candidates during dashboard expiry switches and repopulates only when the helper payload matches the selected dashboard expiry.
-- The post-change validation passed fast-lane span targets after hours; a market-hours rerun is still needed for quote-age and candle-freshness pass/fail.
+- The after-close market-hours attempt on 2026-05-06 passed the route/span, expiry-switch, rail-stress, order-containment, and timeframe-independence checks that can be evaluated after hours.
+- A true active option-market rerun is still the only open validation gap for quote-age and candle-freshness pass/fail; no narrow optimization is recommended until that rerun fails with attribution.
+- Timeframe toggles (`1 min -> 5 min -> 1 min`) did not change selected option symbol, bid/mid/ask, last/mark, quote timestamps, quote stream state, or ladder digest in the latest run.
 - If future validation fails on long tasks, start with full chart application (`applyPriceData` / `renderTVPriceChart`) before touching Active Trader, ladder rendering, or `/trade_chain`.
 - Active Trader follow-ups are separate from speed validation: chart timeframe should not drive selected option price, and Auto Send order flow must be investigated with live-order safeguards intact.
 - `/update` should stay isolated unless a trace ties it to stale fast-lane quotes, candle lag, or browser long tasks.

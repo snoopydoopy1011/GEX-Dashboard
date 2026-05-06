@@ -33,7 +33,7 @@ For browser traces, use the in-page Trace button when `GEX_PERF_TRACE=1`. It pos
 
 ## Current Speed Baseline
 
-As of `docs/SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`:
+As of `docs/SCALPING_SPEED_RESULTS_2026-05-06_MARKET_HOURS_ATTEMPT_AFTER_CLOSE.md` and `docs/SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`:
 
 - `GEX_PERF_TRACE=1` raises the browser trace cap to 50,000 events.
 - `browser_long_task` events include attribution detail: nearby app spans, route/apply context, chart apply mode, selected timeframe, selected contract, trade rail state, and visible panel state.
@@ -41,6 +41,9 @@ As of `docs/SCALPING_SPEED_RESULTS_2026-05-06_POST_CHANGE_VALIDATION.md`:
 - The 5 min chart-history default is 10 days. Do not restore the previous 60-day default without a new measured reason.
 - Dashboard expiry changes that remove the current trade-rail expiry should immediately clear stale selected contract state, force `/trade_chain`, reconnect the selected quote stream, and ignore stale stream messages.
 - Contract Helper must not show candidate buttons from an expiry that is no longer selected on the dashboard. During expiry transitions, stale helper candidates should clear until the matching expiry payload arrives.
+- The 2026-05-06 after-close rerun passed route/span, expiry-switch, rail-stress, order-containment, and timeframe-independence checks, but it was not a valid quote-age freshness pass because selected option quotes were already stale after regular option-market hours.
+- Chart timeframe changes should still be treated as independent from Active Trader state; the latest toggle test did not change selected option symbol, bid/mid/ask, last/mark, quote timestamps, quote stream state, or ladder digest.
+- There is no immediate optimization target from the after-close run. The only remaining validation gap is a true active option-market quote-age/candle-freshness rerun.
 - The remaining measured long-task source is full chart application (`applyPriceData` / `renderTVPriceChart`), especially on 1 min history. Do not optimize Active Trader, ladder rendering, or `/trade_chain` unless traces specifically identify them.
 
 ## Protocol Tiers
